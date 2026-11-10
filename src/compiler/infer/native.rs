@@ -21,6 +21,8 @@
 //! does not settle the result, the static backend names the declaration to
 //! add.
 
+use std::collections::HashMap;
+
 use super::ty::{FnTy, Ty};
 
 /// Purpose: This struct holds what a native function is declared to take and
@@ -48,7 +50,24 @@ pub struct NativeSig {
 ///
 /// Outputs: the type, or a message naming what was not understood.
 pub fn parse_type(s: &str) -> Result<Ty, String> {
+    parse_type_in(s, &HashMap::new())
+}
+
+/// Purpose: This function reads one declared type, where a name may also be
+/// a class the package's declarations define.
+///
+/// Inputs:
+/// - `s`: the text, as for [`parse_type`], or a class name.
+/// - `classes`: each class name the package defines, and the name its class
+///   has in the program.
+///
+/// Outputs: the type, or a message naming what was not understood.
+pub fn parse_type_in(s: &str, classes: &HashMap<String, String>) -> Result<Ty, String> {
+    let parse_type = |t: &str| parse_type_in(t, classes);
     let s = s.trim();
+    if let Some(class) = classes.get(s) {
+        return Ok(Ty::Struct(class.clone()));
+    }
     if let Some(inner) = s.strip_suffix('?') {
         return Ok(Ty::opt(parse_type(inner)?));
     }
@@ -151,15 +170,35 @@ pub fn parse_sig(
     args: Option<&[String]>,
     ret: Option<&str>,
 ) -> Result<NativeSig, String> {
+    parse_sig_in(display, args, ret, &HashMap::new())
+}
+
+/// Purpose: This function reads a whole declaration whose types may name the
+/// package's own classes.
+///
+/// Inputs:
+/// - `display`, `args`, `ret`: as for [`parse_sig`].
+/// - `classes`: as for [`parse_type_in`].
+///
+/// Outputs: the signature, or a message naming the function and the type.
+pub fn parse_sig_in(
+    display: &str,
+    args: Option<&[String]>,
+    ret: Option<&str>,
+    classes: &HashMap<String, String>,
+) -> Result<NativeSig, String> {
     let wrap = |e: String| format!("the declaration of {display} in jade.toml: {e}");
     let params = match args {
-        Some(a) => {
-            Some(a.iter().map(|t| parse_type(t)).collect::<Result<Vec<_>, _>>().map_err(wrap)?)
-        }
+        Some(a) => Some(
+            a.iter()
+                .map(|t| parse_type_in(t, classes))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(wrap)?,
+        ),
         None => None,
     };
     let ret = match ret {
-        Some(r) => Some(parse_type(r).map_err(wrap)?),
+        Some(r) => Some(parse_type_in(r, classes).map_err(wrap)?),
         None => None,
     };
     Ok(NativeSig { display: display.to_string(), params, ret, refused: None })

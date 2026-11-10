@@ -2078,7 +2078,10 @@ fn a_negative_convention_on_an_unsigned_return_can_never_fire() {
 
 #[test]
 fn a_c_symbols_jade_signature_follows_the_shims_rewrite() {
-    let sig = |args: &[&str], ret: &str| jade_signature("z", "f", &sym(args, ret));
+    let none = HashMap::new();
+    let sig = |args: &[&str], ret: &str| {
+        jade_signature("z", "f", &sym(args, ret), &none).map(|j| (j.params, j.ret))
+    };
     // A plain call.
     assert_eq!(
         sig(&["int", "str"], "float").unwrap(),
@@ -2089,9 +2092,9 @@ fn a_c_symbols_jade_signature_follows_the_shims_rewrite() {
         sig(&["handle<gzFile_s>", "out_buffer:uint8_t", "int"], "int").unwrap(),
         (vec!["handle<gzFile_s>".into(), "int".into()], "bytes".into())
     );
-    // An out-handle is the result, and the C return is its status.
+    // An out-handle with a void return is the result.
     assert_eq!(
-        sig(&["str", "out_handle:sqlite3"], "int").unwrap(),
+        sig(&["str", "out_handle:sqlite3"], "nil").unwrap(),
         (vec!["str".into()], "handle<sqlite3>".into())
     );
     // A callback goes as a function of its Jade types.
@@ -2099,6 +2102,52 @@ fn a_c_symbols_jade_signature_follows_the_shims_rewrite() {
         sig(&["callback:int(int, const char*)"], "nil").unwrap(),
         (vec!["fn(int, str) -> int".into()], "nil".into())
     );
-    // Several results come back as a record, which the static backend refuses by name.
-    assert!(sig(&["out_scalar:int@a", "out_scalar:int@b"], "nil").is_err());
+}
+
+#[test]
+fn several_results_and_c_structs_come_back_as_records() {
+    let mut structs = HashMap::new();
+    structs.insert(
+        "box_t".to_string(),
+        CStruct {
+            fields: vec![("w".into(), "int".into()), ("name".into(), "array<char>:16".into())],
+            held: false,
+            buffers: Vec::new(),
+        },
+    );
+    // Two outs: a record under the symbol's name, keyed as the shim keys them.
+    let j = jade_signature(
+        "z",
+        "f",
+        &sym(&["out_scalar:int@a", "out_scalar:double@b"], "nil"),
+        &structs,
+    )
+    .unwrap();
+    assert_eq!(j.ret, "f_result");
+    assert_eq!(
+        j.records,
+        vec![(
+            "f_result".to_string(),
+            vec![("a".into(), "int".into()), ("b".into(), "float".into())]
+        )]
+    );
+    // A status beside an out comes back as `ret` and `out`.
+    let j =
+        jade_signature("z", "f", &sym(&["str", "out_handle:sqlite3"], "int"), &structs).unwrap();
+    assert_eq!(
+        j.records[0].1,
+        vec![("ret".to_string(), "int".to_string()), ("out".into(), "handle<sqlite3>".into())]
+    );
+    // A struct crossing either way is a class with its fields' Jade types.
+    let j = jade_signature("z", "f", &sym(&["in_struct:box_t"], "float"), &structs).unwrap();
+    assert_eq!(j.params, vec!["box_t".to_string()]);
+    assert_eq!(
+        j.records,
+        vec![(
+            "box_t".to_string(),
+            vec![("w".into(), "int".into()), ("name".into(), "[char]".into())]
+        )]
+    );
+    // A struct with no table cannot be described.
+    assert!(jade_signature("z", "f", &sym(&["out_struct:other_t"], "nil"), &structs).is_err());
 }

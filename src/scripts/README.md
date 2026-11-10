@@ -16,7 +16,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
 - *`golden.sh`* builds every example, runs the binary, and compares its output and exit status to the `<name>.expected` and optional `<name>.expected-exit` beside it. An example with no `.expected` file fails rather than passes. It takes an optional path to a `jade` binary, and keeps a skip list: the network examples, the `*_error.jde` fixtures that `jade check` covers, and the examples that dereference a prompt, which wait on v2's inference. Read the header before assuming an example is covered.
 
-  It also runs the native handle round-trip, against `handle-fixture.expected`.
+  It also runs the native handle round-trip, against `handle-fixture.expected`, and the C struct round-trip, against `struct-fixture.expected`.
 
   With `--backend=static`, it builds with Jade 2.0's static backend instead, and only the examples listed in *`static-examples.list`*. That list grows with each phase of `design/v2-static-values.md` until it holds every example, at which point the static backend becomes the only one and the flag and list go away. The handle round-trip runs in this mode too.
 - *`handle-fixture.c`* and *`handle-fixture.jde`* are a stand-in *native* package that hands out opaque handles, plus the Jade program that exercises it. `cc` compiles the C file and `golden.sh` builds the program against it.
@@ -26,6 +26,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
   `jade_pkg_abi_version` in the C file must match `jade_runtime::RUNTIME_ABI_VERSION`. The gate reads that number from the runtime source rather than carrying a copy.
 
   The `jade.toml` the gate writes declares the fixture's functions in `[lib.handlefix.symbols]`, because a Jade-ABI library carries no types and the static backend needs them (design decision 11). The default backend reads the same file and ignores the declarations' types.
+- *`struct-fixture.c`*, *`struct-fixture.h`* and *`struct-fixture.jde`* are a plain C library whose functions pass structs in, out and both ways, return one by value, and hand back several values at once, plus the program that calls it. `golden.sh` builds the library with `cc`, binds it as a C dependency with `jade pkg install`, which builds its shim, and compares the program's output to `struct-fixture.expected`. Each shape is one the shim packs into a record, which the static backend reads as a class.
 - *`ffi-gate.sh`*, *`glib-fixture.jde`* and *`alloc-str-loop.jde`* are the FFI gate, described below.
 
 ## Who uses it

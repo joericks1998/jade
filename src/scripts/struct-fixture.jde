@@ -1,0 +1,25 @@
+// C structs and several results, through a C dependency.
+//
+// Each record the shim hands back is a class: a C struct under its own name,
+// such as box.box_t, and several results under <symbol>_result. A program reads
+// their fields and builds a struct the library takes with a literal, leaving out
+// fields it wants zero, as C would.
+use box
+
+let b = box.box_make(3, 4)
+print(b.w)
+print(b.h)
+print(b.scale)
+print(len(b.name))
+print(box.box_area(b))
+print(box.box_area(box.box_t { w: 2, h: 5, scale: 2.0 }))
+let g = box.box_grow(b, 1)
+print(g.ret)
+print(g.b.w)
+let d = box.divmod(17, 5)
+print(f"{d.ret} {d.q} {d.r}")
+let u = box.pt_unit()
+print(u.x + u.y)
+
+from box use box_t
+print(box.box_area(box_t { w: 1, h: 2, scale: 3.0 }))

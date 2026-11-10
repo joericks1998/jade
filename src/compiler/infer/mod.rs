@@ -415,6 +415,16 @@ impl<'a> Checker<'a> {
                     "bool" => Ty::Bool,
                     "char" => Ty::Char,
                     other if self.structs.contains_key(other) => Ty::Struct(other.to_string()),
+                    // A type no program can spell as a decorator, such as `[char]`,
+                    // which a native record's class gives its fields.
+                    other
+                        if let Ok(t) = native::parse_type_in(
+                            other,
+                            &self.structs.keys().map(|k| (k.clone(), k.clone())).collect(),
+                        ) =>
+                    {
+                        t
+                    }
                     other => {
                         return Err(JadeError::TypeError {
                             message: format!(

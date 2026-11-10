@@ -28,6 +28,8 @@ if [[ "${1:-}" == "--backend=static" ]]; then
 fi
 
 JADE="${1:-./target/debug/jade}"
+# Absolute, since the C struct check runs `jade pkg install` from its own directory.
+JADE="$(cd "$(dirname "$JADE")" && pwd)/$(basename "$JADE")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -207,6 +209,91 @@ TOML
 $(diff <(printf '%s\n' "$h_got") "$HANDLE_WANT")")
         fail=$((fail + 1))
       fi
+    fi
+  fi
+fi
+
+# ── C structs and several results ───────────────────────────────────────────
+#
+# A C dependency whose functions pass structs both ways and return several
+# values at once, each of which the shim packs into a record. Like the handle
+# fixture, examples/ cannot reach it, since it needs a C library; it needs `cc`
+# to build that library and its shim.
+STRUCT_C="$(dirname "$0")/struct-fixture.c"
+STRUCT_H="$(dirname "$0")/struct-fixture.h"
+STRUCT_JDE="$(dirname "$0")/struct-fixture.jde"
+STRUCT_WANT="$(dirname "$0")/struct-fixture.expected"
+STRUCT_DIR="$WORK/structs"
+
+if ! command -v cc >/dev/null 2>&1; then
+  printf '  skip  %-52s (%s)\n' "C struct round-trip" "no C compiler"
+  skip=$((skip + 1))
+else
+  mkdir -p "$STRUCT_DIR/vendor"
+  case "$(uname -s)" in
+    Darwin) lib="libbox.dylib"; shared=(-dynamiclib) ;;
+    *)      lib="libbox.so"; shared=(-shared) ;;
+  esac
+  cp "$STRUCT_H" "$STRUCT_DIR/vendor/struct-fixture.h"
+  cp "$STRUCT_JDE" "$STRUCT_DIR/main.jde"
+  cat > "$STRUCT_DIR/jade.toml" <<TOML
+[project]
+name = "struct-fixture"
+
+[dependencies.box]
+path = "vendor/$lib"
+abi = "c"
+headers = ["struct-fixture.h"]
+include_dirs = ["vendor"]
+
+[dependencies.box.symbols.box_make]
+args = ["int", "int", "out_struct:box_t"]
+ret = "nil"
+
+[dependencies.box.symbols.box_area]
+args = ["in_struct:box_t"]
+ret = "float"
+
+[dependencies.box.symbols.box_grow]
+args = ["inout_struct:box_t@b", "int"]
+ret = "scalar:int"
+
+[dependencies.box.symbols.divmod]
+args = ["int", "int", "out_scalar:int64_t@q", "out_scalar:int64_t@r"]
+ret = "scalar:int"
+
+[dependencies.box.symbols.pt_unit]
+args = []
+ret = "struct:pt_t"
+
+[dependencies.box.structs.box_t]
+fields = [["w", "int"], ["h", "int"], ["scale", "float"], ["name", "array<char>:16"]]
+
+[dependencies.box.structs.pt_t]
+fields = [["x", "int"], ["y", "int"]]
+TOML
+  if ! s_err="$(cc "${shared[@]}" -fPIC "$STRUCT_C" -I"$(dirname "$0")" -o "$STRUCT_DIR/vendor/$lib" 2>&1)"; then
+    printf '  FAIL  %-52s (fixture library did not build)\n' "C struct round-trip"
+    failures+=("C struct fixture: $s_err")
+    fail=$((fail + 1))
+  elif ! s_err="$(cd "$STRUCT_DIR" && "$JADE" pkg install 2>&1)"; then
+    printf '  FAIL  %-52s (pkg install failed)\n' "C struct round-trip"
+    failures+=("C struct fixture: $s_err")
+    fail=$((fail + 1))
+  elif ! s_err="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$STRUCT_DIR/main.jde" -o "$STRUCT_DIR/main.bin" 2>&1)"; then
+    printf '  FAIL  %-52s (build failed)\n' "C struct round-trip"
+    failures+=("C struct round-trip: build failed: $s_err")
+    fail=$((fail + 1))
+  else
+    s_got="$("$STRUCT_DIR/main.bin" 2>&1)"; s_rc=$?
+    if [[ "$(printf '%s\n' "$s_got")" == "$(cat "$STRUCT_WANT")" && "$s_rc" == 0 ]]; then
+      printf '  ok    %s\n' "C struct round-trip"
+      pass=$((pass + 1))
+    else
+      printf '  FAIL  %-52s (output differs)\n' "C struct round-trip"
+      failures+=("C struct round-trip: rc=$s_rc
+$(diff <(printf '%s\n' "$s_got") "$STRUCT_WANT")")
+      fail=$((fail + 1))
     fi
   fi
 fi

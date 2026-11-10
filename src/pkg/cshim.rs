@@ -3548,29 +3548,36 @@ fn bad_type_msg(pkg: &str, sym: &str, t: &str, at: Position) -> String {
 #[cfg(test)]
 mod tests;
 
-/// Purpose: This function derives the Jade signature a C dependency's symbol
-/// is called with, for the static checker.
-///
-/// The declared `args` describe the C signature, and the shim rewrites the call
-/// (see `How the shim rewrites a call` in this directory's README): a `bytes`
-/// argument is one Jade value, an out-parameter takes none and becomes the
-/// result, and so on. This walks the same parse the generator does, so the two
-/// cannot disagree about which C parameters are Jade arguments.
+/// Purpose: This struct holds the Jade signature a C symbol is called with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JadeSignature {
+    /// The parameter types, in Jade's spelling.
+    pub params: Vec<String>,
+    /// The result type.
+    pub ret: String,
+    /// The classes the signature names, each with its fields' names and Jade
+    /// types: a C struct passed or returned, under its C name, and the record of
+    /// several results, under `<symbol>_result`.
+    pub records: Vec<(String, Vec<(String, String)>)>,
+}
+
+/// Purpose: This function derives the Jade signature of a C symbol from its
+/// `args` and `ret`, the way the generated shim calls it.
 ///
 /// Inputs:
-/// - `pkg`, `sym`: the dependency and the symbol, for messages.
-/// - `spec`: the symbol's declaration.
+/// - `pkg`: the dependency, for messages.
+/// - `sym`: the symbol.
+/// - `spec`: its declaration.
+/// - `structs`: the dependency's `structs` table, which gives a C struct's
+///   fields.
 ///
-/// Outputs: the Jade parameter types and the result type, written in the
-/// spelling `compiler::infer::native::parse_type` reads, or a short name for
-/// a shape the static backend does not decode, such as `C struct argument`:
-/// a C struct crossing either way, or several results coming back as one
-/// record.
+/// Outputs: the signature, or a message naming what cannot cross.
 pub fn jade_signature(
     pkg: &str,
     sym: &str,
     spec: &crate::project::CSymbol,
-) -> Result<(Vec<String>, String), String> {
+    structs: &HashMap<String, CStruct>,
+) -> Result<JadeSignature, String> {
     let tag_type = |tag: &str| -> &'static str {
         match tag {
             "JADE_FFI_FLOAT" => "float",
@@ -3581,40 +3588,44 @@ pub fn jade_signature(
         }
     };
     let scalar_of = |c_type: &str| c_scalar(c_type).map(|(t, _)| tag_type(t)).unwrap_or("int");
-    let unsupported = |what: &str| Err(what.to_string());
+    let mut records: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    // A C struct's class: its fields as the shim reads them, once.
+    let record = |records: &mut Vec<(String, Vec<(String, String)>)>,
+                  type_name: &str|
+     -> Result<String, String> {
+        let def = structs.get(type_name).ok_or_else(|| {
+            format!("C struct {type_name}, which has no [dependencies.{pkg}.structs.{type_name}]")
+        })?;
+        if !records.iter().any(|(n, _)| n == type_name) {
+            let mut fields = Vec::new();
+            for (name, ty) in &def.fields {
+                let jade = match field_type(pkg, sym, ty)? {
+                    FieldType::One(t) => tag_type(t.tag).to_string(),
+                    FieldType::Row(t, _) => format!("[{}]", tag_type(t.tag)),
+                };
+                fields.push((name.clone(), jade));
+            }
+            records.push((type_name.to_string(), fields));
+        }
+        Ok(type_name.to_string())
+    };
+
+    let args: Vec<ArgSpec> =
+        spec.args.iter().map(|a| parse_arg(pkg, sym, a)).collect::<Result<_, _>>()?;
     let mut params = Vec::new();
-    let mut results = Vec::new();
-    let mut ret_consumed = false;
-    for full in &spec.args {
-        let a = parse_arg(pkg, sym, full)?;
-        match &a {
+    for a in &args {
+        match a {
             ArgSpec::Scalar(t) => params.push(tag_type(t.tag).to_string()),
             ArgSpec::CScalar(c) => params.push(tag_type(c.tag).to_string()),
-            ArgSpec::Bytes | ArgSpec::BytesPtr => params.push("bytes".into()),
-            ArgSpec::InoutBytes { .. } => {
-                params.push("bytes".into());
-                results.push("bytes".to_string());
+            ArgSpec::Bytes | ArgSpec::BytesPtr | ArgSpec::InoutBytes { .. } => {
+                params.push("bytes".into())
             }
-            ArgSpec::OutBuffer { .. } => {
-                results.push("bytes".to_string());
-                ret_consumed = true;
-            }
-            ArgSpec::SizedBuffer { .. } => {
-                params.push("int".into());
-                results.push("bytes".to_string());
-            }
+            ArgSpec::SizedBuffer { .. } => params.push("int".into()),
             ArgSpec::Handle { name } => params.push(format!("handle<{name}>")),
-            ArgSpec::OutHandle { type_name, .. } => {
-                results.push(format!("handle<{type_name}>"));
-                ret_consumed = true;
+            ArgSpec::InoutScalar { c_type, .. } => params.push(scalar_of(c_type).to_string()),
+            ArgSpec::InStruct { type_name } | ArgSpec::InoutStruct { type_name, .. } => {
+                params.push(record(&mut records, type_name)?)
             }
-            ArgSpec::OutScalar { c_type, .. } => results.push(scalar_of(c_type).to_string()),
-            ArgSpec::InoutScalar { c_type, .. } => {
-                params.push(scalar_of(c_type).to_string());
-                results.push(scalar_of(c_type).to_string());
-            }
-            ArgSpec::OutStr { .. } | ArgSpec::OutAllocStr { .. } => results.push("str".into()),
-            ArgSpec::RetLen { .. } | ArgSpec::CallbackData | ArgSpec::NullPtr => {}
             ArgSpec::Callback { ret, params: cb } => {
                 let ps: Vec<&str> = cb
                     .iter()
@@ -3627,26 +3638,59 @@ pub fn jade_signature(
                 let r = ret.marshal.map(|(t, _)| tag_type(t)).unwrap_or("nil");
                 params.push(format!("fn({}) -> {r}", ps.join(", ")));
             }
-            ArgSpec::OutStruct { .. } | ArgSpec::InStruct { .. } | ArgSpec::InoutStruct { .. } => {
-                return unsupported("C struct argument");
+            _ => {}
+        }
+    }
+
+    // What comes back, in the order and under the keys the shim uses.
+    let out_of = |records: &mut Vec<(String, Vec<(String, String)>)>,
+                  a: &ArgSpec|
+     -> Result<String, String> {
+        Ok(match a {
+            ArgSpec::OutBuffer { .. }
+            | ArgSpec::InoutBytes { .. }
+            | ArgSpec::SizedBuffer { .. } => "bytes".to_string(),
+            ArgSpec::OutStruct { type_name, .. } | ArgSpec::InoutStruct { type_name, .. } => {
+                record(records, type_name)?
             }
-        }
-    }
-    if !ret_consumed {
-        match parse_ret(pkg, sym, &spec.ret)? {
-            RetSpec::Nil => {}
-            RetSpec::Scalar(t) => results.insert(0, tag_type(t.tag).to_string()),
-            RetSpec::CScalar(c) => results.insert(0, tag_type(c.tag).to_string()),
-            RetSpec::Bytes => results.insert(0, "bytes".to_string()),
-            RetSpec::AllocStr => results.insert(0, "str".to_string()),
-            RetSpec::Handle(name) => results.insert(0, format!("handle<{name}>")),
-            RetSpec::Struct(_) => return unsupported("C struct result"),
-        }
-    }
-    let ret = match results.len() {
-        0 => "nil".to_string(),
-        1 => results.remove(0),
-        _ => return unsupported("result of several values"),
+            ArgSpec::OutHandle { type_name, .. } => format!("handle<{type_name}>"),
+            ArgSpec::OutScalar { c_type, .. } | ArgSpec::InoutScalar { c_type, .. } => {
+                scalar_of(c_type).to_string()
+            }
+            _ => "str".to_string(),
+        })
     };
-    Ok((params, ret))
+    let ret_t = parse_ret(pkg, sym, &spec.ret)?;
+    let outs: Vec<&ArgSpec> = args.iter().filter(|a| a.produces_result()).collect();
+    let ret_key = ret_is_a_key(&ret_t, &outs, spec.fails_when);
+    let ret_of = |records: &mut Vec<(String, Vec<(String, String)>)>| -> Result<String, String> {
+        Ok(match &ret_t {
+            RetSpec::Nil => "nil".to_string(),
+            RetSpec::Scalar(t) => tag_type(t.tag).to_string(),
+            RetSpec::CScalar(c) => tag_type(c.tag).to_string(),
+            RetSpec::Bytes => "bytes".to_string(),
+            RetSpec::AllocStr => "str".to_string(),
+            RetSpec::Handle(name) => format!("handle<{name}>"),
+            RetSpec::Struct(name) => record(records, name)?,
+        })
+    };
+    let ret = if !builds_result_struct(ret_key, outs.len()) {
+        match outs.first() {
+            None => ret_of(&mut records)?,
+            Some(a) => out_of(&mut records, a)?,
+        }
+    } else {
+        let mut fields = Vec::new();
+        if ret_key {
+            fields.push(("ret".to_string(), ret_of(&mut records)?));
+        }
+        for a in &outs {
+            let key = a.out_name().unwrap_or("out").to_string();
+            fields.push((key, out_of(&mut records, a)?));
+        }
+        let name = format!("{sym}_result");
+        records.push((name.clone(), fields));
+        name
+    };
+    Ok(JadeSignature { params, ret, records })
 }

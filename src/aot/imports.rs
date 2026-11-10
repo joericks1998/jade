@@ -200,7 +200,10 @@ struct Registry {
     /// What `jade.toml` declares about each native package's functions, by
     /// the package's import name, then the function. See
     /// `compiler::infer::native`.
-    native_decls: HashMap<String, HashMap<String, NativeSig>>,
+    native_decls: HashMap<String, NativeDecls>,
+    /// The classes each loaded native package defines, by pkgid, then the
+    /// name the program writes after the package's alias.
+    native_types: HashMap<u32, HashMap<String, String>>,
     /// The same declarations by `__native$<pkgid>$<fn>`, for the packages this
     /// build loads.
     native_sigs: HashMap<String, NativeSig>,
@@ -259,6 +262,7 @@ impl Registry {
             native_next_id: 0,
             native_pkgs: Vec::new(),
             native_decls: HashMap::new(),
+            native_types: HashMap::new(),
             native_sigs: HashMap::new(),
             dep_symbols: HashMap::new(),
             native_symbols: HashMap::new(),
@@ -289,9 +293,22 @@ impl Registry {
             self.native_symbols.insert(id, symbols.clone());
         }
         if let Some(decls) = self.native_decls.get(import_path) {
-            for (f, sig) in decls {
+            for (f, sig) in &decls.sigs {
                 self.native_sigs.insert(native_ref(id, f), sig.clone());
             }
+            // Each record becomes a class with public fields, so a program can
+            // read what a function returns and build what it takes.
+            let types: HashMap<String, String> = decls
+                .records
+                .keys()
+                .map(|bare| (bare.clone(), native_class(import_path, bare)))
+                .collect();
+            for (bare, fields) in &decls.records {
+                let fields: Vec<(String, String)> =
+                    fields.iter().map(|(f, t)| (f.clone(), rename_idents(t, &types))).collect();
+                self.out.push(record_class(&types[bare], &fields));
+            }
+            self.native_types.insert(id, types);
         }
         self.native_pkgs.push(NativePkg {
             id,
@@ -453,6 +470,18 @@ fn process_file(
                 match resolve_use(reg, dir, &path)? {
                     Resolved::Native(canon) => {
                         let pkgid = reg.native_pkg_id(&canon, &path);
+                        // A record the package declares is a class, not a function.
+                        let types = reg.native_types.get(&pkgid).cloned().unwrap_or_default();
+                        let names: Vec<String> = names
+                            .into_iter()
+                            .filter(|n| match types.get(n) {
+                                Some(class) => {
+                                    from_type.insert(n.clone(), class.clone());
+                                    false
+                                }
+                                None => true,
+                            })
+                            .collect();
                         // The name is right here, so an undeclared one is caught
                         // now rather than waiting for a reference to it.
                         if let Some(declared) = reg.native_symbols.get(&pkgid) {
@@ -506,7 +535,12 @@ fn process_file(
         }
     }
 
+    let native_types = native_aliases
+        .iter()
+        .filter_map(|(alias, id)| Some((alias.clone(), reg.native_types.get(id)?.clone())))
+        .collect();
     let mut renamer = Renamer {
+        native_types,
         self_id,
         self_values,
         self_types,
@@ -635,6 +669,100 @@ fn stem(path: &str) -> String {
 /// set: the two mean different things here, and an empty set would reject every
 /// call into it. `[symbols]` is required for `abi = "c"`, so an empty one means
 /// a manifest still being filled in, not a library with no functions.
+/// Purpose: This struct holds what `jade.toml` declares about one native
+/// package.
+#[derive(Clone, Default)]
+struct NativeDecls {
+    /// Each function's signature, by name.
+    sigs: HashMap<String, NativeSig>,
+    /// The records its functions pass and return, by the name the package
+    /// gives them, each with its fields' names and Jade types.
+    records: std::collections::BTreeMap<String, Vec<(String, String)>>,
+}
+
+/// Purpose: This function names the class a native package's record becomes.
+///
+/// Inputs:
+/// - `import`: the package's import name.
+/// - `bare`: the record's own name.
+///
+/// Outputs: `<bare>$n<import>`, which messages show as `<bare>` and no
+/// program can write.
+fn native_class(import: &str, bare: &str) -> String {
+    let tag: String =
+        import.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    format!("{bare}$n{tag}")
+}
+
+/// Purpose: This function renames the class names inside a type's text.
+///
+/// Inputs:
+/// - `t`: the type, such as `[Point]`.
+/// - `names`: each name to replace, and its replacement.
+///
+/// Outputs: the text with every whole name in `names` replaced.
+fn rename_idents(t: &str, names: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        out.push_str(names.get(word.as_str()).map_or(word.as_str(), String::as_str));
+        word.clear();
+    };
+    for c in t.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// Purpose: This function builds the class definition of a native record.
+///
+/// Inputs:
+/// - `name`: the class's name in the program.
+/// - `fields`: each field's name and Jade type.
+///
+/// Outputs: a class whose fields are all public and typed, each with a zero
+/// default where its type has one, so a program may leave a field out the way
+/// C leaves it zero.
+fn record_class(name: &str, fields: &[(String, String)]) -> TStmt {
+    use crate::frontend::ast::{ClassMembers, Expr};
+    let span = Span { line: 0, col: 0 };
+    let zero = |t: &str| -> Option<Expr> {
+        Some(match t {
+            "int" => Expr::Integer { value: 0, span },
+            "float" => Expr::Float { value: 0.0, span },
+            "bool" => Expr::Bool { value: false, span },
+            "str" => Expr::Str { value: String::new(), span },
+            t if t.starts_with('[') => Expr::Array { elements: Vec::new(), span },
+            _ => return None,
+        })
+    };
+    TStmt::StructDef {
+        name: name.to_string(),
+        fields: fields
+            .iter()
+            .map(|(f, t)| match zero(t) {
+                Some(default) => StructFieldDef::Let { name: f.clone(), default },
+                None => StructFieldDef::Required(f.clone()),
+            })
+            .collect(),
+        parents: Vec::new(),
+        members: ClassMembers {
+            decorators: fields
+                .iter()
+                .map(|(f, t)| (f.clone(), vec!["public".to_string(), t.clone()]))
+                .collect(),
+            declared: Vec::new(),
+        },
+        span,
+    }
+}
+
 /// Purpose: This function reads what `jade.toml` declares about native
 /// packages' functions: a `[lib]` entry's `symbols` table in Jade types, and a
 /// C dependency's `symbols` table, whose Jade signature is derived from its C
@@ -647,24 +775,38 @@ fn stem(path: &str) -> String {
 /// type a `[lib]` declaration misspells.
 fn native_declarations(
     manifest: &crate::project::ProjectManifest,
-) -> Result<HashMap<String, HashMap<String, NativeSig>>, String> {
-    use crate::compiler::infer::native::parse_sig;
-    let mut out: HashMap<String, HashMap<String, NativeSig>> = HashMap::new();
+) -> Result<HashMap<String, NativeDecls>, String> {
+    use crate::compiler::infer::native::parse_sig_in;
+    let mut out: HashMap<String, NativeDecls> = HashMap::new();
     if let Some(deps) = &manifest.dependencies {
         for (name, d) in deps {
             if d.abi != crate::project::Abi::C {
                 continue;
             }
             let Some(symbols) = &d.symbols else { continue };
+            let structs = d.structs.clone().unwrap_or_default();
             let table = out.entry(name.clone()).or_default();
             for (sym, spec) in symbols {
                 let display = format!("{name}.{sym}");
                 // A symbol whose signature does not translate refuses only
                 // calls to itself; the rest of the dependency still builds.
-                let derived = crate::pkg::cshim::jade_signature(name, sym, spec)
-                    .and_then(|(params, ret)| parse_sig(&display, Some(&params), Some(&ret)));
+                let derived = crate::pkg::cshim::jade_signature(name, sym, spec, &structs)
+                    .and_then(|j| {
+                        let classes: HashMap<String, String> = j
+                            .records
+                            .iter()
+                            .map(|(bare, _)| (bare.clone(), native_class(name, bare)))
+                            .collect();
+                        let sig = parse_sig_in(&display, Some(&j.params), Some(&j.ret), &classes)?;
+                        Ok((sig, j.records))
+                    });
                 let sig = match derived {
-                    Ok(sig) => sig,
+                    Ok((sig, records)) => {
+                        for (bare, fields) in records {
+                            table.records.entry(bare).or_insert(fields);
+                        }
+                        sig
+                    }
                     Err(why) => NativeSig {
                         display: display.clone(),
                         params: None,
@@ -672,7 +814,7 @@ fn native_declarations(
                         refused: Some(why),
                     },
                 };
-                table.insert(sym.clone(), sig);
+                table.sigs.insert(sym.clone(), sig);
             }
         }
     }
@@ -680,13 +822,31 @@ fn native_declarations(
     // declarations replace a dependency's.
     if let Some(libs) = &manifest.lib {
         for (name, entry) in libs {
-            let Some(symbols) = &entry.symbols else { continue };
+            if entry.symbols.is_none() && entry.structs.is_none() {
+                continue;
+            }
             let table = out.entry(name.clone()).or_default();
-            table.clear();
-            for (f, decl) in symbols {
+            *table = NativeDecls::default();
+            for (bare, rec) in entry.structs.iter().flatten() {
+                table.records.insert(bare.clone(), rec.fields.clone());
+            }
+            let classes: HashMap<String, String> =
+                table.records.keys().map(|bare| (bare.clone(), native_class(name, bare))).collect();
+            for (f, decl) in entry.symbols.iter().flatten() {
                 let display = format!("{name}.{f}");
-                let sig = parse_sig(&display, decl.args.as_deref(), decl.ret.as_deref())?;
-                table.insert(f.clone(), sig);
+                let sig =
+                    parse_sig_in(&display, decl.args.as_deref(), decl.ret.as_deref(), &classes)?;
+                table.sigs.insert(f.clone(), sig);
+            }
+            // A record's fields are checked here, where the manifest is named.
+            for (bare, fields) in &table.records {
+                for (field, t) in fields {
+                    crate::compiler::infer::native::parse_type_in(t, &classes).map_err(|e| {
+                        format!(
+                            "the field {field} of [lib.{name}.structs.{bare}] in jade.toml: {e}"
+                        )
+                    })?;
+                }
             }
         }
     }
@@ -767,6 +927,9 @@ struct Renamer {
     /// Import alias → the source package it names and the top-level names the
     /// package keeps to itself.
     hidden: HashMap<String, (String, HashSet<String>)>,
+    /// Native import alias → the classes its package declares, by the name
+    /// written after the alias.
+    native_types: HashMap<String, HashMap<String, String>>,
     /// pkgid → the symbols that package's `[symbols]` table declares. A pkgid
     /// that is absent is one with nothing to check against, and its references
     /// pass through as they always did.
@@ -894,6 +1057,9 @@ impl Renamer {
     /// values and are not shadowed by locals.
     fn ref_type(&self, tn: &str) -> Option<String> {
         if let Some((alias, field)) = tn.split_once('.') {
+            if let Some(class) = self.native_types.get(alias).and_then(|t| t.get(field)) {
+                return Some(class.clone());
+            }
             let (id, _, types) = self.aliases.get(alias)?;
             return types.contains(field).then(|| mangle(field, *id));
         }
@@ -921,6 +1087,14 @@ impl Renamer {
                     return None; // ambiguous across modules — leave bare
                 }
                 resolved = Some(mangle(tn, *id));
+            }
+        }
+        for types in self.native_types.values() {
+            if let Some(class) = types.get(tn) {
+                if resolved.as_ref().is_some_and(|r| r != class) {
+                    return None;
+                }
+                resolved = Some(class.clone());
             }
         }
         resolved
@@ -1415,6 +1589,7 @@ mod tests {
             native_aliases: HashMap::new(),
             native_from: HashMap::new(),
             hidden: HashMap::new(),
+            native_types: HashMap::new(),
             native_symbols: HashMap::new(),
             errors: Vec::new(),
             locals: Vec::new(),
@@ -1525,6 +1700,7 @@ mod ffi_symbol_tests {
             native_aliases,
             native_from: HashMap::new(),
             hidden: HashMap::new(),
+            native_types: HashMap::new(),
             native_symbols,
             errors: Vec::new(),
             locals: Vec::new(),
@@ -1731,5 +1907,45 @@ mod ffi_symbol_tests {
         assert_eq!(edit_distance("abc", "abd"), 1);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn a_lib_declares_records_its_functions_return() {
+        use crate::compiler::infer::Ty;
+        let m: ProjectManifest = toml::from_str(
+            "[lib.gfx]\npath = \".\"\n\
+             [lib.gfx.symbols.cursor]\nargs = []\nret = \"Point\"\n\
+             [lib.gfx.structs.Point]\nfields = [[\"x\", \"float\"], [\"tags\", \"[str]\"]]\n",
+        )
+        .unwrap();
+        let decls = native_declarations(&m).unwrap();
+        let gfx = &decls["gfx"];
+        assert_eq!(gfx.sigs["cursor"].ret, Some(Ty::Struct("Point$ngfx".into())));
+        assert_eq!(gfx.records["Point"].len(), 2);
+
+        // The class has public, typed fields, and a zero default where the type has one.
+        let TStmt::StructDef { name, fields, members, .. } =
+            record_class("Point$ngfx", &gfx.records["Point"])
+        else {
+            panic!("a record becomes a class");
+        };
+        assert_eq!(name, "Point$ngfx");
+        assert!(matches!(fields[0], StructFieldDef::Let { .. }));
+        assert!(members.is_public("x") && members.is_public("tags"));
+
+        let bad: ProjectManifest = toml::from_str(
+            "[lib.gfx]\npath = \".\"\n[lib.gfx.structs.Point]\nfields = [[\"x\", \"pointer\"]]\n",
+        )
+        .unwrap();
+        let err = native_declarations(&bad).err().unwrap();
+        assert!(err.contains("[lib.gfx.structs.Point]"), "{err}");
+    }
+
+    #[test]
+    fn record_names_inside_a_type_are_renamed() {
+        let names: HashMap<String, String> =
+            [("Point".to_string(), "Point$ngfx".to_string())].into_iter().collect();
+        assert_eq!(rename_idents("[Point]", &names), "[Point$ngfx]");
+        assert_eq!(rename_idents("Pointy", &names), "Pointy");
     }
 }

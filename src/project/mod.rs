@@ -194,6 +194,18 @@ pub struct LibraryEntry {
     /// where they come from. See `compiler::infer::native`.
     #[serde(default)]
     pub symbols: Option<HashMap<String, NativeDecl>>,
+    /// Records a native library's functions pass and return, as
+    /// `[lib.<name>.structs.<T>] fields = [["x", "float"], ["y", "float"]]` in
+    /// Jade types. Each becomes a class the program names as `<name>.<T>`.
+    #[serde(default)]
+    pub structs: Option<HashMap<String, NativeRecord>>,
+}
+
+/// Purpose: This struct holds a record a native library declares: each field's
+/// name and Jade type, in order.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NativeRecord {
+    pub fields: Vec<(String, String)>,
 }
 
 /// Purpose: This struct holds one native function's declared types, as
