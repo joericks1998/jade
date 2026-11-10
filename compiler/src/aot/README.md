@@ -6,11 +6,11 @@ This is the driver every command that compiles goes through: `jade build`, `jade
 
 ```
 TProgram → imports merged → class rules → struct defaults
-         → compiler::infer (static types) → mir (typed functions)
+         → typechecker::infer (static types) → mir (typed functions)
          → mir::taskcheck → backend (LLVM IR → object → linked binary)
 ```
 
-This directory owns the first steps and the order of the rest. Each step after the merge lives in its own directory: the checker in [`src/compiler/infer/`](../compiler/infer/README.md), the typed middle layer and the task check in [`src/mir/`](../mir/README.md), and code generation and linking in [`src/backend/`](../backend/README.md).
+This directory owns the first steps and the order of the rest. Each step after the merge lives in its own directory: the checker in [`src/typechecker/infer/`](../typechecker/infer/README.md), the typed middle layer and the task check in [`src/mir/`](../mir/README.md), and code generation and linking in [`src/backend/`](../backend/README.md).
 
 ## Why it was built
 
@@ -22,13 +22,13 @@ Until phase 6 of `design/v2-static-values.md` this directory also drove v1's bac
 
 ## What each file does
 
-- *`mod.rs`* is the driver. `merge` resolves imports, runs `compiler::infer::check_members`, the class rules that need what a literal wrote rather than what the compiler filled in, and then fills struct defaults. `lower` runs the checker, lowers its answer to MIR, and runs `mir::taskcheck`. `compile` adds the backend: `Emit` picks a binary, the LLVM IR, or the MIR as text. A binary build also hands back the native packages from the project's `libs/` the program will look for, so the CLI copies them beside it. `would_build` runs everything short of LLVM, for `jade check`.
+- *`mod.rs`* is the driver. `merge` resolves imports, runs `typechecker::infer::check_members`, the class rules that need what a literal wrote rather than what the compiler filled in, and then fills struct defaults. `lower` runs the checker, lowers its answer to MIR, and runs `mir::taskcheck`. `compile` adds the backend: `Emit` picks a binary, the LLVM IR, or the MIR as text. A binary build also hands back the native packages from the project's `libs/` the program will look for, so the CLI copies them beside it. `would_build` runs everything short of LLVM, for `jade check`.
 - *`imports.rs`* handles import resolution and module namespacing. Jade gives every imported file its own namespace, while a program has one symbol table. So this file mangles imported symbols to keep two modules that both define `greet` distinct. It also reads what `jade.toml` declares about native packages: their functions' types, and the records they pass, which become classes; and it checks a call into a C dependency against the symbols its manifest declares, which the gotcha below explains. A file inside a source package resolves its imports against the package's own `jade.toml` first, and `[package] exports` limits what an importing project can name.
 - *`tests.rs`* holds the driver tests.
 
 ## Who uses it
 
-*Depends on:* `compiler/` for the typed tree and the checker, `mir/` and `backend/` for everything after it, `project/` and `pkg/` for library resolution.
+*Depends on:* `typechecker/` for the typed tree and the checker, `mir/` and `backend/` for everything after it, `project/` and `pkg/` for library resolution.
 
 *Used by:* `src/build/`, which is the thin layer `cli/build.rs`, `cli/run.rs` and `cli/test.rs` call, and `cli/check.rs`, which calls `would_build`.
 

@@ -1,64 +1,47 @@
 //! The `jade` library crate.
 //!
-//! Exposes the whole toolchain: the language frontend (lex → parse →
-//! type-infer → TIR), the bytecode VM, the AOT LLVM backend, and the package
-//! manager. The `jade` binary (`src/main.rs`) is a thin CLI on top of this.
+//! Exposes the whole toolchain: the frontend (lex → parse), the type checker,
+//! MIR, the LLVM backend, prompts, and the package manager. The `jade` binary
+//! (`src/main.rs`) is a thin CLI on top of this.
 
-// Jade is Unix-only. Native packages — the inference provider among them — are
-// loaded with dlopen, `std/uhttp` speaks HTTP over a Unix domain socket, and the
-// C runtime is written against POSIX — so a Windows build could only ever be a
-// language subset with the interesting half stubbed out. Failing here is clearer
-// than shipping that: a build error names the constraint, a silently degraded
-// binary doesn't.
+// Jade is Unix-only. `std/uhttp` speaks HTTP over a Unix domain socket, a
+// prompt gets its model's memory from the dovata process over one, and the
+// support code the backend writes into each program is written against POSIX,
+// so a Windows build could only ever be a language subset with the interesting
+// half stubbed out. Failing here is clearer than shipping that: a build error
+// names the constraint, a silently degraded binary doesn't.
 #[cfg(not(unix))]
 compile_error!(
     "Jade supports Unix-like platforms only (macOS and Linux). \
      Windows is not a supported target; on Windows, build inside WSL2."
 );
 
-/// The `jade` binary's global allocators: the Phase-1 segregated free-list pool
-/// (`alloc::pool`) and the Phase-0 profiler behind `--features alloc-profile`
-/// (`alloc::profile`). Host-only — the `#[global_allocator]` declarations
-/// themselves live in `main.rs`, never in `jade-runtime`, so neither can reach a
-/// dlopen'd package the way mimalloc did.
-/// AOT driver: import resolution, then `codegen`, then object and link. `jade
-/// build` calls straight into this, so LLVM 18 is a build-time requirement for
-/// the toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that
-/// emitted binaries link against is `src/runtime_aot/` (C), built by this
-/// crate's `build.rs`.
+/// The driver: merges imports, then runs the checker, MIR, the task check and
+/// the backend. `jade build` calls straight into this, so LLVM 18 is a
+/// build-time requirement for the toolchain (locate it with
+/// `LLVM_SYS_180_PREFIX`).
 pub mod aot;
-/// Jade 2.0's static backend: MIR → LLVM with no runtime library. Support code
-/// is emitted into each program as it is used. Reached through
-/// `jade build --backend=static` until it covers the whole language.
+/// MIR → LLVM with no runtime library, linked by LLD against the C library
+/// alone. Support code is emitted into each program as it is used.
 pub mod backend;
 pub mod build;
 pub mod builtins;
-/// The instruction set both engines consume: the compiler emits a `Chunk`, the
-/// VM interprets it and `codegen` lowers it. It belongs to neither engine,
-/// which is why it sits between them rather than inside `compiler`.
 pub mod cache;
 pub mod cli;
-/// Code generation: bytecode `Chunk` → LLVM IR. The half of `jade build` that
-/// is about the language rather than about producing a file, which is why it
-/// sits beside `aot` rather than inside it.
-pub mod compiler;
-/// Bytecode interpreter — one of the two execution engines, peer to `aot`
-/// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses
-/// `aot`. Backend parity exists to keep the two agreeing.
-// `src/runtime_aot/` is C, not Rust, so it has no module declaration here. It
-// is the runtime linked into AOT-compiled binaries only — the exception
-// handler, the platform/concurrency shim, and the IPC and inference clients —
-// and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
-// `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
 pub mod frontend;
+/// Prompts: the model's plan from dovata, the Jade tokenizer prelude, and the
+/// Metal kernels. Type inference is `typechecker`, not this.
 pub mod infer;
-/// The typed middle layer between the checked program and the static backend:
-/// one function per checked instance, typed locals, basic blocks, and reference
+/// The typed middle layer between the checked program and the backend: one
+/// function per checked instance, typed locals, basic blocks, and reference
 /// counting written out.
 pub mod mir;
 pub mod pkg;
 pub mod project;
 pub mod stdio;
+/// The type checker: `type_infer` types each file into TIR, and `infer` gives
+/// every value of the merged program one static type.
+pub mod typechecker;
 
 // Native built-in packages (the `std/*` + core intrinsic registry).
 // The registry types live in `builtins`; each package is a flat top-level module.

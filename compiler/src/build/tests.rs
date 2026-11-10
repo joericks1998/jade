@@ -10,7 +10,7 @@ use super::*;
 fn tir(src: &str) -> TProgram {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
-    crate::compiler::type_infer::infer(program).expect("infer")
+    crate::typechecker::type_infer::infer(program).expect("infer")
 }
 
 #[test]

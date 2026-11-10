@@ -10,8 +10,8 @@
 //! second string type with a parallel set of operations.
 
 use crate::builtins::Package;
-use crate::compiler::tir::JadeType;
-use crate::compiler::type_infer::TypeContext;
+use crate::typechecker::tir::JadeType;
+use crate::typechecker::type_infer::TypeContext;
 
 /// The methods a `bytes` receiver has, by name.
 pub const BYTES_METHODS: &[&str] = &["len", "decode", "slice"];

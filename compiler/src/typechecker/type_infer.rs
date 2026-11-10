@@ -1295,7 +1295,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                     ctx.define(arm.binding.clone(), JadeType::Unknown);
                     let tbody = check_stmts(&arm.body, ctx)?;
                     ctx.pop_block_scope();
-                    Ok(crate::compiler::tir::TCatchArm {
+                    Ok(crate::typechecker::tir::TCatchArm {
                         catch_type: arm.catch_type.clone(),
                         binding: arm.binding.clone(),
                         body: tbody,
@@ -1677,7 +1677,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // still catches a missing field, and with an unknown one there is
             // nothing to check against and the copy answers at run time.
             for def_field in &def_fields {
-                // A private field is left to `compiler::infer::members`, which
+                // A private field is left to `typechecker::infer::members`, which
                 // knows whether the literal is inside the class and can name a
                 // constructor in its message.
                 if let StructFieldDef::Required(req) = def_field
@@ -2742,4 +2742,4 @@ fn expr_span(e: &Expr) -> Span {
     }
 }
 
-// Tests for this module live in `src/compiler/tests.rs` (`mod type_infer`).
+// Tests for this module live in `src/typechecker/tests.rs` (`mod type_infer`).

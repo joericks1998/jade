@@ -16,9 +16,9 @@ use crate::frontend::error::JadeError;
 fn lower(src: &str) -> Result<Program, JadeError> {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
-    let mut tir = crate::compiler::type_infer::infer(program).expect("infer");
-    crate::compiler::type_infer::fill_struct_literal_defaults(&mut tir).expect("defaults");
-    let typed = crate::compiler::infer::check_program(&tir).expect("check");
+    let mut tir = crate::typechecker::type_infer::infer(program).expect("infer");
+    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tir).expect("defaults");
+    let typed = crate::typechecker::infer::check_program(&tir).expect("check");
     lower_program(&tir, &typed)
 }
 

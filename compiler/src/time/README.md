@@ -35,6 +35,6 @@ This directory holds only their names. Every function's actual behavior lives on
 ## Who uses it
 
 - [`src/builtins/`](../builtins/README.md) registers `TIME_PKG` in the package table.
-- [`compiler/infer/builtins.rs`](../compiler/infer/README.md) gives each `time.*` call its static type, such as the `TimeParts` struct `time.parts` returns.
+- [`typechecker/infer/builtins.rs`](../typechecker/infer/README.md) gives each `time.*` call its static type, such as the `TimeParts` struct `time.parts` returns.
 - [`mir/packages.rs`](../mir/README.md) lowers each call to its MIR operation. A function added here without an arm there is a program the checker types and MIR refuses, and `jade check` reports it, since it runs MIR lowering too.
 - [`src/backend/time.rs`](../backend/README.md) and `src/backend/tasks.rs` emit the code.

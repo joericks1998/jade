@@ -252,7 +252,7 @@ impl Parser {
     /// declaration can carry a decorator — `type_infer`, the static checker,
     /// MIR and the backend all see an ordinary call. A `fn` decorator cannot
     /// work this way, because the value it wraps is a function the compiler has
-    /// yet to build; the checker types it in `compiler/infer/`, MIR lowering
+    /// yet to build; the checker types it in `typechecker/infer/`, MIR lowering
     /// does not compile it yet, and that is the reason the two look different
     /// despite meaning the same thing.
     ///
@@ -1343,7 +1343,7 @@ impl Parser {
     /// This is the **only** place `|>` is consumed. It builds an `Expr::Pipe`
     /// per stage and decides nothing else: whether a stage is a type, a Grammar,
     /// or a function is a question about what its name refers to, which the
-    /// parser cannot answer. `compiler::type_infer::infer_pipe` does.
+    /// parser cannot answer. `typechecker::type_infer::infer_pipe` does.
     ///
     /// Two things used to happen here that no longer do. The stage was desugared
     /// straight into `Expr::Call` by matching on its shape, which made a stage

@@ -11,7 +11,7 @@ The commands below run from the repo root, where the workspace, `target/` and `e
 Every directory under `src/` has its own `README.md`. Read them in the order the compiler runs, because almost every change makes more sense once you know which stage it belongs to.
 
 1. [`src/frontend/`](src/frontend/README.md) turns source text into tokens and then an AST. Start here if you are touching syntax.
-2. [`src/compiler/`](src/compiler/README.md) infers types and produces TIR, and its `infer/` gives every value one static type. Start here if you are touching types.
+2. [`src/typechecker/`](src/typechecker/README.md) infers types and produces TIR, and its `infer/` gives every value one static type. Start here if you are touching types.
 3. [`src/mir/`](src/mir/README.md) lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
 4. [`src/backend/`](src/backend/README.md) turns MIR into LLVM IR and links a binary against the C library alone. What v1 called the runtime is support code here, emitted into each program only where it is used.
 5. [`examples/`](../examples/README.md), at the repo root, is the fixture suite. A language change starts here.
@@ -85,13 +85,13 @@ Data flows one way through the compiler, and no stage reaches backwards:
 
 ```
 source text
-  → frontend/lexer.rs      → Vec<Token>
-  → frontend/parser.rs     → Program (AST)
-  → compiler/type_infer.rs → TProgram (TIR), per file
-  → aot/imports.rs         → one merged TProgram
-  → compiler/infer/        → Typed: one static type for every value
-  → mir/                   → MIR, checked by mir/taskcheck.rs
-  → backend/               → LLVM IR → object → binary, linked by LLD
+  → frontend/lexer.rs         → Vec<Token>
+  → frontend/parser.rs        → Program (AST)
+  → typechecker/type_infer.rs → TProgram (TIR), per file
+  → aot/imports.rs            → one merged TProgram
+  → typechecker/infer/        → Typed: one static type for every value
+  → mir/                      → MIR, checked by mir/taskcheck.rs
+  → backend/                  → LLVM IR → object → binary, linked by LLD
 ```
 
 Jade has one engine, the compiler. `jade build` runs the whole chain, `jade run` and `jade test` build into a scratch directory and run the binary, and `jade check` runs everything short of LLVM. Every example's output is recorded beside it as `<name>.expected`, and `src/scripts/golden.sh` builds each one and compares. Until v1.4.8 there was also a bytecode VM, and until phase 6 of `design/v2-static-values.md` compiled programs linked a shared runtime; both are gone.
@@ -113,8 +113,8 @@ Follow the pipeline in order:
 1. Token or tokens in `frontend/lexer.rs`
 2. AST node or nodes in `frontend/ast.rs`
 3. Parse rule or rules in `frontend/parser.rs`
-4. Lowering in `compiler/type_infer.rs`
-5. Static types in `compiler/infer/`
+4. Lowering in `typechecker/type_infer.rs`
+5. Static types in `typechecker/infer/`
 6. Lowering to MIR in `mir/`
 7. LLVM code in `backend/`
 8. Error variant in `frontend/error.rs`, if the feature can fail
@@ -125,7 +125,7 @@ Operator precedence lives in the parser's call chain, which runs `parse_or` then
 
 ### Adding a built-in
 
-A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs` and its type in `register_types`; give it a static type in `compiler/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
+A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs` and its type in `register_types`; give it a static type in `typechecker/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
 
 A whole new package also needs `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`.
 
@@ -135,7 +135,7 @@ Every failure returns a `JadeError`, and every variant carries a `Span`.
 
 *No panics in the compiler.* That includes `unwrap()` on anything derived from user input.
 
-Type errors belong in `compiler/type_infer.rs` and `compiler/infer/`, not in MIR or the backend. By the time MIR is lowered, types are already settled.
+Type errors belong in `typechecker/type_infer.rs` and `typechecker/infer/`, not in MIR or the backend. By the time MIR is lowered, types are already settled.
 
 Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be applied to a field, write 'obj.(?p)' or 'obj~>p' instead` over `unexpected token`.
 

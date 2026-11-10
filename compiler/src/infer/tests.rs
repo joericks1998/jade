@@ -58,7 +58,7 @@ fn run(tag: &str, src: &str) -> String {
     std::fs::write(&file, src).unwrap();
     let tokens = crate::frontend::lexer::tokenize(src).unwrap();
     let ast = crate::frontend::parser::parse(tokens).unwrap();
-    let tp = crate::compiler::type_infer::infer(ast).unwrap();
+    let tp = crate::typechecker::type_infer::infer(ast).unwrap();
     let bin = dir.join("main");
     crate::aot::compile(tp, Some(&file), &bin, crate::aot::Emit::Binary).unwrap();
     let out = Command::new(&bin).output().unwrap();

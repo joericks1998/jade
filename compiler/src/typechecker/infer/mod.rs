@@ -41,9 +41,9 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiler::tir::{TExpr, TExprKind, TProgram, TStmt};
 use crate::frontend::ast::StructFieldDef;
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::tir::{TExpr, TExprKind, TProgram, TStmt};
 
 pub use members::check_members;
 use ty::Store;
@@ -200,7 +200,7 @@ pub struct Checker<'a> {
     /// where its class is: `(class, member, decorators, is_field, span)`.
     member_decorators: Vec<(String, String, Vec<String>, bool, Span)>,
     /// Globals bound to the result of a decorator applied to a function.
-    decorated: HashMap<String, crate::compiler::tir::TDecorators>,
+    decorated: HashMap<String, crate::typechecker::tir::TDecorators>,
     /// Std package names, which a variable or function of the same name shadows.
     packages: HashSet<String>,
     instances: HashMap<InstKey, Instance>,

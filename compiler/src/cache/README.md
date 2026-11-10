@@ -22,7 +22,7 @@ A cache written before format versioning existed has no `format_version` field. 
 
 ## Who uses it
 
-*Depends on:* `frontend::ast::Program` and `compiler::tir::TProgram`, both of which are serde-serializable, plus `sha2` and `bincode`.
+*Depends on:* `frontend::ast::Program` and `typechecker::tir::TProgram`, both of which are serde-serializable, plus `sha2` and `bincode`.
 
 *Used by:* `cli/check.rs` on the fast path, plus `cli/cache.rs` and `cli/env.rs` for statistics and cleanup.
 

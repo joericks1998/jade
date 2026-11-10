@@ -229,7 +229,7 @@ pub(crate) fn try_compile_file(
         Ok(p) => p,
         Err(e) => return Err(format!("{path}: parse error: {e}")),
     };
-    let tprogram = match crate::compiler::type_infer::infer(program) {
+    let tprogram = match crate::typechecker::type_infer::infer(program) {
         Ok(tp) => tp,
         Err(e) => return Err(format!("{path}: type error: {e}")),
     };

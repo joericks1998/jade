@@ -849,7 +849,7 @@ fn check_agrees_with_build_about_calls() {
     for (name, src, want) in cases {
         let path = dir.join(format!("{name}.jde"));
         std::fs::write(&path, src).unwrap();
-        let program = crate::compiler::type_infer::infer(
+        let program = crate::typechecker::type_infer::infer(
             crate::frontend::parser::parse(crate::frontend::lexer::tokenize(src).unwrap()).unwrap(),
         )
         .unwrap();
@@ -864,7 +864,7 @@ fn check_agrees_with_build_about_calls() {
     let ok_src = "print(\"ok\")\nprint(str(\"abc\".upper()))\n";
     let path = dir.join("fine.jde");
     std::fs::write(&path, ok_src).unwrap();
-    let program = crate::compiler::type_infer::infer(
+    let program = crate::typechecker::type_infer::infer(
         crate::frontend::parser::parse(crate::frontend::lexer::tokenize(ok_src).unwrap()).unwrap(),
     )
     .unwrap();

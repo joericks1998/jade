@@ -1,6 +1,6 @@
 use crate::builtins::Package;
-use crate::compiler::tir::JadeType;
-use crate::compiler::type_infer::TypeContext;
+use crate::typechecker::tir::JadeType;
+use crate::typechecker::type_infer::TypeContext;
 
 fn register_fs_pkg_types(ctx: &mut TypeContext) {
     ctx.define("fs".to_string(), JadeType::Unknown);

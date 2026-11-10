@@ -6,8 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::compiler::tir::TProgram;
 use crate::frontend::ast::Program;
+use crate::typechecker::tir::TProgram;
 
 /// Jade version baked in at compile time — used to invalidate cached artifacts
 /// when the AST format changes between releases.

@@ -49,13 +49,13 @@
 //! default expression have their `Vec<Stmt>` body left un-mangled — vanishingly
 //! rare and not worth an entire AST-statement walker yet.
 
-use crate::compiler::infer::native::NativeSig;
+use crate::typechecker::infer::native::NativeSig;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
 use crate::frontend::ast::{Expr, FStrPart, StructFieldDef};
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
 
 /// Mangle a module-global `name` into module `id`'s namespace.
 fn mangle(name: &str, id: u32) -> String {
@@ -137,7 +137,7 @@ pub fn resolve_and_namespace(
 pub fn namespace_source(source: &str, label: &str, id: u32) -> Result<Vec<TStmt>, String> {
     let tokens = crate::frontend::lexer::tokenize(source).map_err(|e| format!("{label}: {e}"))?;
     let ast = crate::frontend::parser::parse(tokens).map_err(|e| format!("{label}: {e}"))?;
-    let tp = crate::compiler::type_infer::infer(ast).map_err(|e| format!("{label}: {e}"))?;
+    let tp = crate::typechecker::type_infer::infer(ast).map_err(|e| format!("{label}: {e}"))?;
     let (values, types) = collect_globals(&tp.stmts);
     let mut reg = Registry::new();
     let body = process_file(&mut reg, tp.stmts, Path::new("."), Some(id), values, types)
@@ -223,7 +223,7 @@ struct Registry {
     native_pkgs: Vec<NativePkg>,
     /// What `jade.toml` declares about each native package's functions, by
     /// the package's import name, then the function. See
-    /// `compiler::infer::native`.
+    /// `typechecker::infer::native`.
     native_decls: HashMap<String, NativeDecls>,
     /// The classes each loaded native package defines, by pkgid, then the
     /// name the program writes after the package's alias.
@@ -371,7 +371,7 @@ fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, ResolveError> {
         std::fs::read_to_string(canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
     let tokens = crate::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
     let ast = crate::frontend::parser::parse(tokens).map_err(|e| e.to_string())?;
-    let tp = crate::compiler::type_infer::infer(ast).map_err(|e| e.to_string())?;
+    let tp = crate::typechecker::type_infer::infer(ast).map_err(|e| e.to_string())?;
     Ok(tp.stmts)
 }
 
@@ -800,7 +800,7 @@ fn record_class(name: &str, fields: &[(String, String)]) -> TStmt {
 fn native_declarations(
     manifest: &crate::project::ProjectManifest,
 ) -> Result<HashMap<String, NativeDecls>, String> {
-    use crate::compiler::infer::native::parse_sig_in;
+    use crate::typechecker::infer::native::parse_sig_in;
     let mut out: HashMap<String, NativeDecls> = HashMap::new();
     if let Some(deps) = &manifest.dependencies {
         for (name, d) in deps {
@@ -865,7 +865,7 @@ fn native_declarations(
             // A record's fields are checked here, where the manifest is named.
             for (bare, fields) in &table.records {
                 for (field, t) in fields {
-                    crate::compiler::infer::native::parse_type_in(t, &classes).map_err(|e| {
+                    crate::typechecker::infer::native::parse_type_in(t, &classes).map_err(|e| {
                         format!(
                             "the field {field} of [lib.{name}.structs.{bare}] in jade.toml: {e}"
                         )
@@ -1935,7 +1935,7 @@ mod ffi_symbol_tests {
 
     #[test]
     fn a_lib_declares_records_its_functions_return() {
-        use crate::compiler::infer::Ty;
+        use crate::typechecker::infer::Ty;
         let m: ProjectManifest = toml::from_str(
             "[lib.gfx]\npath = \".\"\n\
              [lib.gfx.symbols.cursor]\nargs = []\nret = \"Point\"\n\

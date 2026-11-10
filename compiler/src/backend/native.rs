@@ -5,7 +5,7 @@
 //! const JadeVal* argv, JadeVal* out)`. That boundary is v1's, unchanged, so a
 //! package built for v1 loads here too; `runtime_aot/runtime.h` documents it.
 //! What changes is the Jade side. The checker gives every call static types
-//! (`compiler::infer::native`), so each call marshals its arguments by those
+//! (`typechecker::infer::native`), so each call marshals its arguments by those
 //! types and reads its result back as one, and a result of the wrong kind
 //! raises rather than flowing on.
 //!
@@ -31,8 +31,8 @@ use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
 use super::layout::{ARR_DATA, LEN, TYPE_ID};
 use super::{Cx, F};
-use crate::compiler::infer::FnTy;
 use crate::mir::{NativeCall, Ty};
+use crate::typechecker::infer::FnTy;
 
 /// The `JADE_FFI_*` tags.
 /// The version of the 16-byte `JadeVal` format a native package and the
@@ -449,7 +449,7 @@ impl<'ctx> Cx<'ctx> {
                             &[x, f.at_c(vs, VAL * i).into(), f.bool(true).into()],
                         );
                     }
-                    let shown = crate::compiler::infer::display_type_name(class).to_string();
+                    let shown = crate::typechecker::infer::display_type_name(class).to_string();
                     let sx = f.malloc(32);
                     f.store(sx, f.call_ptr(f.cx.libc("strdup"), &[f.cx.cstr(&shown).into()]));
                     f.store(f.at_c(sx, 8), ks);

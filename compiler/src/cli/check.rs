@@ -1,8 +1,8 @@
 use std::{fs, path::Path, process};
 
 use crate::{
-    compiler::type_infer,
     frontend::{lexer, parser},
+    typechecker::type_infer,
 };
 
 /// Checks that run after type inference, on both the cached and uncached paths.
@@ -17,7 +17,7 @@ use crate::{
 /// depends on. The import walk was missing until v1.1.33, and its absence made
 /// that claim false for any file with an import: `use totally_made_up_module`
 /// reported `ok` and then failed at run time.
-fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
+fn post_tir_checks(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Result<(), String> {
     check_imports(tprogram, path)?;
     crate::aot::would_build(tprogram, Some(Path::new(path)))
 }
@@ -34,8 +34,8 @@ fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Res
 /// has not been populated yet will therefore report its dependency imports as
 /// unresolved, which is accurate: they cannot be loaded until `jade pkg install`
 /// runs.
-fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
-    use crate::compiler::tir::TStmt;
+fn check_imports(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Result<(), String> {
+    use crate::typechecker::tir::TStmt;
 
     let paths: Vec<_> = tprogram
         .stmts

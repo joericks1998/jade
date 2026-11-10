@@ -208,7 +208,7 @@ pub struct LibraryEntry {
     /// What a native library's functions take and return, for the static
     /// checker: `[lib.<name>.symbols.<fn>]` with `args` and `ret` written in
     /// Jade types. A Jade-ABI library carries no types of its own, so this is
-    /// where they come from. See `compiler::infer::native`.
+    /// where they come from. See `typechecker::infer::native`.
     #[serde(default)]
     pub symbols: Option<HashMap<String, NativeDecl>>,
     /// Records a native library's functions pass and return, as

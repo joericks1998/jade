@@ -145,7 +145,7 @@ impl<'ctx> Cx<'ctx> {
             for (i, s) in f.cx.structs.iter().enumerate() {
                 let b = f.block();
                 cases.push((f.i64(i as i64), b));
-                bodies.push((b, crate::compiler::infer::display_type_name(&s.name).to_string()));
+                bodies.push((b, crate::typechecker::infer::display_type_name(&s.name).to_string()));
             }
             f.switch(id, default, &cases);
             for (b, n) in bodies {

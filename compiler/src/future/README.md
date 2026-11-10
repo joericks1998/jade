@@ -58,7 +58,7 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 ## Who uses it
 
-*Depends on:* `compiler/type_infer` for `TypeContext`, which the method types register into.
+*Depends on:* `typechecker/type_infer` for `TypeContext`, which the method types register into.
 
 *Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`, and `builtins::register_primitive_method_types`. The compiled backend does not come through here at all: `mir/ops.rs` lowers `ready` to `Op::Ready`, and `src/backend/func.rs` answers it from the job's state and cancel words under the task queue's lock.
 
@@ -66,4 +66,4 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 *A polling loop is free inside something that was already looping.* A render loop wakes at frame rate whether or not it asks. It is not free for a program with nothing else to do — `while !f.ready() { }` burns a core. What that case wants is to block until *any* of several futures resolves, with a timeout, so the CPU can idle. That primitive is `wait()`, a bare global, with a `time.after(secs)` among the futures for the timeout, and this one is not a substitute for it.
 
-*The receiver is checked before the program runs.* The static checker knows every value's type, so `n.ready()` on an int stops the build with `int has no method 'ready'`, from `compiler/infer/builtins.rs`. Until phase 6, v1's backend emitted a run-time guard before the call and the runtime checked again; a v2 binary needs neither.
+*The receiver is checked before the program runs.* The static checker knows every value's type, so `n.ready()` on an int stops the build with `int has no method 'ready'`, from `typechecker/infer/builtins.rs`. Until phase 6, v1's backend emitted a run-time guard before the call and the runtime checked again; a v2 binary needs neither.

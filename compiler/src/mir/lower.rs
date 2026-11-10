@@ -1,6 +1,6 @@
 //! Lowering the checked program into MIR.
 //!
-//! The checker's answer (`compiler::infer::Typed`) says, for every instance it
+//! The checker's answer (`typechecker::infer::Typed`) says, for every instance it
 //! reached, the type of every expression and slot and the target of every call,
 //! keyed by the address of the syntax node. This walks each instance's body
 //! once with those answers in hand and writes MIR: locals for variables and
@@ -14,10 +14,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::compiler::infer::{FnKey, InstKey, Target, Typed};
-use crate::compiler::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::infer::{FnKey, InstKey, Target, Typed};
+use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -38,7 +38,7 @@ pub(super) struct Lowerer<'a> {
     native_names: HashMap<u32, String>,
     /// What `jade.toml` declares about native functions, by
     /// `__native$<pkg>$<fn>`.
-    native_sigs: HashMap<String, crate::compiler::infer::native::NativeSig>,
+    native_sigs: HashMap<String, crate::typechecker::infer::native::NativeSig>,
     fns: HashMap<&'a str, FnDef<'a>>,
     methods: HashMap<(&'a str, &'a str), FnDef<'a>>,
     func_ids: HashMap<InstKey, FuncId>,
@@ -62,7 +62,7 @@ pub(super) struct Lowerer<'a> {
 /// type's signature that calls a named function's instance.
 struct Adapter {
     name: String,
-    ty: crate::compiler::infer::FnTy,
+    ty: crate::typechecker::infer::FnTy,
     func: Func,
 }
 
@@ -91,7 +91,7 @@ pub fn lower_program_with(
     program: &TProgram,
     typed: &Typed,
     natives: Vec<NativeLib>,
-    sigs: &HashMap<String, crate::compiler::infer::native::NativeSig>,
+    sigs: &HashMap<String, crate::typechecker::infer::native::NativeSig>,
 ) -> Result<Program> {
     let mut l = Lowerer::new(&program.stmts, typed);
     l.native_sigs = sigs.clone();
@@ -332,7 +332,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn adapter(
         &self,
         name: &str,
-        ft: &crate::compiler::infer::FnTy,
+        ft: &crate::typechecker::infer::FnTy,
         span: Span,
     ) -> Result<FuncId> {
         if let Some(i) = self.adapters.borrow().iter().position(|a| a.name == name && a.ty == *ft) {
@@ -928,7 +928,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
             // A named function joining others becomes a pointer to an adapter
             // with the joined signature.
-            (Ty::Func(crate::compiler::infer::FuncRef::Named(n)), Ty::Fn(ft)) => {
+            (Ty::Func(crate::typechecker::infer::FuncRef::Named(n)), Ty::Fn(ft)) => {
                 let id = self.l.adapter(n, ft, span)?;
                 Ok(self.assign_temp(to.clone(), Rvalue::FnAddr(id)))
             }
@@ -1297,7 +1297,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     fn try_catch(
         &mut self,
         body: &'a [TStmt],
-        arms: &'a [crate::compiler::tir::TCatchArm],
+        arms: &'a [crate::typechecker::tir::TCatchArm],
     ) -> Result<()> {
         let h = self.new_block();
         let end = self.new_block();

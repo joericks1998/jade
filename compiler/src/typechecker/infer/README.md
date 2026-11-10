@@ -1,4 +1,4 @@
-# `src/compiler/infer/`: whole-program static types
+# `src/typechecker/infer/`: whole-program static types
 
 ## What this subtree is
 
@@ -41,7 +41,7 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 *Used by:* `aot::compile` and `aot::would_build`, and `mir::lower_program`, which reads `Typed`. `cli/check.rs` reaches it through `would_build`, which is also how the `every_example_matches_its_expected_check_result` test judges every fixture.
 
-*Depends on:* `compiler::tir` for the merged program it reads, `frontend::ast` for struct field definitions, and `builtins` for the package and primitive-method name lists.
+*Depends on:* `typechecker::tir` for the merged program it reads, `frontend::ast` for struct field definitions, and `builtins` for the package and primitive-method name lists.
 
 ## Gotchas
 
@@ -58,6 +58,6 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 ## Building and testing
 
 ```sh
-cargo test compiler::infer
+cargo test typechecker::infer
 ./target/debug/jade check examples/arrays/mixed_error.jde    # one rule, from the CLI
 ```

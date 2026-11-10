@@ -1186,7 +1186,7 @@ mod parser {
     /// talked about tokens ("expected function or call"). The stage now survives
     /// into the AST and type inference rejects it, which lets the error name
     /// what the stage actually turned out to be. See the `pipe_stage` tests in
-    /// `compiler/tests.rs` for the rejection itself.
+    /// `typechecker/tests.rs` for the rejection itself.
     #[test]
     fn test_parse_pipe_invalid_rhs_parses_and_defers_to_inference() {
         let tokens = lexer::tokenize("5 |> (1 + 2)").unwrap();

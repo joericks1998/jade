@@ -48,7 +48,7 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 
 ## Who uses it
 
-*Depends on:* nearly every other module. `frontend/` and `compiler/` for the pipeline, `build/` for compilation, `project/` for manifest and root resolution, `pkg/` for dependencies, and `cache/` for the on-disk cache.
+*Depends on:* nearly every other module. `frontend/` and `typechecker/` for the pipeline, `build/` for compilation, `project/` for manifest and root resolution, `pkg/` for dependencies, and `cache/` for the on-disk cache.
 
 *Used by:* `src/main.rs` only.
 

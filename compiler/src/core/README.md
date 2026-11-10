@@ -4,7 +4,7 @@
 
 The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the reply length `max_tokens` and `set_max_tokens`, the primitive conversions such as `int` and `str`, and `Grammar`.
 
-`GLOBAL_NAMES` lists them, and `register_types` declares the type of each to the checker. The two sit side by side so a name cannot be callable without being typed. Nothing here runs: `compiler/infer/builtins.rs` gives each one its static type, `mir/ops.rs` lowers each call, and the code they run is support code emitted by `src/backend/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
+`GLOBAL_NAMES` lists them, and `register_types` declares the type of each to the checker. The two sit side by side so a name cannot be callable without being typed. Nothing here runs: `typechecker/infer/builtins.rs` gives each one its static type, `mir/ops.rs` lowers each call, and the code they run is support code emitted by `src/backend/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
 
 ## Why a name lives here rather than in a package
 
@@ -32,13 +32,13 @@ Three details are worth knowing:
 
 ## Who uses it
 
-*Depends on:* `compiler/type_infer` for `TypeContext`.
+*Depends on:* `typechecker/type_infer` for `TypeContext`.
 
-*Used by:* `builtins::global_names`, which the registry tests read, and `builtins::register_core_types`, which type inference calls. The static checker keeps its own list of the callable names in `is_builtin_value` and types each in `builtin_result`, both in `compiler/infer/builtins.rs`, and `builtin` in `mir/ops.rs` lowers each one.
+*Used by:* `builtins::global_names`, which the registry tests read, and `builtins::register_core_types`, which type inference calls. The static checker keeps its own list of the callable names in `is_builtin_value` and types each in `builtin_result`, both in `typechecker/infer/builtins.rs`, and `builtin` in `mir/ops.rs` lowers each one.
 
 ## Gotchas
 
-*A global here needs a checker arm and a MIR arm in the same change.* Adding a name and a type teaches v1's type inference only. The name also goes in `is_builtin_value` and `builtin_result` in `compiler/infer/builtins.rs`, in the `builtin` match in `mir/ops.rs`, and, if it does real work, in support code in `src/backend/`. Before `jade check` ran the backend's lowering, a missing arm meant `check` passed while `build` refused, which a program discovered only when it tried to ship. `jade check` runs MIR lowering now, so it reports the gap.
+*A global here needs a checker arm and a MIR arm in the same change.* Adding a name and a type teaches v1's type inference only. The name also goes in `is_builtin_value` and `builtin_result` in `typechecker/infer/builtins.rs`, in the `builtin` match in `mir/ops.rs`, and, if it does real work, in support code in `src/backend/`. Before `jade check` ran the backend's lowering, a missing arm meant `check` passed while `build` refused, which a program discovered only when it tried to ship. `jade check` runs MIR lowering now, so it reports the gap.
 
 *A compiled integer is a full `i64` now.* v1 tagged its integers, so a lowering that returned one had to `tag_int` it and a lowering that took one had to `untag_int` first. Forgetting halved every value: `max_tasks()` answered 16 for 32, and `set_max_tasks(9999)` answered 256 for 512. The static backend has no tags, so a number passes straight through.
 

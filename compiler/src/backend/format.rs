@@ -163,7 +163,7 @@ impl<'ctx> Cx<'ctx> {
                 }
                 Ty::Struct(_) => f.cx.lit("<struct>"),
                 // Functions print the way v1 named them.
-                Ty::Func(crate::compiler::infer::FuncRef::Builtin(n)) => match n.as_str() {
+                Ty::Func(crate::typechecker::infer::FuncRef::Builtin(n)) => match n.as_str() {
                     "str" | "int" | "float" | "bool" | "char" => f.cx.lit(&format!("<type {n}>")),
                     "print" | "write" | "input" => f.cx.lit("<native fn>"),
                     other => f.cx.lit(&format!("<builtin {other}>")),

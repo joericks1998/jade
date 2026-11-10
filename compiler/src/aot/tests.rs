@@ -4,7 +4,7 @@ use super::*;
 fn tir(src: &str) -> TProgram {
     let tokens = crate::frontend::lexer::tokenize(src).unwrap();
     let program = crate::frontend::parser::parse(tokens).unwrap();
-    crate::compiler::type_infer::infer(program).unwrap()
+    crate::typechecker::type_infer::infer(program).unwrap()
 }
 
 #[test]

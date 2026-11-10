@@ -1,4 +1,4 @@
-# `src/compiler/`: AST to typed IR to static types
+# `src/typechecker/`: AST to typed IR to static types
 
 ## What this subtree is
 
@@ -10,6 +10,8 @@ merged TProgram → infer → Typed (types and call targets per instance)
 ```
 
 It ends at the checker's answer. What compiles that answer, [`src/mir/`](../mir/README.md) and [`src/backend/`](../backend/README.md), lives alongside this module rather than inside it. Until phase 6 of `design/v2-static-values.md` this directory also emitted bytecode for v1's backend; that emitter, its escape analysis and its grammar builder went with the bytecode, and the task-safety check moved to `src/mir/taskcheck.rs`.
+
+It was `src/compiler/` until 2.0.1, when the crate itself became `compiler/`. The name also keeps it apart from [`src/infer/`](../infer/README.md), which runs prompts: `typechecker/infer/` infers types, and `infer/` runs a model.
 
 ## Why it was built
 

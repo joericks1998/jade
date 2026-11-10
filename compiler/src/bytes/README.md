@@ -46,7 +46,7 @@ It also means the write has *two* targets and not one. A local binding is a `Pla
 
 ## Who uses it
 
-`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. `compiler/infer/builtins.rs` gives each call its static type, `mir/` lowers the methods and package functions to `Op::Bytes*` operations, and `src/backend/bytes.rs` emits the code for each, including `jade.bytes.set` for writing an octet. So a change to behavior lands there, and a new method or function also needs its name added here.
+`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. `typechecker/infer/builtins.rs` gives each call its static type, `mir/` lowers the methods and package functions to `Op::Bytes*` operations, and `src/backend/bytes.rs` emits the code for each, including `jade.bytes.set` for writing an octet. So a change to behavior lands there, and a new method or function also needs its name added here.
 
 The message text for every failure lives once, in `src/backend/bytes.rs`, and matches what v1 printed. A program can catch these, which makes the wording part of the language rather than an implementation detail.
 

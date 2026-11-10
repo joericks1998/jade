@@ -17,7 +17,7 @@ It stays a separate module so the CLI never reaches into `aot/` internals, and t
 
 ## Who uses it
 
-*Depends on:* `compiler/tir` for the `TProgram` and `aot/` for the compile.
+*Depends on:* `typechecker/tir` for the `TProgram` and `aot/` for the compile.
 
 *Used by:* `cli/build.rs`, which implements `jade build` and the builds behind `jade run` and `jade test`.
 

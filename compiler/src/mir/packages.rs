@@ -10,8 +10,8 @@
 use super::lower::{Fx, internal, not_yet};
 use super::ops::one;
 use super::*;
-use crate::compiler::tir::TExpr;
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::tir::TExpr;
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -450,13 +450,13 @@ impl<'a, 'l> Fx<'a, 'l> {
         let (h, ht) = self.expr(handler)?;
         let ft = match &ht {
             Ty::Fn(ft) => (**ft).clone(),
-            Ty::Func(crate::compiler::infer::FuncRef::Named(n)) => {
-                let key = crate::compiler::infer::InstKey {
-                    func: crate::compiler::infer::FnKey::Named(n.clone()),
+            Ty::Func(crate::typechecker::infer::FuncRef::Named(n)) => {
+                let key = crate::typechecker::infer::InstKey {
+                    func: crate::typechecker::infer::FnKey::Named(n.clone()),
                     args: vec![Ty::Str],
                 };
                 let (_, _, ret) = self.l.sig(&key, span)?;
-                crate::compiler::infer::FnTy { params: vec![Ty::Str], ret, is_async: false }
+                crate::typechecker::infer::FnTy { params: vec![Ty::Str], ret, is_async: false }
             }
             _ => return Err(not_yet("a builtin as a stream handler", span)),
         };

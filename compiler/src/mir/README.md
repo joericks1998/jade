@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-MIR sits between Jade 2.0's type checker and its backend. The checker in [`src/compiler/infer/`](../compiler/infer/README.md) works out a type for every value and a target for every call. MIR writes that answer down as code a backend can lower without asking any more questions about types:
+MIR sits between Jade 2.0's type checker and its backend. The checker in [`src/typechecker/infer/`](../typechecker/infer/README.md) works out a type for every value and a target for every call. MIR writes that answer down as code a backend can lower without asking any more questions about types:
 
 - one function per checked instance, so `add(1, 2)` and `add(1.5, 2.0)` become `add(int, int)` and `add(float, float)`;
 - every local with its type;
@@ -54,7 +54,7 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 *Used by:* `aot::compile`, which runs the checker, lowers to MIR, runs `taskcheck`, and hands the result to [`src/backend/`](../backend/README.md).
 
-*Depends on:* `compiler::infer` for `Typed` and `Ty`, and `compiler::tir` for the program it walks.
+*Depends on:* `typechecker::infer` for `Typed` and `Ty`, and `typechecker::tir` for the program it walks.
 
 ## Gotchas
 
@@ -62,7 +62,7 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 *A prompt is its text.* `norm` turns the prompt type into `str`, so a prompt, a prompt literal and a prompt field lower as strings. `?p` itself never reaches MIR: `src/infer/rewrite.rs` turns it into a call into the inference prelude first, and what the prelude asks of the backend is `Op::Infer`, one `InferFn` per request. A dereference into a class or through a grammar is still refused here by name. `Program::infer` carries the model's plan into the backend, filled in by `aot::compile` when a program that runs a model is built.
 
-*A call into a native package is `Op::Native`*, carrying the function and the static types its arguments go as and its result comes back as. The types are the declared ones from `jade.toml` where there are any (`compiler::infer::native`), and otherwise the ones the call has; a result nothing settles is an error naming the declaration to add. `Program.natives` says where each package is found.
+*A call into a native package is `Op::Native`*, carrying the function and the static types its arguments go as and its result comes back as. The types are the declared ones from `jade.toml` where there are any (`typechecker::infer::native`), and otherwise the ones the call has; a result nothing settles is an error naming the declaration to add. `Program.natives` says where each package is found.
 
 *A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s the backend implements in `backend/tasks.rs`.
 

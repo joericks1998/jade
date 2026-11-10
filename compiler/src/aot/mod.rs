@@ -1,7 +1,7 @@
 //! The `jade build` driver: one merged, checked program in, a binary out.
 //!
 //! `compile` inlines a program's imports (`imports.rs`), applies the class
-//! member rules, fills struct defaults, and asks `compiler::infer` for every
+//! member rules, fills struct defaults, and asks `typechecker::infer` for every
 //! value's static type. `mir` lowers that answer into typed functions,
 //! `mir::taskcheck` refuses tasks that would race, and `backend` turns MIR
 //! into LLVM IR, an object file and a program linked against the C library
@@ -16,8 +16,8 @@ pub mod imports;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::compiler::infer::native::NativeSig;
-use crate::compiler::tir::TProgram;
+use crate::typechecker::infer::native::NativeSig;
+use crate::typechecker::tir::TProgram;
 
 /// What a build produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,10 +68,10 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
         None => (program, Vec::new(), HashMap::new()),
     };
     // Class member rules read what literals wrote, so they run before the
-    // defaults are filled in. See `compiler::infer::members`.
-    crate::compiler::infer::check_members(&program)
+    // defaults are filled in. See `typechecker::infer::members`.
+    crate::typechecker::infer::check_members(&program)
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
-    crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
+    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
     // Each `?p` becomes a call into the inference prelude, added here.
     program.stmts =
@@ -87,7 +87,7 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
 ///
 /// Outputs: the MIR, or the first error.
 fn lower(m: &Merged) -> Result<crate::mir::Program, String> {
-    let typed = crate::compiler::infer::check_program_with(&m.program, &m.sigs)
+    let typed = crate::typechecker::infer::check_program_with(&m.program, &m.sigs)
         .map_err(|e| e.to_string())?;
     let libs = m
         .natives

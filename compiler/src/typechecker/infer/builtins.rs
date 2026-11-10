@@ -11,8 +11,8 @@
 use super::check::Frame;
 use super::ty::{FuncRef, Ty};
 use super::{Checker, StructInfo, Target};
-use crate::compiler::tir::TExpr;
 use crate::frontend::error::Span;
+use crate::typechecker::tir::TExpr;
 
 /// The structs every program has without declaring them, with their field types.
 fn builtin_structs() -> Vec<(&'static str, Vec<(&'static str, Ty)>)> {

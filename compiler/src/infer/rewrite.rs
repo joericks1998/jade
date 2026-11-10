@@ -17,8 +17,8 @@
 //! A dereference into a class, `?p |> City`, or through a grammar is left as it
 //! is, and MIR names it as not compiled yet.
 
-use crate::compiler::tir::{JadeType, TCatchArm, TExpr, TExprKind, TFStrPart, TStmt};
 use crate::frontend::error::Span;
+use crate::typechecker::tir::{JadeType, TCatchArm, TExpr, TExprKind, TFStrPart, TStmt};
 
 /// The namespace id the prelude's names are mangled with, as `reply$<id>`.
 /// Far above any id the import pass hands out, so the two never meet.

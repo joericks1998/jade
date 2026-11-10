@@ -139,12 +139,12 @@ pub fn check(p: &Program) -> Result<(), JadeError> {
 /// Purpose: This function gives a function's name as its source writes it.
 fn fn_name(f: &Func) -> String {
     let base = f.name.split('(').next().unwrap_or(&f.name);
-    crate::compiler::infer::display_type_name(base).to_string()
+    crate::typechecker::infer::display_type_name(base).to_string()
 }
 
 /// Purpose: This function gives a global's name as its source writes it.
 fn global_name(p: &Program, g: super::GlobalId) -> String {
-    crate::compiler::infer::display_type_name(&p.globals[g.0 as usize].name).to_string()
+    crate::typechecker::infer::display_type_name(&p.globals[g.0 as usize].name).to_string()
 }
 
 /// Purpose: This function names a field of a struct, for messages.

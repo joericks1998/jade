@@ -7,10 +7,10 @@
 #![allow(clippy::all)]
 
 mod type_infer {
-    use crate::compiler::tir::{JadeType, TProgram, TStmt};
-    use crate::compiler::type_infer::*;
     use crate::frontend::error::{JadeError, Result};
     use crate::frontend::{lexer, parser};
+    use crate::typechecker::tir::{JadeType, TProgram, TStmt};
+    use crate::typechecker::type_infer::*;
 
     fn infer_src(src: &str) -> Result<TProgram> {
         let tokens = lexer::tokenize(src).expect("lex");
@@ -559,7 +559,7 @@ mod type_infer {
     // These pin which of the three meanings each stage shape takes, because the
     // choice is the language rule and it is not visible in the syntax.
 
-    use crate::compiler::tir::TExprKind;
+    use crate::typechecker::tir::TExprKind;
 
     /// The stage folds back into the dereference as an `output_type`, which is
     /// what makes `grammar_for` constrain sampling. If this regressed to an
@@ -790,8 +790,8 @@ mod type_infer {
     // `taskcheck` cannot cover this. It watches SetIndex/SetField/mutating
     // methods, and a handle has none — all the mutation is inside the C library.
 
-    use crate::compiler::tir::TExpr;
     use crate::frontend::error::Span;
+    use crate::typechecker::tir::TExpr;
 
     fn arg(ty: JadeType) -> TExpr {
         TExpr { kind: TExprKind::Identifier("db".to_string()), ty, span: Span { line: 3, col: 7 } }
@@ -916,8 +916,8 @@ mod type_infer {
 }
 
 mod tir {
-    use crate::compiler::tir::{JadeType, TExpr, TExprKind, TProgram, TStmt};
     use crate::frontend::error::Span;
+    use crate::typechecker::tir::{JadeType, TExpr, TExprKind, TProgram, TStmt};
 
     fn sp() -> Span {
         Span { line: 1, col: 1 }

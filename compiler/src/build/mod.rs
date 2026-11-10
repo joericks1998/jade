@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use crate::compiler::tir::TProgram;
+use crate::typechecker::tir::TProgram;
 
 pub use crate::aot::Emit;
 

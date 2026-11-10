@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::compiler::tir::TProgram;
 use crate::frontend::ast::Program;
+use crate::typechecker::tir::TProgram;
 
 /// Monotonic counter making each test's temp directory name unique.  A
 /// timestamp is not sufficient: two tests starting in the same nanosecond tick

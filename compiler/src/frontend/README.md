@@ -26,7 +26,7 @@ A third choice is worth knowing before you add syntax: *prefer desugaring*. If t
 
 The parser used to rewrite `x |> f` straight into a call. Doing that meant deciding that `f` was a function, which is a question about what a name refers to, and the parser cannot answer it. So a second rule grew for `?p |> int`, where the stage is a type rather than a function. Then a `Parser::in_print_call` flag grew on top of that, to ban the one combination the two rules could not express together. The result was one operator with two parse paths, and a grammar whose legality depended on the name of the enclosing call.
 
-In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer::infer_pipe` now classifies the stage. That deleted both extra paths and the flag. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
+In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_infer::infer_pipe` now classifies the stage. That deleted both extra paths and the flag. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
 
 ## What each file does
 
@@ -43,7 +43,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 
 *Depends on:* nothing else in the crate. This is the bottom of the stack.
 
-*Used by:* nearly everything. `compiler/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
+*Used by:* nearly everything. `typechecker/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
 
 ## Gotchas
 
@@ -65,7 +65,7 @@ It cost users two surprises they could not connect to each other. A nested `asyn
 
 *A decorator means two different things depending on what it sits on, and only one of them lives here.* On a `let` or a `prompt`, the parser rewrites it into a call, so `@f let x = v` becomes `let x = f(v)`. Nothing downstream learns the syntax exists, and the feature costs one desugar with no new AST node.
 
-On a `fn` it cannot work that way, because the value being wrapped is a function the compiler has yet to build. In v1 that path lived in the bytecode emitter. In v2 the checker types a decorated `fn` in `compiler/infer/`, and MIR lowering stops with `jade cannot compile decorators yet` until the backend builds it. The two paths must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
+On a `fn` it cannot work that way, because the value being wrapped is a function the compiler has yet to build. In v1 that path lived in the bytecode emitter. In v2 the checker types a decorated `fn` in `typechecker/infer/`, and MIR lowering stops with `jade cannot compile decorators yet` until the backend builds it. The two paths must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
 
 ## Building and testing
 

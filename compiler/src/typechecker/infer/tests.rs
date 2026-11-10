@@ -12,9 +12,9 @@ use super::*;
 fn check(src: &str) -> Result<Typed, JadeError> {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
     let program = crate::frontend::parser::parse(tokens).expect("parses");
-    let mut tp = crate::compiler::type_infer::infer(program).expect("v1 checker accepts it");
+    let mut tp = crate::typechecker::type_infer::infer(program).expect("v1 checker accepts it");
     check_members(&tp)?;
-    crate::compiler::type_infer::fill_struct_literal_defaults(&mut tp).expect("defaults fill");
+    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tp).expect("defaults fill");
     check_program(&tp)
 }
 
@@ -404,9 +404,9 @@ fn refused(src: &str, want: &str) {
             return;
         }
     };
-    let result = crate::compiler::type_infer::infer(program).and_then(|mut tp| {
+    let result = crate::typechecker::type_infer::infer(program).and_then(|mut tp| {
         check_members(&tp)?;
-        crate::compiler::type_infer::fill_struct_literal_defaults(&mut tp)?;
+        crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tp)?;
         check_program(&tp).map(|_| ())
     });
     match result {

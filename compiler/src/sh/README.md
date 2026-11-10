@@ -28,7 +28,7 @@ There are three rather than one because a caller wants something different in ea
 
 ## Who uses it
 
-*Depends on:* `builtins::Package` to register itself, and `compiler::type_infer` for the type registration.
+*Depends on:* `builtins::Package` to register itself, and `typechecker::type_infer` for the type registration.
 
 *Used by:* `builtins/`, which mounts `SH_PKG` under `std/sh`. The compiled backend does not go through here at all. `mir/packages.rs` lowers each call to `Op::Sh`, and `sh_fn` in `src/backend/sh.rs` builds one function per kind of call. Each one calls `refuse_tainted`, defined in `src/backend/fs.rs`, before it spawns anything.
 

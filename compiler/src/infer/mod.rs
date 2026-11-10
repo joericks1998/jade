@@ -25,8 +25,8 @@ pub mod rewrite;
 pub mod unicode;
 
 use crate::builtins::Package;
-use crate::compiler::tir::JadeType;
-use crate::compiler::type_infer::TypeContext;
+use crate::typechecker::tir::JadeType;
+use crate::typechecker::type_infer::TypeContext;
 
 /// Purpose: This function registers the internal package's name.
 ///

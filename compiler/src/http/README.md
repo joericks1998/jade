@@ -10,7 +10,7 @@ A compiled program never calls into this directory. `jade build` emits the reque
 
 The transport, the status parsing, and the trust marking therefore live once in `src/backend/http.rs`, which runs `curl` as v1 did, so HTTPS works with no TLS library in the binary.
 
-That split is why adding a function is a change in several places at once: its name in `HTTP_PKG`, its type in `compiler/infer/builtins.rs`, its `HttpFn` arm in `mir/packages.rs`, and its code in `src/backend/http.rs`.
+That split is why adding a function is a change in several places at once: its name in `HTTP_PKG`, its type in `typechecker/infer/builtins.rs`, its `HttpFn` arm in `mir/packages.rs`, and its code in `src/backend/http.rs`.
 
 Missing a later step used to be a late failure. Between v1.2.2 and v1.2.5 that is what happened to `get_bytes` and `post_bytes`: `jade check` passed, the build reported "unsupported module call", and a program only discovered the gap at packaging time. `jade check` now runs MIR lowering too, so a function with no lowering fails at `check` instead.
 

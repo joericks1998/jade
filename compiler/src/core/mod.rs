@@ -1,12 +1,12 @@
 //! The globals every program has without an import: `print`, `len`, `write`,
 //! `input`, the task controls, the primitive conversions and `Grammar`.
 
-use crate::compiler::{tir::JadeType, type_infer::TypeContext};
+use crate::typechecker::{tir::JadeType, type_infer::TypeContext};
 
 /// Every global a program can name without importing anything.
 ///
 /// The static checker keeps its own list of the callable ones, in
-/// `is_builtin_value` in `compiler/infer/builtins.rs`.
+/// `is_builtin_value` in `typechecker/infer/builtins.rs`.
 pub const GLOBAL_NAMES: &[&str] = &[
     "print",
     "len",

@@ -1,4 +1,4 @@
-//! The compiler proper: source AST → typed IR → static types.
+//! The type checker: source AST → typed IR → static types.
 //!
 //! `type_infer` turns each file's AST into typed IR, and `infer` gives every
 //! value of the merged program one static type. What consumes that answer,

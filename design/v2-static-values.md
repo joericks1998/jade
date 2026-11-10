@@ -26,7 +26,7 @@ The runtime that does this is about 16,600 lines: 11,300 of Rust in `src/runtime
 
 ## Where the type checker stands
 
-`src/compiler/type_infer.rs` is one forward pass with no type variables. A function's parameters are always `Unknown`, a call never looks at its arguments, and `Unknown` spreads quietly into everything it touches. The checker then picks typed instructions such as `AddInt` where it can, and leaves the rest to runtime tags. About half the bytecode instruction set is typed, but only arithmetic, comparison and unary operators use the types; every collection, struct, call and formatting instruction dispatches on tags.
+`src/typechecker/type_infer.rs` is one forward pass with no type variables. A function's parameters are always `Unknown`, a call never looks at its arguments, and `Unknown` spreads quietly into everything it touches. The checker then picks typed instructions such as `AddInt` where it can, and leaves the rest to runtime tags. About half the bytecode instruction set is typed, but only arithmetic, comparison and unary operators use the types; every collection, struct, call and formatting instruction dispatches on tags.
 
 Reading the checker also turned up five places where it gives a value a type it may not have, so a typed instruction runs on the wrong kind of value:
 
@@ -274,7 +274,7 @@ Each phase ends with the golden gate green for every example it covers. The new 
 
 ## Progress
 
-*Phase 1 is done* (2026-11-04): `src/compiler/infer/` checks the whole merged program and gates `jade build` and `jade check`. Every runnable example checks, the 19 fixtures listed above were rewritten, and each runtime type error they tested is now a `*_error.jde` compile-error fixture. Building it settled four details this document had left open:
+*Phase 1 is done* (2026-11-04): `src/typechecker/infer/` checks the whole merged program and gates `jade build` and `jade check`. Every runnable example checks, the 19 fixtures listed above were rewritten, and each runtime type error they tested is now a `*_error.jde` compile-error fixture. Building it settled four details this document had left open:
 
 - *A function's trailing bare expression is its return value*, as v1 ran it: `fn double(x) { x * 2 }` returns an int.
 - *An early exit narrows too.* After `if x == nil { return }`, the rest of the block reads `x` as its non-optional type, as inside `if x != nil { … }`.

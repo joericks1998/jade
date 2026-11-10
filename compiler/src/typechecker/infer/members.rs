@@ -20,9 +20,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiler::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 use crate::frontend::ast::{ClassMembers, StructFieldDef};
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
 use super::ty::display_name;
 

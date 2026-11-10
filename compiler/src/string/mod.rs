@@ -1,6 +1,6 @@
 use crate::builtins::Package;
-use crate::compiler::tir::JadeType;
-use crate::compiler::type_infer::TypeContext;
+use crate::typechecker::tir::JadeType;
+use crate::typechecker::type_infer::TypeContext;
 
 /// The methods a `str` receiver has, by name.
 pub const STR_METHODS: &[&str] = &[

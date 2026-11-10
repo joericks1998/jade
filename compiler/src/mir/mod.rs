@@ -1,6 +1,6 @@
 //! MIR: the typed middle layer between the checked program and LLVM.
 //!
-//! The checker in `compiler::infer` gives every value one type and every call
+//! The checker in `typechecker::infer` gives every value one type and every call
 //! one target. MIR writes that down as code a backend can lower without asking
 //! any question about types: one function per checked instance, every local
 //! with its type, control flow as basic blocks, and reference counting as
@@ -48,7 +48,7 @@ pub mod taskcheck;
 #[cfg(test)]
 mod tests;
 
-pub use crate::compiler::infer::Ty;
+pub use crate::typechecker::infer::Ty;
 pub use lower::{lower_program, lower_program_with};
 
 /// Purpose: This struct names a local of the current function.

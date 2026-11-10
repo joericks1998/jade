@@ -2,10 +2,10 @@
 //!
 //! Each package is a flat top-level module (`crate::array`, `crate::math`, …)
 //! that declares its function names and registers its types with the checker.
-//! Nothing here runs: `compiler/infer/builtins.rs` types each call, `mir/`
+//! Nothing here runs: `typechecker/infer/builtins.rs` types each call, `mir/`
 //! lowers it, and `src/backend/` emits the code.
 
-use crate::compiler::type_infer::TypeContext;
+use crate::typechecker::type_infer::TypeContext;
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.

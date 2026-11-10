@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use super::ty::{FuncRef, Ty};
 use super::{Checker, FnKey, InstKey, Target, addr, is_nil_literal};
-use crate::compiler::tir::{TExpr, TExprKind, TFStrPart, TStmt};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::Span;
+use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TStmt};
 
 /// Purpose: This struct holds the state of checking one instance's body.
 pub(super) struct Frame {

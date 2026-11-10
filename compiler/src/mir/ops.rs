@@ -8,8 +8,8 @@
 
 use super::lower::{Fx, internal, not_yet};
 use super::*;
-use crate::compiler::tir::{TExpr, TExprKind, TStmt};
 use crate::frontend::error::{JadeError, Span};
+use crate::typechecker::tir::{TExpr, TExprKind, TStmt};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -539,12 +539,12 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let rt = super::lower::norm(&f.ret);
                 Ok((self.assign_temp(rt.clone(), Rvalue::CallIndirect(fv, argv)), rt))
             }
-            Ty::Func(crate::compiler::infer::FuncRef::Builtin(name)) => {
+            Ty::Func(crate::typechecker::infer::FuncRef::Builtin(name)) => {
                 let rt = builtin_result(name);
                 self.builtin_apply(name, args, &rt, span)
             }
             Ty::Func(_) => match self.targets.get(&call_node).cloned() {
-                Some(crate::compiler::infer::Target::Instance(k)) => {
+                Some(crate::typechecker::infer::Target::Instance(k)) => {
                     let def = self
                         .l
                         .def_of(&k.func)

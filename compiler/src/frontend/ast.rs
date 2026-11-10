@@ -325,7 +325,7 @@ pub enum Expr {
     /// `value |> stage` — one pipe stage.
     ///
     /// The parser builds this for every `|>` and decides nothing about what the
-    /// stage means; `compiler::type_infer::infer_pipe` classifies it. A stage is
+    /// stage means; `typechecker::type_infer::infer_pipe` classifies it. A stage is
     /// one of three things:
     ///
     /// - a **type name**, which on a prompt dereference constrains sampling with
