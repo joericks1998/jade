@@ -13,10 +13,13 @@
 //! uses. LLD signs the binary, as Apple Silicon requires.
 //!
 //! *Linux.* The C library is glibc's `libc.so.6`, which every glibc system has
-//! as a runtime file. The start-up code that development packages normally
-//! supply as `Scrt1.o` is three instructions of setup and a call to
-//! `__libc_start_main`; the backend emits it as `_start` (see `START_X86_64`),
-//! so linking needs nothing a minimal system lacks.
+//! as a runtime file, or on a system without glibc, such as Alpine, musl's
+//! loader, which is its C library too. The start-up code that development
+//! packages normally supply as `Scrt1.o` is three instructions of setup and a
+//! call to `__libc_start_main`; the backend emits it as `_start` (see
+//! `START_X86_64`), so linking needs nothing a minimal system lacks. musl's
+//! `__libc_start_main` reads only `main`, `argc` and `argv`, the first three of
+//! the arguments glibc's takes, so one `_start` serves both.
 
 use std::ffi::{CString, c_char, c_int};
 use std::path::Path;
@@ -240,9 +243,10 @@ fn macos_version() -> String {
         .unwrap_or_else(|| "11.0".to_string())
 }
 
-/// Purpose: This function links on Linux, against the system's glibc.
+/// Purpose: This function links on Linux, against the system's C library:
+/// glibc, or musl where glibc is not installed.
 fn link_elf(obj: &Path, out: &Path) -> Result<(), String> {
-    let (interp, dir) = glibc()?;
+    let libc = c_library()?;
     let mut args: Vec<String> = vec![
         "ld.lld".into(),
         "-pie".into(),
@@ -255,7 +259,7 @@ fn link_elf(obj: &Path, out: &Path) -> Result<(), String> {
         "-z".into(),
         "noexecstack".into(),
         "--dynamic-linker".into(),
-        interp.into(),
+        libc.loader.clone(),
         "-o".into(),
         out.display().to_string(),
         obj.display().to_string(),
@@ -264,53 +268,83 @@ fn link_elf(obj: &Path, out: &Path) -> Result<(), String> {
         "--allow-shlib-undefined".into(),
         "--as-needed".into(),
     ];
-    // Older glibc keeps threads, `dlopen` and the math library apart from
-    // libc; newer keeps only math apart. `--as-needed` drops what is unused.
-    for lib in ["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2"] {
-        let p = Path::new(dir).join(lib);
-        if p.is_file() {
-            args.push(p.display().to_string());
-        }
-    }
+    args.extend(libc.libs);
     run_lld(&args)
 }
 
-/// Purpose: This function finds glibc: its dynamic loader and the directory
-/// holding `libc.so.6`.
-fn glibc() -> Result<(&'static str, &'static str), String> {
-    let (interp, dirs): (&str, &[&str]) = if cfg!(target_arch = "aarch64") {
-        (
-            "/lib/ld-linux-aarch64.so.1",
-            &[
-                "/lib/aarch64-linux-gnu",
-                "/usr/lib/aarch64-linux-gnu",
-                "/lib64",
-                "/usr/lib64",
-                "/lib",
-                "/usr/lib",
-            ],
-        )
+/// Purpose: This struct holds what linking against a C library takes.
+#[derive(Debug, PartialEq)]
+struct CLibrary {
+    /// The dynamic loader a program names, which the kernel runs first.
+    loader: String,
+    /// The shared libraries to link, as linker arguments.
+    libs: Vec<String>,
+}
+
+/// Purpose: This function finds the system's C library.
+///
+/// Outputs: glibc when `libc.so.6` is installed, else musl when its loader is,
+/// else a message naming both.
+fn c_library() -> Result<CLibrary, String> {
+    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    c_library_in(Path::new("/"), arch)
+}
+
+/// Purpose: This function finds a C library under a root directory, for one
+/// architecture.
+///
+/// Inputs:
+/// - `root`: the file system's root, `/` outside tests.
+/// - `arch`: `x86_64` or `aarch64`.
+///
+/// Outputs: the C library, or a message naming where it looked.
+fn c_library_in(root: &Path, arch: &str) -> Result<CLibrary, String> {
+    let at = |p: &str| root.join(p.trim_start_matches('/'));
+    let glibc_loader = if arch == "aarch64" {
+        "/lib/ld-linux-aarch64.so.1"
     } else {
-        (
-            "/lib64/ld-linux-x86-64.so.2",
-            &[
-                "/lib/x86_64-linux-gnu",
-                "/usr/lib/x86_64-linux-gnu",
-                "/lib64",
-                "/usr/lib64",
-                "/lib",
-                "/usr/lib",
-            ],
-        )
+        "/lib64/ld-linux-x86-64.so.2"
     };
-    let dir = dirs.iter().find(|d| Path::new(d).join("libc.so.6").is_file()).ok_or_else(|| {
-        format!(
-            "linking needs glibc's libc.so.6, which is in none of {}; a system on another C \
-                 library is not supported yet",
-            dirs.join(", ")
-        )
-    })?;
-    Ok((interp, dir))
+    let multiarch = format!("{arch}-linux-gnu");
+    let dirs = [
+        format!("/lib/{multiarch}"),
+        format!("/usr/lib/{multiarch}"),
+        "/lib64".to_string(),
+        "/usr/lib64".to_string(),
+        "/lib".to_string(),
+        "/usr/lib".to_string(),
+    ];
+    if let Some(dir) = dirs.iter().find(|d| at(d).join("libc.so.6").is_file()) {
+        // Older glibc keeps threads, `dlopen` and the math library apart from
+        // libc; newer keeps only math apart. `--as-needed` drops what is unused.
+        let libs = ["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2"]
+            .iter()
+            .map(|lib| at(dir).join(lib))
+            .filter(|p| p.is_file())
+            .map(|p| p.display().to_string())
+            .collect();
+        return Ok(CLibrary { loader: glibc_loader.to_string(), libs });
+    }
+
+    // musl's loader is its C library too, threads, `dlopen` and math included.
+    // Programs name it by the soname Alpine gives it, which the loader answers
+    // to as itself.
+    let musl_loader = format!("/lib/ld-musl-{arch}.so.1");
+    if at(&musl_loader).is_file() {
+        let soname = format!("libc.musl-{arch}.so.1");
+        let lib = if at("/lib").join(&soname).is_file() {
+            vec!["-L".to_string(), at("/lib").display().to_string(), format!("-l:{soname}")]
+        } else {
+            vec![at(&musl_loader).display().to_string()]
+        };
+        return Ok(CLibrary { loader: musl_loader, libs: lib });
+    }
+
+    Err(format!(
+        "linking needs a C library: glibc's libc.so.6, which is in none of {}, or musl's \
+         loader {musl_loader}, which is not there either",
+        dirs.join(", ")
+    ))
 }
 
 /// Purpose: This function runs LLD.
@@ -350,6 +384,43 @@ mod tests {
         assert!(tbd.contains("install-name:    '/usr/lib/libSystem.B.dylib'"));
         assert!(tbd.contains("[ arm64-macos ]"));
         assert!(tbd.contains("'_malloc', '___error', 'dyld_stub_binder'"));
+    }
+
+    /// Purpose: This function makes an empty file and the directories above it.
+    fn touch(root: &Path, p: &str) {
+        let f = root.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"").unwrap();
+    }
+
+    #[test]
+    fn glibc_is_found_in_its_multiarch_directory() {
+        let root = std::env::temp_dir().join(format!("jade_link_glibc_{}", std::process::id()));
+        touch(&root, "lib/x86_64-linux-gnu/libc.so.6");
+        touch(&root, "lib/x86_64-linux-gnu/libm.so.6");
+        let c = c_library_in(&root, "x86_64").unwrap();
+        assert_eq!(c.loader, "/lib64/ld-linux-x86-64.so.2");
+        assert_eq!(c.libs.len(), 2);
+        // With musl beside it, glibc still wins: it is what the system's own
+        // programs use.
+        touch(&root, "lib/ld-musl-x86_64.so.1");
+        assert_eq!(c_library_in(&root, "x86_64").unwrap().loader, "/lib64/ld-linux-x86-64.so.2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn musl_is_found_where_there_is_no_glibc() {
+        let root = std::env::temp_dir().join(format!("jade_link_musl_{}", std::process::id()));
+        touch(&root, "lib/ld-musl-aarch64.so.1");
+        let c = c_library_in(&root, "aarch64").unwrap();
+        assert_eq!(c.loader, "/lib/ld-musl-aarch64.so.1");
+        assert_eq!(c.libs, vec![root.join("lib/ld-musl-aarch64.so.1").display().to_string()]);
+        // Alpine's soname, when it is there, is what the program records.
+        touch(&root, "lib/libc.musl-aarch64.so.1");
+        let c = c_library_in(&root, "aarch64").unwrap();
+        assert_eq!(c.libs.last().unwrap(), "-l:libc.musl-aarch64.so.1");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(c_library_in(&root, "aarch64").is_err());
     }
 
     #[test]
