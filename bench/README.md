@@ -8,7 +8,9 @@ Comparing against CPython is the point. Jade's compiled backend, and until v1.4.
 
 ## Why it exists
 
-Performance work here has been driven by measurement rather than guesswork. The allocation profiling is the clearest case. The `alloc-profile` Cargo feature swaps the `jade` binary's global allocator for one that records a size-class histogram. The numbers showed that collection churn dominates allocation-heavy code, and that finding produced both the segregated free-list pool in `jade-runtime` and the escape analysis in `compiler/escape.rs`. `alloc_heavy.jde` is the workload that exercised it. Since v2 the program runs as a separate compiled binary, which the profiling allocator is not part of, so a profile of `jade` now shows the compiler's allocations rather than the workload's. `src/alloc/README.md` has the detail.
+Performance work here has been driven by measurement rather than guesswork. The allocation profiling was the clearest case. In v1, the `alloc-profile` Cargo feature swapped the `jade` binary's global allocator for one that recorded a size-class histogram. The numbers showed that collection churn dominated allocation-heavy code, and that finding produced both the segregated free-list pool in v1's runtime and its escape analysis. `alloc_heavy.jde` is the workload that exercised it.
+
+Phase 6 of `design/v2-static-values.md` removed all of that: the runtime, the pool, the escape analysis, and the profiler. A v2 binary allocates through the C library's `malloc` and frees by reference count, with the retain and release code emitted per program by `src/backend/rc.rs`. `alloc_heavy.jde` is still a fair test of allocation-heavy code; there is just no profiler built into `jade` to read it with.
 
 ## What each file does
 
@@ -17,7 +19,7 @@ Performance work here has been driven by measurement rather than guesswork. The 
 - `heavy.jde` and `heavy.py` are a general mixed workload.
 - `extreme.jde` and `extreme.py` are long-running and dominated by computation. This is the one where mean timings mean something, rather than being swamped by startup.
 - `sort.jde` and `sort.py` cover sorting.
-- `alloc_heavy.jde` covers allocation churn, for the allocator and arena work.
+- `alloc_heavy.jde` covers allocation churn. It was the workload for v1's allocator work.
 - `recursion.py` is the Python side of a recursion workload.
 
 *Harnesses:*
@@ -31,7 +33,7 @@ Since v2, `jade run` builds the program before running it, so every `jade run` t
 
 The 1.0.9 "Jade LLVM" column predates native compilation moving out to a build daemon and back again. Treat it as history rather than a baseline, and do not read a difference against it as a regression.
 
-The 1.1.33 run is where the allocation work shows up. On sort, the VM went from 9.93 times slower than Python to 1.09 times faster, which is roughly a 13-fold speedup, while every other VM timing held steady. That is the pool allocator and the escape analysis landing exactly where `alloc_heavy.jde` predicted they would.
+The 1.1.33 run is where the allocation work shows up. On sort, the VM went from 9.93 times slower than Python to 1.09 times faster, which is roughly a 13-fold speedup, while every other VM timing held steady. That is v1's pool allocator and escape analysis landing exactly where `alloc_heavy.jde` predicted they would. Both runs measured v1's runtime, so neither says anything about a v2 binary.
 
 ## Who uses it
 
@@ -52,8 +54,4 @@ Re-running the suite means adding a fresh dated header to `RESULTS.md`, naming t
 ```sh
 cargo build --release
 python3 bench/bench_full.py
-
-# allocation profile of the compiler, see src/alloc/README.md
-cargo build --features alloc-profile
-JADE_ALLOC_PROFILE=1 ./target/debug/jade build bench/alloc_heavy.jde -o /tmp/alloc_heavy
 ```

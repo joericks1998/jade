@@ -18,20 +18,20 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
   It also runs the native handle round-trip, against `handle-fixture.expected`, and the C struct round-trip, against `struct-fixture.expected`.
 
-  With `--backend=static`, it builds with Jade 2.0's static backend instead, and only the examples listed in *`static-examples.list`*. That list grows with each phase of `design/v2-static-values.md` until it holds every example, at which point the static backend becomes the only one and the flag and list go away. The handle round-trip runs in this mode too.
+  Until phase 6 of `design/v2-static-values.md` it had a `--backend=static` mode, with a list of the examples that backend covered. That backend is the only one now, so the flag and the list are gone, and every example builds with it.
 - *`handle-fixture.c`* and *`handle-fixture.jde`* are a stand-in *native* package that hands out opaque handles, plus the Jade program that exercises it. `cc` compiles the C file and `golden.sh` builds the program against it.
 
   They live here rather than under `examples/` for a reason worth stating. A handle only ever comes from a native C package, and a Jade package built with `--lib` cannot produce one. So no `.jde` fixture can reach the tag at all, and leaving it out of the gate would recreate the blind spot that let the `bytes` marshaller stay broken for three releases. The built library's file extension also differs by platform, which a committed `jade.toml` under `examples/` would have to hard-code.
 
   `jade_pkg_abi_version` in the C file must match `jade_runtime::RUNTIME_ABI_VERSION`. The gate reads that number from the runtime source rather than carrying a copy.
 
-  The `jade.toml` the gate writes declares the fixture's functions in `[lib.handlefix.symbols]`, because a Jade-ABI library carries no types and the static backend needs them (design decision 11). The default backend reads the same file and ignores the declarations' types.
+  The `jade.toml` the gate writes declares the fixture's functions in `[lib.handlefix.symbols]`, because a Jade-ABI library carries no types and the compiler needs them (design decision 11).
 - *`struct-fixture.c`*, *`struct-fixture.h`* and *`struct-fixture.jde`* are a plain C library whose functions pass structs in, out and both ways, return one by value, and hand back several values at once, plus the program that calls it. `golden.sh` builds the library with `cc`, binds it as a C dependency with `jade pkg install`, which builds its shim, and compares the program's output to `struct-fixture.expected`. Each shape is one the shim packs into a record, which the static backend reads as a class.
 - *`ffi-gate.sh`*, *`glib-fixture.jde`* and *`alloc-str-loop.jde`* are the FFI gate, described below.
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml` runs `golden.sh`, `golden.sh --backend=static` and `ffi-gate.sh` as required steps on every pull request. Run them locally before opening one.
+*Used by:* `.github/workflows/ci.yml` runs `golden.sh` and `ffi-gate.sh` as required steps on every pull request. Run them locally before opening one.
 
 *Depends on:* a built `jade` binary, defaulting to `./target/debug/jade`, the fixtures and `.expected` files in `examples/`, and `cc` for the handle fixture. A missing `cc` reports as a skip rather than a silent pass. Paths are relative to the current directory, so run the scripts from the repository root.
 
@@ -41,22 +41,14 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 cargo build
 ./src/scripts/golden.sh                    # uses ./target/debug/jade
 ./src/scripts/golden.sh /path/to/jade      # or a specific binary
-./src/scripts/golden.sh --backend=static   # the static backend's examples
 ./src/scripts/ffi-gate.sh
-./src/scripts/ffi-gate.sh --backend=static # the glib checks, built with the static backend
 ```
 
 ## `ffi-gate.sh`: a real C library, bound and run
 
 `golden.sh` covers the language. This script covers the part of the toolchain whose correctness depends on code nobody here wrote: someone else's header, someone else's macros, and a C compiler's opinion of the shim generated from them.
 
-It runs three checks, each catching a different kind of problem.
-
-*The C runtime, compiled with optimizations.* glibc's `realpath` writes up to `PATH_MAX` bytes into the buffer it is handed, and aborts the process when that buffer is smaller. The check only exists in an optimised build, so `cargo test` and the golden gate both miss it. Every FFI package in a compiled binary died at startup on Linux for two releases.
-
-glibc says what is wrong at compile time, so compiling with `-O2 -D_FORTIFY_SOURCE=3 -Werror=attribute-warning` is enough. That takes seconds, rather than the minutes a release build of the toolchain would take.
-
-This check only bites on glibc. Apple's headers carry no such attribute, so on a Mac it passes on code that aborts on Linux. That asymmetry is how the bug shipped, and it is why the CI run is the one that counts.
+It runs two checks, each catching a different kind of problem. Until phase 6 a third compiled v1's C runtime with glibc's fortify checks, which caught a `realpath` buffer a quarter of the size glibc requires; that runtime is gone.
 
 *glib, bound whole and run.* glib is the fixture because it is big and ordinary: 1890 exported symbols, written the way widely-used libraries are actually written, with typedefs over everything and function-like macros shadowing declared functions. The seven tidy libraries the coverage survey used never produced either pattern.
 
@@ -70,7 +62,7 @@ A string the caller owns is the one thing a header cannot express, so the genera
 
 *Every run here is checked for its exit status, and that took four releases to become true.* A process killed by a signal *after* it has printed everything leaves an output file that looks perfectly correct.
 
-This step used to assert only that the output was non-empty and free of the word "error". So a SIGSEGV under the old VM was reported as `ok` from v1.3.19 to v1.3.24. It was visible in every CI log, as a `Segmentation fault` line the *shell* printed, directly above a gate saying `4 ok, 0 failed`. The third check had the status test and the note explaining it from the start. The second check simply never got one.
+This step used to assert only that the output was non-empty and free of the word "error". So a SIGSEGV under the old VM was reported as `ok` from v1.3.19 to v1.3.24. It was visible in every CI log, as a `Segmentation fault` line the *shell* printed, directly above a gate saying `4 ok, 0 failed`. The long run had the status test and the note explaining it from the start. This check simply never got one.
 
 What was crashing is worth recording, because nothing in the toolchain was wrong. The fixture called `g_intern_static_string`, which does not copy. glib's global intern table keeps *the caller's pointer*, and its documentation says the string must never be freed.
 
@@ -94,7 +86,7 @@ It is the long run: 800,000 calls between its two passes, which take about two s
 
 It is a separate file from `glib-fixture.jde` because that fixture is meant to stay short and readable, and a run this long has no business in it.
 
-It reuses the glib project the second check already built. Binding the whole header is nearly all of this script's running time, so binding it a second time would roughly double the gate.
+It reuses the glib project the first check already built. Binding the whole header is nearly all of this script's running time, so binding it a second time would roughly double the gate.
 
 The memory half needs a tool that reports peak resident memory: `/usr/bin/time -v` on GNU coreutils, or `/usr/bin/time -l` on macOS. Neither is guaranteed to be present, so the script probes for both and *skips that half with a reported reason* when it finds neither. It asserts survival either way.
 

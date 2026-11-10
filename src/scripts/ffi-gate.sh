@@ -9,26 +9,14 @@
 #
 # Two gates, and they catch different classes:
 #
-#   1. The fortify check. glibc's `realpath` writes up to PATH_MAX bytes into the
-#      buffer it is given and aborts the process when that buffer is smaller —
-#      but only in an optimised build, which is why `cargo test` and the golden
-#      gate both miss it. Every FFI package in a compiled binary died at startup
-#      on Linux for two releases. glibc says so at compile time, so compiling the
-#      C runtime optimised and refusing the warning is enough, and takes seconds
-#      rather than the minutes a release build of the toolchain would.
-#
-#      It only bites on glibc. Apple's headers carry no such attribute, so on a
-#      Mac this step passes on code that aborts on Linux — which is how the bug
-#      shipped in the first place. CI is the one that counts.
-#
-#   2. The end-to-end run. glib is the library because it is big and ordinary:
+#   1. The end-to-end run. glib is the library because it is big and ordinary:
 #      1890 exported symbols written the way real libraries are written. Binding
 #      it turned up two bugs the seven-library survey never did — a callback
 #      parameter checked against the typedef's name instead of its category, and
 #      a function-like macro shadowing the symbol we bound. Each one refused the
 #      whole dependency, so glib bound 1357 symbols and could not be used at all.
 #
-#   3. The long run. Step 2 calls each binding once, which proves the answer is
+#   2. The long run. Step 1 calls each binding once, which proves the answer is
 #      right and nothing else. `alloc_str` is a claim about many calls — the
 #      shim copies the string out and hands the original to the library's free
 #      function, so a long run holds no more memory than a short one. One call
@@ -36,23 +24,15 @@
 #      crash that only shows up under sustained churn. A user hit exactly that:
 #      SIGSEGV at roughly 300,000 iterations over `g_uri_escape_string`.
 #
-# All three are skipped rather than failed when what they need is absent, so
-# this is safe to run anywhere. Skips are reported, never silent.
+# Until phase 6 of design/v2-static-values.md a third step compiled v1's C
+# runtime with glibc's fortify checks; that runtime is gone.
 #
-# With --backend=static, the glib program and the long run are built with Jade
-# 2.0's static backend, which calls the same generated shim with each
-# argument and result marshalled by its static type. The C runtime check runs
-# either way.
+# Both are skipped rather than failed when what they need is absent, so this
+# is safe to run anywhere. Skips are reported, never silent.
 #
-# Usage: src/scripts/ffi-gate.sh [--backend=static] [path-to-jade-binary]
+# Usage: src/scripts/ffi-gate.sh [path-to-jade-binary]
 
 set -uo pipefail
-
-BACKEND_FLAG=""
-if [[ "${1:-}" == "--backend=static" ]]; then
-  BACKEND_FLAG="--backend=static"
-  shift
-fi
 
 JADE="${1:-./target/debug/jade}"
 # Absolute, because every step below runs from a scratch directory.
@@ -65,40 +45,13 @@ trap 'rm -rf "$WORK"' EXIT
 
 pass=0; skip=0; fail=0
 
-# ── 1. The C runtime, compiled the way a release build compiles it ────────────
-#
-# `-Werror=attribute-warning` is the whole point: glibc marks the fortified
-# entry points with a warning attribute saying what is wrong with the call, and
-# `build.rs` compiles with warnings off, so the message existed and nobody saw
-# it. Anything else that trips at -O2 shows up here too.
-if command -v cc >/dev/null 2>&1; then
-  cerr="$WORK/fortify.txt"
-  : > "$cerr"
-  for f in "$ROOT"/src/runtime_aot/*.c "$ROOT"/src/runtime_aot"/infer/"*.c; do
-    cc -O2 -D_FORTIFY_SOURCE=3 -Wall -Werror=attribute-warning \
-       -I "$ROOT/src/runtime_aot" -I "$ROOT/src/runtime_aot/infer" \
-       -c -o "$WORK/o.o" "$f" 2>>"$cerr"
-  done
-  if grep -qE '\berror\b' "$cerr"; then
-    echo "  FAIL  the C runtime does not compile clean at -O2 with fortify:"
-    grep -E '\berror\b' "$cerr" | head -10 | sed 's/^/        /'
-    fail=$((fail + 1))
-  else
-    echo "  ok    C runtime, -O2 with _FORTIFY_SOURCE=3"
-    pass=$((pass + 1))
-  fi
-else
-  echo "  skip  C runtime fortify check                        (no C compiler)"
-  skip=$((skip + 1))
-fi
-
-# ── 2. glib, bound and run ────────────────────────────────────
+# ── 1. glib, bound and run ────────────────────────────────────
 #
 # pkg-config rather than a hard-coded path: the library sits in an
 # architecture-named directory on Linux and under the Homebrew prefix on macOS,
 # and neither is worth guessing.
 glib_lib=""; glib_hdr=""; incs=()
-# Set by step 2 once glib is installed, so step 3 can reuse the same project
+# Set by step 1 once glib is installed, so step 2 can reuse the same project
 # rather than bind the header a second time. Binding glib is nearly all of this
 # script's runtime; doing it twice would roughly double it.
 loop_proj=""; loop_skip="glib not installed"
@@ -179,7 +132,7 @@ TOML
     # Each runs through an inner shell for the reason `run_loop` documents: the
     # shell that waits on a signalled child announces it, and that line is noise
     # on top of a FAIL that already says the same thing.
-    bash -c 'cd "$1" && "$2" build $3 main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" "$BACKEND_FLAG" 2>/dev/null
+    bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
     build_rc=$?
     aot_rc=0
     if [ "$build_rc" -eq 0 ]; then
@@ -205,7 +158,7 @@ TOML
   fi
 fi
 
-# ── 3. An alloc_str binding, called until something breaks ────────────────────
+# ── 2. An alloc_str binding, called until something breaks ────────────────────
 #
 # Two runs of the same program at different call counts. Surviving is the
 # assertion that matters and is checked always; comparing what the two runs held
@@ -268,7 +221,7 @@ if [ -z "$loop_proj" ]; then
   skip=$((skip + 1))
 else
   cp "$LOOP_FIXTURE" "$loop_proj/loop.jde"
-  ( cd "$loop_proj" && "$JADE" build $BACKEND_FLAG loop.jde -o looper > loopbuild.txt 2>&1 )
+  ( cd "$loop_proj" && "$JADE" build loop.jde -o looper > loopbuild.txt 2>&1 )
   if [ ! -x "$loop_proj/looper" ]; then
     echo "  FAIL  the alloc_str loop would not compile:"
     tail -5 "$loop_proj/loopbuild.txt" | sed 's/^/        /'

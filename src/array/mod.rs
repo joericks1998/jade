@@ -20,10 +20,9 @@ pub fn register_array_method_types(ctx: &mut TypeContext) {
         ("sort", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
         ("reverse", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
         // The method spelling of `array.map` / `array.filter`. Unlike the rest
-        // of this table these are not `BuiltinFn`s — they run a Jade function
-        // per element, so the VM binds the receiver to their `NativeFnId`
-        // instead (see `array_fn_method`). They were the only array functions
-        // with no method spelling until v1.3.21.
+        // of this table they run a Jade function per element, which MIR lowers
+        // as a loop that calls it. They were the only array functions with no
+        // method spelling until v1.3.21.
         (
             "map",
             JadeType::Fn {

@@ -32,13 +32,13 @@ The `await` after a true `ready()` costs nothing — measured at 7µs compiled, 
 
 `ready()` came first and answers one question without blocking. `cancel()` joined it in v1.4.5, and the pair is the whole surface a future has: *is it done*, and *stop waiting for it*.
 
-`cancel` does not stop the work. A compiled task is a real thread running straight-line code with no point at which the runtime could interrupt it, so a cancel that claimed to kill the task would be a promise the runtime could not keep. It stops the caller: `await` raises at once, and one already blocked wakes and raises. A task that wants to give up early checks `cancelled()`, which is the only thing that actually stops work, and which is the task's own choice.
+`cancel` does not stop the work. A compiled task runs straight-line code on a worker thread with no point at which anything could interrupt it, so a cancel that claimed to kill the task would be a promise the program could not keep. It stops the caller: `await` raises at once, and one already blocked wakes and raises. A task that wants to give up early checks `cancelled()`, which is the only thing that actually stops work, and which is the task's own choice.
 
 Cancelled outranks a result that arrived anyway. The caller said it had stopped waiting, and handing it the answer after that would make `cancel` mean nothing on a task that was about to finish.
 
 ## What each file does
 
-- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`, and `register_future_method_types`, which gives the checker their types. The behavior lives in `jade-runtime`'s `task.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
+- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`, and `register_future_method_types`, which gives the checker their types. The behavior lives in `src/backend/tasks.rs` and the `Op::Ready` and `Op::Cancel` arms of `src/backend/func.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
 
 ## What `ready` means
 
@@ -48,9 +48,9 @@ Cancelled outranks a result that arrived anyway. The caller said it had stopped 
 
 ## Where the rest of the async surface lives
 
-Nothing about running tasks is a package, and this module is one piece of that. `async fn` and `await` are keywords, `join` is an opcode, `f.ready()` and `f.cancel()` are here, and `cancelled()`, `wait()`, `max_tasks()`, and `set_max_tasks()` are bare globals in `src/core/`. A program never imports anything to use tasks.
+Nothing about running tasks is a package, and this module is one piece of that. `async fn` and `await` are keywords, `join` is an operation in MIR, `f.ready()` and `f.cancel()` are here, and `cancelled()`, `wait()`, `max_tasks()`, and `set_max_tasks()` are bare globals in `src/core/`. A program never imports anything to use tasks.
 
-`max_tasks` and `set_max_tasks` are the newest of those and the only ones that are not about a single future: they say how many tasks may run at once, defaulting to 32. See `src/core/README.md` for what the number means and `src/runtime/README.md` for how the runtime enforces it.
+`max_tasks` and `set_max_tasks` are the newest of those and the only ones that are not about a single future: they say how many tasks may run at once, defaulting to 32. See `src/core/README.md` for what the number means and `src/backend/tasks.rs` for how a compiled program enforces it.
 
 ## Why there is no package form
 
@@ -60,10 +60,10 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 *Depends on:* `compiler/type_infer` for `TypeContext`, which the method types register into.
 
-*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`, and `builtins::register_primitive_method_types`. The compiled backend does not come through here at all: `codegen` lowers `ready` to `jade_future_ready`, which sits on `jrt_future_ready` in `jade-runtime`'s `task.rs` and answers from the future's `done` flag.
+*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`, and `builtins::register_primitive_method_types`. The compiled backend does not come through here at all: `mir/ops.rs` lowers `ready` to `Op::Ready`, and `src/backend/func.rs` answers it from the job's state and cancel words under the task queue's lock.
 
 ## Gotchas
 
 *A polling loop is free inside something that was already looping.* A render loop wakes at frame rate whether or not it asks. It is not free for a program with nothing else to do — `while !f.ready() { }` burns a core. What that case wants is to block until *any* of several futures resolves, with a timeout, so the CPU can idle. That primitive is `wait()`, a bare global, with a `time.after(secs)` among the futures for the timeout, and this one is not a substitute for it.
 
-*The receiver guard belongs at the call site.* `codegen` emits `jrt_require_kind(recv, JRT_WANT_FUTURE, "ready")` before the call, which is what gets the wording the interpreter used, `int has no method 'ready'`, for free. `jade_future_ready` checks again anyway, because it is the boundary and a value arriving from elsewhere is not the guard's business.
+*The receiver is checked before the program runs.* The static checker knows every value's type, so `n.ready()` on an int stops the build with `int has no method 'ready'`, from `compiler/infer/builtins.rs`. Until phase 6, v1's backend emitted a run-time guard before the call and the runtime checked again; a v2 binary needs neither.

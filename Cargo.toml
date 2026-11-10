@@ -3,37 +3,12 @@ name = "jade"
 version = "2.0.1"
 edition = "2024"
 description = "A language for LLMs"
-build = "src/runtime_aot/build.rs"
 license = "MIT"
 
 
-# `jade-runtime` is a workspace member, not merely a path dependency, and
-# `default-members` names it explicitly. Both halves matter:
-#
-#  * Cargo only *uplifts* a build artifact to `target/<profile>/` when the crate
-#    is built as a requested top-level target. As a plain dependency, the
-#    staticlib was produced but left in `target/<profile>/deps/` under a hashed
-#    name, so the `-L target/<profile> -ljade_runtime` that `codegen/mod.rs`
-#    passes to the linker could not find it and every `jade build` failed with
-#    "cannot find -ljade_runtime". It only appeared to work on developer
-#    machines, where a stray `cargo build -p jade-runtime` had left an unhashed
-#    copy behind — a clean checkout on any platform was broken.
-#
-#  * Without a `[workspace]`, `cargo test` never built or ran `jade-runtime`'s
-#    own test suite, so its ~70 tests were invisible to CI.
-#
-# `libjade_runtime.a` is a shipped artifact of this toolchain, not an
-# implementation detail — `jade build` links it into every binary it emits — so
-# it belongs at a stable, predictable path.
-[workspace]
-members = ["src/runtime"]
-default-members = [".", "src/runtime"]
-
 [dependencies]
-jade-runtime = { path = "src/runtime" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
-parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -45,20 +20,12 @@ toml_edit = "0.22"
 bincode = "1"
 sha2 = "0.10"
 libloading = "0.8"
-# LLVM 18 backend for the AOT codegen module (src/aot/). `jade build`
-# compiles in-process — there is no build daemon — so this is a hard dependency
+# LLVM 18, which the static backend (src/backend/) generates code through.
+# `jade build` compiles in-process — there is no build daemon — so this is a hard dependency
 # and LLVM 18 must be present to build the toolchain. Locate it with
 # LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
 inkwell = { version = "0.8", features = ["llvm18-1"] }
 
-[features]
-default = []
-# Phase-0 allocation profiler: replaces the `jade` binary's global allocator with
-# a size-class-histogram wrapper (src/alloc/profile.rs). Measurement only, never
-# a release build. Declared in the binary, never in jade-runtime, so it cannot
-# reach a dlopen'd package.
-alloc-profile = []
-
 [build-dependencies]
-# Compiles the C runtime (runtime_aot/) that emitted AOT binaries link against.
+# Compiles src/backend/lld.cpp, the bridge into LLD; see build.rs.
 cc = "1"

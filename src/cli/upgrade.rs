@@ -305,7 +305,7 @@ fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
     }
 
     // Replace the binary atomically (temp file beside it → rename), then refresh
-    // the runtime archives + bundled providers `jade build` needs.
+    // the `lib/` tree, which a release before 2.0 carried.
     install_binary(&new_bin, &current_exe, &work);
     if let Some(lib_dir) = &lib_dir {
         let src_lib = work.join("lib");
@@ -411,8 +411,9 @@ fn install_binary(new_bin: &Path, dest: &Path, work: &Path) {
     }
 }
 
-/// Mirror the extracted `lib/` tree into `<prefix>/lib/jade/` (runtime archives
-/// and bundled providers), overwriting in place.
+/// Mirror the extracted `lib/` tree into `<prefix>/lib/jade/`, overwriting in
+/// place. Only a release before 2.0 ships one, holding its runtime archives and
+/// bundled providers.
 fn install_tree(src: &Path, dst: &Path, work: &Path) {
     let entries = match std::fs::read_dir(src) {
         Ok(e) => e,

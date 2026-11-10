@@ -35,9 +35,9 @@ pub struct Span {
 /// never there. An uncaught `raise` at the top level is the whole exit-code
 /// mechanism the language has.
 ///
-/// Shared with the AOT backend, which reports the same thing about a program
-/// type inference had to stay lenient on (see `codegen::check_globals_bound`),
-/// so the two say it the same way.
+/// Until phase 6, v1's backend reported the same thing about a program type
+/// inference had to stay lenient on, and shared this so the two said it the
+/// same way.
 pub fn undefined_variable_hint(name: &str) -> &'static str {
     match name {
         "exit" => {
@@ -260,7 +260,7 @@ pub enum JadeError {
 
     /// A spawned function mutates state its spawner can still reach. Tasks run
     /// concurrently on a shared heap with no lock on collection payloads, so
-    /// this is a data race; see `compiler::taskcheck`.
+    /// this is a data race; see `mir::taskcheck`.
     SharedMutation { task: String, what: String, span: Span },
 
     /// A handle was passed into a spawned function. Distinct from
@@ -297,11 +297,12 @@ pub enum JadeError {
     /// Wraps the inner error and records the import path for traceback display.
     InFile { file: String, cause: Box<JadeError> },
 
-    /// A call chain recursed past the interpreter's call-depth limit. Raised
-    /// instead of letting the native stack simply run out, which used to abort
-    /// the process with an uncatchable Rust panic (`thread 'main' has
-    /// overflowed its stack`) at a depth of roughly 700-750 — see
-    /// `vm::MAX_CALL_DEPTH` and the AOT runtime's matching `JRT_RECUR_MAX_DEPTH`.
+    /// A call chain recursed past the call-depth limit. Raised instead of
+    /// letting the native stack simply run out, which used to abort the process
+    /// with an uncatchable Rust panic (`thread 'main' has overflowed its
+    /// stack`) at a depth of roughly 700-750. v1's VM and runtime raised it; a
+    /// v2 binary raises a `RuntimeError` with the same words, from the depth
+    /// check `src/backend/func.rs` puts at the top of every function.
     RecursionLimitExceeded { span: Span },
 }
 
@@ -473,11 +474,9 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] closures were removed in 2.0.1; write a named function and pass it by name, or pipe a value into one: `5 |> scale(3)` calls `scale(5, 3)`",
                 span.line, span.col
             ),
-            JadeError::NotYetStatic { what, span } => write!(
-                f,
-                "[{}:{}] the static backend cannot compile {} yet; build without --backend=static",
-                span.line, span.col, what
-            ),
+            JadeError::NotYetStatic { what, span } => {
+                write!(f, "[{}:{}] jade cannot compile {} yet", span.line, span.col, what)
+            }
             JadeError::InterfaceRemoved { span } => write!(
                 f,
                 "[{}:{}] `interface` was removed. It only checked that a type declared a set of methods and meant nothing at run time; a shared parent (`class Child(Parent)`) is what to reach for instead.",

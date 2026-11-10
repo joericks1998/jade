@@ -2,17 +2,17 @@
 
 ## What this subtree is
 
-This is the `std::http` package for HTTP over TCP, as the checker sees it. It is thin on purpose. It names the package's seven functions and registers the `http` global's type, and nothing about how a request is actually made lives in this directory. Until v1.4.8 it also held the VM's surface, which validated arguments, called into `jade_runtime::httpf`, and turned the result into a `VmValue`.
+This is the `std::http` package for HTTP over TCP, as the checker sees it. It is thin on purpose. It names the package's seven functions and registers the `http` global's type, and nothing about how a request is actually made lives in this directory. Until v1.4.8 it also held the VM's surface, which validated arguments, called into v1's runtime, and turned the result into a `VmValue`.
 
 ## Why it is only a surface
 
-A compiled program never calls into this directory. `jade build` emits a call to a `jrt_http_*` symbol instead. While there were two engines, request logic living here would have meant each engine held its own copy of it, which is exactly how they used to drift apart.
+A compiled program never calls into this directory. `jade build` emits the request code into the program instead. While there were two engines, request logic living here would have meant each engine held its own copy of it, which is exactly how they used to drift apart.
 
-The transport, the status parsing, and the trust marking therefore live once in `jade_runtime::httpf`.
+The transport, the status parsing, and the trust marking therefore live once in `src/backend/http.rs`, which runs `curl` as v1 did, so HTTPS works with no TLS library in the binary.
 
-That split is why adding a function is a change in three places at once: its name in `HTTP_PKG`, the `jrt_*` wrapper in `httpf.rs`, and the lowering arm in `src/codegen/builtins.rs`.
+That split is why adding a function is a change in several places at once: its name in `HTTP_PKG`, its type in `compiler/infer/builtins.rs`, its `HttpFn` arm in `mir/packages.rs`, and its code in `src/backend/http.rs`.
 
-Missing the third is not a silent failure, but it is a late one. `jade check` passes, and the build reports "unsupported module call". Between v1.2.2 and v1.2.5 that is what happened to `get_bytes` and `post_bytes`, and a program only discovered the gap at packaging time. `every_package_fn_lowers_in_the_chunk_backend` in `src/codegen/tests.rs` now fails on it at `cargo test`.
+Missing a later step used to be a late failure. Between v1.2.2 and v1.2.5 that is what happened to `get_bytes` and `post_bytes`: `jade check` passed, the build reported "unsupported module call", and a program only discovered the gap at packaging time. `jade check` now runs MIR lowering too, so a function with no lowering fails at `check` instead.
 
 ## What each file does
 
@@ -28,6 +28,6 @@ Every response body is *tainted*, whichever spelling produced it. It came from o
 
 ## Who uses it
 
-The import system, in `src/project/`, resolves `use std::http` to `HTTP_PKG`. The AOT backend never calls into this directory. See `src/codegen/builtins.rs` for its lowering, and `src/runtime/src/httpf.rs` for the implementation.
+The import system, in `src/project/`, resolves `use std::http` to `HTTP_PKG`. The compiled backend never calls into this directory. See `mir/packages.rs` for its lowering, and `src/backend/http.rs` for the implementation.
 
 `src/uhttp/` is this package again, over a Unix domain socket. The two are meant to stay mirrors of each other. Until v1.4.8 `http_and_uhttp_expose_the_same_functions` in this directory's `tests.rs` failed if they stopped being. That file went with the VM in v2, so nothing checks it now.

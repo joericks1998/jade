@@ -43,6 +43,7 @@ mod display;
 pub mod lower;
 mod ops;
 mod packages;
+pub mod taskcheck;
 
 #[cfg(test)]
 mod tests;
@@ -153,11 +154,26 @@ pub struct LocalDecl {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    /// Where in the source each statement came from, one per statement, for
+    /// the passes that report on MIR, such as `taskcheck`.
+    pub spans: Vec<crate::frontend::error::Span>,
     pub term: Term,
 }
 
+impl Block {
+    /// Purpose: This function makes a block with no statements.
+    ///
+    /// Inputs:
+    /// - `term`: how it ends.
+    ///
+    /// Outputs: the block.
+    pub fn new(term: Term) -> Self {
+        Block { stmts: Vec::new(), spans: Vec::new(), term }
+    }
+}
+
 /// Purpose: This enum names somewhere a value is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Place {
     Local(Local),
     Global(GlobalId),

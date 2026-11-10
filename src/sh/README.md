@@ -14,9 +14,9 @@ There are three rather than one because a caller wants something different in ea
 
 ## Why it looks like this
 
-*The work is not here.* Spawning and capturing live in `jade_runtime::shf`, the shared crate, and the trust check lives in the `jrt_sh_*` forwarders in `runtime_aot/common.c`. Until v1.4.8 this directory held the VM's marshalling, meaning arguments out of `VmValue` and results back into one, plus the VM's own copy of the trust check.
+*The work is not here.* Spawning, capturing, and the trust check live in `src/backend/sh.rs`, which emits them into a program that calls `std::sh`. Until phase 6 they lived in `jade-runtime` and v1's C runtime, and until v1.4.8 this directory held the VM's marshalling, meaning arguments out of `VmValue` and results back into one, plus the VM's own copy of the trust check.
 
-*Everything this package does is a code-execution sink.* All three functions reach the same `sh -c`, so all three refuse a string whose trust byte says it came from outside the program, whether that is a model reply, a file, the network, or stdin. That is the whole point of tracking trust: a program cannot be talked into running a command it was handed.
+*Everything this package does is a code-execution sink.* All three functions reach the same `sh -c`, so all three refuse a string whose trust word says it came from outside the program, whether that is a model reply, a file, the network, or stdin. That is the whole point of tracking trust: a program cannot be talked into running a command it was handed.
 
 `sh.output` did not check until v1.3.3, and the shape of that bug is worth remembering before adding a fourth function here. It was not a smaller hole than a missing check on `exec` would have been. It was the *same* hole, because an attacker picks which function to reach. A check on two of three sinks does not narrow what an untrusted command can do. It only decides how the command has to be written.
 
@@ -30,13 +30,13 @@ There are three rather than one because a caller wants something different in ea
 
 *Depends on:* `builtins::Package` to register itself, and `compiler::type_infer` for the type registration.
 
-*Used by:* `builtins/`, which mounts `SH_PKG` under `std/sh`. The compiled backend does not go through here at all. `src/codegen/builtins.rs` lowers to `jrt_sh_exec`, `jrt_sh_run`, and `jrt_sh_output` in `runtime_aot/common.c`. Those are thin forwarders that call `jrt_refuse_if_tainted`, defined in the same file, before calling the shared implementation in `jade_runtime::shf`.
+*Used by:* `builtins/`, which mounts `SH_PKG` under `std/sh`. The compiled backend does not go through here at all. `mir/packages.rs` lowers each call to `Op::Sh`, and `sh_fn` in `src/backend/sh.rs` builds one function per kind of call. Each one calls `refuse_tainted`, defined in `src/backend/fs.rs`, before it spawns anything.
 
 ## Gotchas
 
-*A fourth function needs a forwarder in `runtime_aot/common.c` that does the refusal, as well as its name here.* Until v1.4.8 the two engines had separate refusals, and nothing checked that they agreed except `examples/trust/`. The refusal message stays byte-identical to what the VM printed, because `src/scripts/golden.sh` compares output with what was recorded then.
+*A fourth function needs the refusal in `src/backend/sh.rs`, as well as its name here.* Until v1.4.8 the two engines had separate refusals, and nothing checked that they agreed except `examples/trust/`. The refusal message stays byte-identical to what the VM printed, because `src/scripts/golden.sh` compares output with what was recorded then.
 
-*The refusal is a raise, not an exit.* It is catchable, so `try { sh.exec(x) } catch e { … }` runs the handler. The compiled runtime used to print and exit instead, which made the same program behave differently on the two engines.
+*The refusal is a raise, not an exit.* It is catchable, so `try { sh.exec(x) } catch e { … }` runs the handler. v1's compiled runtime used to print and exit instead, which made the same program behave differently on the two engines.
 
 ## Building and testing
 

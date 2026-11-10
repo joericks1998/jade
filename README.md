@@ -10,7 +10,9 @@ prompt p = "How many moons does Mars have? Reply with just the number."
 let n = ?p |> int      // n is an int, or the program raises. Never a string to parse.
 ```
 
-That `|> int` runs in two stages. First, naming a type builds a grammar that limits how the model generates its reply. A reply shaped like prose or wrapped in a code fence is ruled out before a single token of it exists. Second, whatever comes back is coerced to the type you named. If it still does not fit, the program raises `PromptOverflow` instead of handing you a string to parse. The glue code you would otherwise write by hand is the runtime's job.
+That `|> int` runs in two stages. First, naming a type builds a grammar that limits how the model generates its reply. A reply shaped like prose or wrapped in a code fence is ruled out before a single token of it exists. Second, whatever comes back is coerced to the type you named. If it still does not fit, the program raises `PromptOverflow` instead of handing you a string to parse. The glue code you would otherwise write by hand is the language's job.
+
+On this branch, prompts do not compile yet. Jade 2.0 compiles model inference into the program itself, and a program that dereferences a prompt stops with `jade cannot compile prompts yet` until the Metal kernel milestone, which is next.
 
 Prompts live wherever values live, including inside structs. You dereference them right where you use them.
 
@@ -32,11 +34,10 @@ let review = a~>system        // or the explicit a.(?system)
 Every directory in this repo has its own `README.md`. Read them in the order the compiler runs, because almost every change makes more sense once you know which stage it belongs to.
 
 1. [`src/frontend/`](src/frontend/README.md) turns source text into tokens and then an AST. Start here if you are touching syntax.
-2. [`src/compiler/`](src/compiler/README.md) infers types, produces TIR, and emits bytecode. Start here if you are touching types.
-3. [`src/bytecode/`](src/bytecode/README.md) defines the instruction set. Read it before adding an opcode.
-4. [`src/vm/`](src/vm/README.md) and [`src/codegen/`](src/codegen/README.md) are the two engines. They are peers, not layers. `jade run` uses the VM; `jade build` uses codegen.
-5. [`src/runtime/`](src/runtime/README.md) holds value semantics once, so both engines agree on what a value does.
-6. [`examples/`](examples/README.md) is the fixture suite. A language change starts here.
+2. [`src/compiler/`](src/compiler/README.md) infers types and produces TIR, and its `infer/` gives every value one static type. Start here if you are touching types.
+3. [`src/mir/`](src/mir/README.md) lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
+4. [`src/backend/`](src/backend/README.md) turns MIR into LLVM IR and links a binary against the C library alone. What v1 called the runtime is support code here, emitted into each program only where it is used.
+5. [`examples/`](examples/README.md) is the fixture suite. A language change starts here.
 
 Three more that come up often:
 
@@ -44,7 +45,7 @@ Three more that come up often:
 - [`src/pkg/`](src/pkg/README.md) if you are working on packages or C bindings.
 - [`src/cli/`](src/cli/README.md) if you are adding or changing a `jade` subcommand.
 
-[`CLAUDE.md`](CLAUDE.md) has the full map of all thirty directories with a one-line description of each.
+[`CLAUDE.md`](CLAUDE.md) has the full map of every directory with a one-line description of each.
 
 ---
 
@@ -54,11 +55,11 @@ You need two things installed.
 
 *Rust 1.85 or later.* Install it from [rustup.rs](https://rustup.rs). The crate uses edition 2024, so an older toolchain will not build it.
 
-*LLVM 18.* `jade build` compiles in-process rather than shelling out to a separate compiler, so LLVM is a build dependency of the toolchain itself. A released `jade` binary needs nothing installed; only building from source does.
+*LLVM 18.* `jade build` compiles and links in-process rather than shelling out to a separate compiler, so LLVM and its linker, LLD, are build dependencies of the toolchain itself. The root `build.rs` compiles `src/backend/lld.cpp` against LLD's libraries from the same install. A released `jade` binary needs nothing installed; only building from source does.
 
 ```sh
 brew install llvm@18                                              # macOS
-sudo apt-get install llvm-18-dev libpolly-18-dev libzstd-dev      # Debian and Ubuntu
+sudo apt-get install llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev   # Debian and Ubuntu
 ```
 
 `cargo build` and `cargo test` need nothing else. The FFI gate, `src/scripts/ffi-gate.sh`, binds against real glib, so running that one script also needs glib, pkg-config, and clang:
@@ -86,17 +87,15 @@ cargo test
 
 For a build with optimizations, use `cargo build --release` and look in `target/release` instead. Both work; debug builds are faster to produce and are what you want while developing.
 
-### Keep the checkout
+### The binary stands alone
 
-`jade build` links two runtime archives into every executable it emits: `libJadeRuntime.a` and `libjade_runtime.a`. The same `cargo build` leaves both in the same `target` directory as the binary, and a locally built `jade` remembers that path. So do not delete the checkout after building.
-
-To move a locally built toolchain to another machine, copy the archives along with the binary into `<prefix>/lib/jade`. That is the layout the release tarball uses, and it is where `jade` looks for them relative to itself.
+A program `jade build` emits links the C library and nothing else, through the LLD built into `jade`. There are no runtime archives to keep beside the binary, so a locally built `jade` works after you delete the checkout, and you can copy it to another machine on its own. Until Jade 2.0 every program linked two runtime archives, and the checkout had to stay.
 
 ### Confirm it works
 
 ```sh
 ./target/debug/jade run examples/strings/fstrings/fstrings.jde     # prints "hello, Jade!"
-./target/debug/jade check examples/classes/prompt_fields/prompt_fields.jde
+./target/debug/jade check examples/classes/basic/basic.jde         # prints "ok"
 ```
 
 If both behave, your setup is good. Welcome aboard.
@@ -111,16 +110,16 @@ Data flows one way through the compiler, and no stage reaches backwards:
 source text
   → frontend/lexer.rs      → Vec<Token>
   → frontend/parser.rs     → Program (AST)
-  → compiler/type_infer.rs → TProgram (TIR)
-  → compiler/emit.rs       → CompiledProgram (bytecode)
-  → vm/                    → execution           (jade run)
-  → codegen/               → LLVM IR             (jade build)
-  → aot/                   → object → binary     (jade build)
+  → compiler/type_infer.rs → TProgram (TIR), per file
+  → aot/imports.rs         → one merged TProgram
+  → compiler/infer/        → Typed: one static type for every value
+  → mir/                   → MIR, checked by mir/taskcheck.rs
+  → backend/               → LLVM IR → object → binary, linked by LLD
 ```
 
-The VM and the AOT backend are peers. Neither wraps the other. The language is whatever the two of them agree on, which is why `src/scripts/backend-parity.sh` runs every example on both engines and diffs the output, and why value semantics live once in the shared `jade-runtime` crate instead of twice.
+Jade has one engine, the compiler. `jade build` runs the whole chain, `jade run` and `jade test` build into a scratch directory and run the binary, and `jade check` runs everything short of LLVM. Every example's output is recorded beside it as `<name>.expected`, and `src/scripts/golden.sh` builds each one and compares. Until v1.4.8 there was also a bytecode VM, and until phase 6 of `design/v2-static-values.md` compiled programs linked a shared runtime; both are gone.
 
-`jade build` needs no build daemon. The frontend produces TIR, `src/aot/` lowers it through LLVM 18, and the linker runs. A daemon used to exist because codegen lived in a separate repository. Once codegen moved here, the daemon's only remaining job was forwarding a request to a function this crate already exported, so it was removed.
+`jade build` needs no build daemon and no system linker. `src/backend/` lowers MIR through LLVM 18, and `src/backend/link.rs` links the object with LLD inside the same process. A daemon used to exist because code generation lived in a separate repository. Once it moved here, the daemon's only remaining job was forwarding a request to a function this crate already exported, so it was removed.
 
 ---
 
@@ -138,27 +137,28 @@ Follow the pipeline in order:
 2. AST node or nodes in `frontend/ast.rs`
 3. Parse rule or rules in `frontend/parser.rs`
 4. Lowering in `compiler/type_infer.rs`
-5. Emission in `compiler/emit.rs`
-6. Execution in `vm/dispatch.rs`, and lowering in `codegen/`
-7. Error variant in `frontend/error.rs`, if the feature can fail
+5. Static types in `compiler/infer/`
+6. Lowering to MIR in `mir/`
+7. LLVM code in `backend/`
+8. Error variant in `frontend/error.rs`, if the feature can fail
 
-Not every feature needs all seven steps. Syntax that desugars to an AST node you already have stops at step 3, which costs nothing downstream. Reach for that when you can. The `~>` operator is a good example. It is a parser-level rewrite to a node that already existed, so type inference, the emitter, and both engines never had to learn about it.
+Not every feature needs all eight steps. Syntax that desugars to an AST node you already have stops at step 3, which costs nothing downstream. Reach for that when you can. The `~>` operator is a good example. It is a parser-level rewrite to a node that already existed, so nothing past the parser ever had to learn about it.
 
 Operator precedence lives in the parser's call chain, which runs `parse_or` then `parse_and` and on down to `parse_primary`. To add a precedence level, insert a new function at the right point in that chain rather than special-casing inside an existing one.
 
 ### Adding a built-in
 
-Built-ins are native Rust functions with the signature `fn(&[VmValue]) -> Result<VmValue>`, held in a central registry. To add one, write a `BuiltinFn` constant in the package's `mod.rs`, register it in that package's `fns` slice, and add its type information in `register_types`. Global built-ins go in `CORE_BUILTINS` instead of a package slice.
+A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs` and its type in `register_types`; give it a static type in `compiler/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
 
-A whole new package needs four things: `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`. If anything else needs changing, the registry boundary has sprung a leak. Fix the leak rather than working around it.
+A whole new package also needs `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`.
 
 ### Errors
 
 Every failure returns a `JadeError`, and every variant carries a `Span`.
 
-*No panics on the interpreter path.* That includes `unwrap()` on anything derived from user input.
+*No panics in the compiler.* That includes `unwrap()` on anything derived from user input.
 
-Type errors belong in `compiler/type_infer.rs`, not in the VM or in codegen. By the time bytecode runs, types are already settled.
+Type errors belong in `compiler/type_infer.rs` and `compiler/infer/`, not in MIR or the backend. By the time MIR is lowered, types are already settled.
 
 Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be applied to a field, write 'obj.(?p)' or 'obj~>p' instead` over `unexpected token`.
 
@@ -166,7 +166,7 @@ Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be a
 
 Tests live in `#[cfg(test)] mod tests` blocks, either inline or in a sibling `tests.rs` wired up with `mod tests;`. There is no top-level `tests/` directory.
 
-Three helpers cover most cases. `run_src(src)` runs the full pipeline. `run_src_with_mock(src, responses)` stubs the LLM backend so a test needs no API key. `parse_src(src)` and `parse_src_err(src)` cover the parser alone.
+Three sets of helpers cover most cases. `run(src)` in `backend/tests.rs` builds a program, runs it, and returns its output and exit status. `lower(src)` and `text(src)` in `mir/tests.rs` lower a program to MIR. `parse_src(src)` and `parse_src_err(src)` in `frontend/tests.rs` cover the parser alone.
 
 *Write the `.jde` fixture in `examples/` first, then make the Rust match it.* That is the established workflow here, and it tends to surface design problems before you have built on top of them.
 
@@ -175,7 +175,9 @@ CI and `cargo test` type-check every fixture:
 - `<name>.jde` must pass `jade check`.
 - `<name>_error.jde` must fail. These fixtures document programs the language rejects, so one that quietly starts passing is also a failure.
 
-Fixtures are only type-checked, never run, so they are free to depend on a network or an API key at runtime. The tradeoff is that a fixture can type-check while printing something its own comments contradict. When behavior matters, write a Rust test as well.
+A fixture that uses a feature v2 does not compile yet, such as a prompt, fails `jade check` with `jade cannot compile … yet` and is reported as pending rather than as a failure.
+
+CI also runs the fixtures. `src/scripts/golden.sh` builds every example, runs the binary, and compares what it prints with the `<name>.expected` file beside it. It skips the few that reach the network or dereference a prompt, and lists each skip with its reason at the top of the script. An example with no `.expected` file is reported as missing, never as passing.
 
 ### Two things that will bite you
 
@@ -200,7 +202,7 @@ cargo clippy --all-targets
 cargo fmt --all --check
 ```
 
-CI is defined in `.github/workflows/ci.yml` and runs on every pull request against `main`. It runs the four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `src/scripts/backend-parity.sh`, which runs every example on both engines and diffs the results, and `src/scripts/ffi-gate.sh`, which builds and runs real C bindings.
+CI is defined in `.github/workflows/ci.yml` and runs on every pull request against `main`. It runs the four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `src/scripts/golden.sh`, which builds every example and compares its output with the recorded `.expected` file, and `src/scripts/ffi-gate.sh`, which builds and runs real C bindings.
 
 Clippy runs without `-D warnings`, so existing warnings do not fail the build. Do not add new ones.
 

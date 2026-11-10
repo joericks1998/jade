@@ -4,7 +4,7 @@
 
 Two things that belong together. The method surface of the `bytes` type, which is `len`, `decode`, and `slice`. And the `std::bytes` package, which is the three ways to *build* a blob: `zeros`, `from_ints`, and `concat`.
 
-The value itself is not here, and neither is any behavior. A blob lives in `jade_runtime::bytesf::BytesObj`, and the compiled backend runs every method and package function against it. Since v2 this directory only names them and gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
+The value itself is not here, and neither is any behavior. A blob is a heap object with the string layout, `{ rc, len, trust, bytes…, 0 }`, and `src/backend/bytes.rs` emits every method and package function into the program that uses it. Since v2 this directory only names them and gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
 
 ## Why `bytes` is not just a string
 
@@ -22,9 +22,9 @@ The three functions are a package rather than three more methods for two reasons
 
 ## Why writing is `b[i] = v` and not `b.set(i, v)`
 
-Reading one octet was already spelled `b[i]`. An array already writes with `a[i] = v`. Using the same spelling adds no new concept, reuses the `SetIndex` opcode the backend already lowers, and keeps the method count at three.
+Reading one octet was already spelled `b[i]`. An array already writes with `a[i] = v`. Using the same spelling adds no new concept, reuses the index assignment the compiler already lowers, and keeps the method count at three.
 
-It also means the write path is *two* instructions and not one. The emitter picks `SetIndex` for a local binding and `SetIndexGlobal` for a module-level one, and they are separate arms in the backend. An implementation that handles only the first makes `b[0] = 1` work inside a function and fail at the top level.
+It also means the write has *two* targets and not one. A local binding is a `Place::Local` in MIR and a module-level one is a `Place::Global`, and the backend reads each its own way. Until v1.4.8 they were two bytecode instructions, `SetIndex` and `SetIndexGlobal`, with separate arms in each engine. An implementation that handles only the first makes `b[0] = 1` work inside a function and fail at the top level, which is why `examples/bytes/buffer/` writes both ways.
 
 ## What each file does
 
@@ -32,30 +32,30 @@ It also means the write path is *two* instructions and not one. The emitter pick
 
 ## The decisions worth knowing
 
-*A blob is reference-semantic.* Since v1.3.27 it is mutable, so two names for one buffer see the same write, exactly as they do for an array. `BytesObj` carries no lock, because that type is `repr(C)` and shares its layout with the compiled heap and the native package ABI, neither of which has one. Until v1.4.8 the VM wrapped it in a `Mutex`, but nothing synchronises the payload in a compiled binary. What keeps two tasks off one buffer is `compiler::taskcheck`, the same rule that already covered arrays.
+*A blob is reference-semantic.* Since v1.3.27 it is mutable, so two names for one buffer see the same write, exactly as they do for an array. A blob carries no lock. Its layout is a reference count, a length, a trust word and the octets, and the native package boundary it crosses has no lock either. Until v1.4.8 the VM wrapped it in a `Mutex`, but nothing synchronises the payload in a compiled binary. What keeps two tasks off one buffer is `mir::taskcheck`, the same rule that already covered arrays.
 
 *`decode` raises on invalid UTF-8* rather than substituting `�`. Quietly corrupting data is worse than a catchable error. A caller who wants lossy behavior can ask for it, while a caller who assumed the bytes were text needs to hear that they were not.
 
-*Trust travels with the octets.* A blob carries a trust byte the way a string does, so `fs.read_bytes(p).decode()` produces a *tainted* string. Without that, decoding would be a way to strip the taint. Data straight off the disk would walk past the check in `sh.exec` that `fs.read(p)` cannot. `concat` takes the more restrictive of its two inputs for the same reason: joining a file's contents onto a buffer the program built itself must not hand back a clean blob.
+*Trust travels with the octets.* A blob carries a trust word the way a string does, so `fs.read_bytes(p).decode()` produces a *tainted* string. Without that, decoding would be a way to strip the taint. Data straight off the disk would walk past the check in `sh.exec` that `fs.read(p)` cannot. `concat` takes the more restrictive of its two inputs for the same reason: joining a file's contents onto a buffer the program built itself must not hand back a clean blob.
 
-*An int carries no trust, and `from_ints` therefore launders.* A program that reads a tainted blob, walks it into an int array, and rebuilds it gets a trusted one. That is accepted rather than closed. Trust follows values that can hold it and a number is not one, which is already true of `len()` and of any arithmetic on something read from a file. Closing it would mean a trust byte on every array and every arithmetic result.
+*An int carries no trust, and `from_ints` therefore launders.* A program that reads a tainted blob, walks it into an int array, and rebuilds it gets a trusted one. That is accepted rather than closed. Trust follows values that can hold it and a number is not one, which is already true of `len()` and of any arithmetic on something read from a file. Closing it would mean a trust word on every array and every arithmetic result.
 
 *`slice` clamps instead of raising.* Reading past the end is how you take the tail of a buffer, and every caller would otherwise write the same `min()` call.
 
-*A failed decode raises a `RuntimeError` struct.* `jk_bytes_decode` in `src/runtime_aot/common.c` raises through `throw_msg`, like every other runtime failure. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
+*A failed decode raises a `RuntimeError` struct.* `jade.bytes.decode`, emitted by `src/backend/bytes.rs`, raises through `fail_str` in `src/backend/errors.rs`, like every other failure in support code. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
 
 ## Who uses it
 
-`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. It lowers the three methods to `jrt_bytes_*` symbols in `jade_runtime::bytesf`, lowers the package functions to the `jk_bytes_*` forwarders in `src/runtime_aot/common.c`, and writes an octet through the `JK_BYTES` arm of `jrt_val_set_index`. So a change to behavior lands there, and a new method or function also needs its name added here.
+`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. `compiler/infer/builtins.rs` gives each call its static type, `mir/` lowers the methods and package functions to `Op::Bytes*` operations, and `src/backend/bytes.rs` emits the code for each, including `jade.bytes.set` for writing an octet. So a change to behavior lands there, and a new method or function also needs its name added here.
 
-The message text for every failure lives once, in `jade_runtime::bytesf`, and the compiled backend formats from there. A program can catch these, which makes the wording part of the language rather than an implementation detail.
+The message text for every failure lives once, in `src/backend/bytes.rs`, and matches what v1 printed. A program can catch these, which makes the wording part of the language rather than an implementation detail.
 
 The things that produce `bytes` values elsewhere: `read_bytes` and `read_stdin_bytes` in `std::fs`, `get_bytes` and `post_bytes` in `std::http` and `std::uhttp`, `str.encode()`, and a native package handing one back across the FFI.
 
 ## Building and testing
 
 ```sh
-cargo test -p jade-runtime bytesf
+cargo test backend::
 ./target/debug/jade run examples/bytes/construct/construct.jde
 ./target/debug/jade run examples/bytes/buffer/buffer.jde
 ./src/scripts/golden.sh

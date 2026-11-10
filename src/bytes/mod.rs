@@ -2,8 +2,8 @@
 //!
 //! A `bytes` value is a counted sequence of raw octets, distinct from `str`
 //! because Jade strings are UTF-8 and NUL-terminated and arbitrary bytes are
-//! neither. The value itself lives in `jade_runtime::bytesf::BytesObj`, shared
-//! with the compiled heap; this module only names the methods and registers their types.
+//! neither. The value and its methods are support code `src/backend/bytes.rs`
+//! emits; this module only names the methods and registers their types.
 //!
 //! There are deliberately few methods. `bytes` exists to carry data through a
 //! program unchanged — from a file, over a socket, out to stdout — not to be a

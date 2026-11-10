@@ -35,6 +35,12 @@ use crate::compiler::infer::FnTy;
 use crate::mir::{NativeCall, Ty};
 
 /// The `JADE_FFI_*` tags.
+/// The version of the 16-byte `JadeVal` format a native package and the
+/// program trade values in, which a package reports from
+/// `jade_pkg_abi_version`. It was v1's `jade_runtime::RUNTIME_ABI_VERSION`, and
+/// stays 5 so a package built for v1 loads unchanged.
+pub const VALUE_ABI_VERSION: u32 = 5;
+
 const NIL: i64 = 0;
 const INT: i64 = 1;
 const FLOAT: i64 = 2;
@@ -133,7 +139,7 @@ impl<'ctx> Cx<'ctx> {
                 let ty = f.cx.i32t().fn_type(&[], false);
                 let theirs = f.b.build_indirect_call(ty, abi, &[], "").expect("positioned");
                 let theirs = theirs.try_as_basic_value().left_or_zero(f).into_int_value();
-                let ours = jade_runtime::RUNTIME_ABI_VERSION as i64;
+                let ours = VALUE_ABI_VERSION as i64;
                 f.if_(f.ne(theirs, f.i32(ours)), |f| {
                     let older = f.icmp(inkwell::IntPredicate::ULT, theirs, f.i32(ours));
                     let a = f.str_cat(&[

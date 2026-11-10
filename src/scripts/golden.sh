@@ -11,21 +11,9 @@
 # An example that should exit non-zero records its status in `<name>.expected-exit`.
 # An example with no `.expected` file is reported as missing, never as passing.
 #
-# With --backend=static, it builds with Jade 2.0's static backend instead, and
-# only the examples listed in src/scripts/static-examples.list, which grows phase
-# by phase until it holds every example.
-#
-# Usage: src/scripts/golden.sh [--backend=static] [path-to-jade-binary]
+# Usage: src/scripts/golden.sh [path-to-jade-binary]
 
 set -uo pipefail
-
-BACKEND_FLAGS=()
-LIST=""
-if [[ "${1:-}" == "--backend=static" ]]; then
-  BACKEND_FLAGS=(--backend=static)
-  LIST="$(dirname "$0")/static-examples.list"
-  shift
-fi
 
 JADE="${1:-./target/debug/jade}"
 # Absolute, since the C struct check runs `jade pkg install` from its own directory.
@@ -43,8 +31,10 @@ skip_reason() {
     # Fixtures that document rejected programs. `jade check` in CI asserts they fail.
     *_error.jde)
       echo "intentional-error fixture" ;;
-    # Dereference a prompt. v2 dropped the provider packages these ran against,
-    # and inference returns when the compiler emits it over dovata's memory.
+    # Dereference a prompt, or build a grammar for one. v2 dropped the provider
+    # packages these ran against, and inference returns when the compiler emits
+    # it over dovata's memory.
+    examples/classes/prompt_fields/*|examples/llvm/grammar_new/*|\
     examples/decorators/prompt_tags/*|examples/llm/async_prompts/*|\
     examples/llm/basic_prompt/*|examples/llm/fstring_interp/*|\
     examples/llm/multi_prompt/*|examples/llm/single_quote_strings/*|\
@@ -53,11 +43,6 @@ skip_reason() {
     examples/llm/typed_struct_messy/*|examples/pipe/deref_chain/*|\
     examples/pipe/deref_in_print/*)
       echo "dereferences a prompt" ;;
-    # Behavior the static backend has and the tagged one never will, since it
-    # is deleted at the end of v2: destructors run only there, and only its ints
-    # are 64-bit.
-    examples/classes/destructors/*|examples/numbers/int_bounds/*)
-      if [[ -z "$LIST" ]]; then echo "static backend only"; else echo ""; fi ;;
     *) echo "" ;;
   esac
 }
@@ -86,7 +71,7 @@ while IFS= read -r file; do
   fi
 
   bin="$WORK/$(echo "$file" | tr '/' '_').bin"
-  if ! build_err="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$file" -o "$bin" 2>&1)"; then
+  if ! build_err="$("$JADE" build "$file" -o "$bin" 2>&1)"; then
     printf '  FAIL  %-52s (build failed)\n' "$file"
     failures+=("$file: build failed: $build_err")
     fail=$((fail + 1))
@@ -105,7 +90,7 @@ while IFS= read -r file; do
 $(diff <(printf '%s\n' "$got") "$stem.expected")")
     fail=$((fail + 1))
   fi
-done < <(if [[ -n "$LIST" ]]; then grep -v '^#' "$LIST" | grep .; else find examples -name '*.jde' | sort; fi)
+done < <(find examples -name '*.jde' | sort)
 
 # ── Native handles ───────────────────────────────────────────────────────────
 #
@@ -131,13 +116,13 @@ else
     Darwin) shared=(-dynamiclib) ;;
     *)      shared=(-shared) ;;
   esac
-  # One source of truth for the value ABI: the fixture reads it from the runtime
+  # One source of truth for the value ABI: the fixture reads it from the backend
   # rather than carrying a literal someone has to remember to bump.
-  ABI="$(sed -n 's/.*RUNTIME_ABI_VERSION: u32 = \([0-9]*\).*/\1/p' \
-        "$(dirname "$0")/../runtime/src/lib.rs" | head -1)"
+  ABI="$(sed -n 's/.*VALUE_ABI_VERSION: u32 = \([0-9]*\).*/\1/p' \
+        "$(dirname "$0")/../backend/native.rs" | head -1)"
   if [ -z "$ABI" ]; then
-    printf '  FAIL  %-52s (cannot read RUNTIME_ABI_VERSION)\n' "native handle round-trip"
-    failures+=("native handle fixture: RUNTIME_ABI_VERSION not found")
+    printf '  FAIL  %-52s (cannot read VALUE_ABI_VERSION)\n' "native handle round-trip"
+    failures+=("native handle fixture: VALUE_ABI_VERSION not found")
     fail=$((fail + 1))
   elif ! cc_err="$(cc "${shared[@]}" -fPIC -DJADE_PKG_ABI="$ABI" "$HANDLE_C" -o "$HANDLE_DIR/handlefix.so" 2>&1)"; then
     printf '  FAIL  %-52s (fixture library did not build)\n' "native handle round-trip"
@@ -194,7 +179,7 @@ ret = "nil"
 args = ["int"]
 ret = "int"
 TOML
-    if ! h_build="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$HANDLE_DIR/handles.jde" -o "$HANDLE_DIR/handles.bin" 2>&1)"; then
+    if ! h_build="$("$JADE" build "$HANDLE_DIR/handles.jde" -o "$HANDLE_DIR/handles.bin" 2>&1)"; then
       printf '  FAIL  %-52s (build failed)\n' "native handle round-trip"
       failures+=("native handle round-trip: build failed: $h_build")
       fail=$((fail + 1))
@@ -280,7 +265,7 @@ TOML
     printf '  FAIL  %-52s (pkg install failed)\n' "C struct round-trip"
     failures+=("C struct fixture: $s_err")
     fail=$((fail + 1))
-  elif ! s_err="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$STRUCT_DIR/main.jde" -o "$STRUCT_DIR/main.bin" 2>&1)"; then
+  elif ! s_err="$("$JADE" build "$STRUCT_DIR/main.jde" -o "$STRUCT_DIR/main.bin" 2>&1)"; then
     printf '  FAIL  %-52s (build failed)\n' "C struct round-trip"
     failures+=("C struct round-trip: build failed: $s_err")
     fail=$((fail + 1))

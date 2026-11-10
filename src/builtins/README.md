@@ -2,9 +2,9 @@
 
 ## What this subtree is
 
-This is the table of contents for everything a Jade program can call without writing it. It owns three things: the `Package` struct, the `PACKAGES` table listing every `std/*` package, and the lookups the type checker and the compiled backend use to ask what exists.
+This is the table of contents for everything a Jade program can call without writing it. It owns three things: the `Package` struct, the `PACKAGES` table listing every `std/*` package, and the lookups the type checkers and MIR lowering use to ask what exists.
 
-The packages themselves are *flat top-level modules*, such as `src/array/`, `src/math/`, and `src/string/`, rather than children of this directory. Each one declares its function names and registers their types with the checker. None of them runs anything: `src/codegen/` lowers every built-in call, mostly to a `jrt_*` function in the runtime.
+The packages themselves are *flat top-level modules*, such as `src/array/`, `src/math/`, and `src/string/`, rather than children of this directory. Each one declares its function names and registers their types with the checker. None of them runs anything. `compiler/infer/builtins.rs` gives every built-in call its static type, `mir/packages.rs` and `mir/ops.rs` lower it to a MIR operation, and a file in `src/backend/` emits the code, into a program only when that program uses it: `math.rs` for `std::math`, `fs.rs` for `std::fs`, `tasks.rs` for the task controls, and so on.
 
 Until v1.4.8 each package also held a second implementation for the bytecode VM, as `BuiltinFn` values over `VmValue`. v2 removed the VM, and with it those bodies, their tests, and the `seed_globals`, `NativeFnId` and `PrimType` machinery that served it. What is left is names and types.
 
@@ -16,8 +16,8 @@ Until v1.3.21 several did not. `a.map(f)` existed nowhere at all, and `string.up
 
 Two things to keep in mind when adding a function:
 
-- *Register both spellings.* A package entry goes in the package's `fns` list. The method goes in the package's method list, such as `string::STR_METHODS`, *and* in `register_*_method_types`, or the type checker will not know about it. `codegen` reads the package list to decide which package calls lower as the method, so a name missing from it silently keeps the old behavior.
-- *Say so if the two differ.* `std/array` is the exception on purpose, and it is why the codegen bridge asks the package list for a name rather than assuming every receiver-first call is the method. `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place, so routing one to the other would be a silent miscompile, not a build error.
+- *Register both spellings.* A package entry goes in the package's `fns` list. The method goes in the package's method list, such as `string::STR_METHODS`, *and* in `register_*_method_types`, or the type checker will not know about it. `package_call` in `compiler/infer/builtins.rs` decides which package calls are the method written receiver-first, and MIR lowers both spellings the same way, so a name missing from that list is treated as a package function of its own.
+- *Say so if the two differ.* `std/array` is the exception on purpose, and it is why the checker names the receiver-first functions one by one rather than assuming every receiver-first call is the method. `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place, so routing one to the other would be a silent miscompile, not a build error.
 
 ## What each file does
 
@@ -34,7 +34,7 @@ Two things to keep in mind when adding a function:
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |
 | `src/math/` | `std/math` | |
 | `src/json/` | `std/json` | |
-| `src/fs/` | `std/fs` | Output is tainted (see `jade_runtime::trust`). |
+| `src/fs/` | `std/fs` | Output is tainted (see `src/backend/fs.rs`). |
 | `src/future/` | *(none)* | Supplies the `future` primitive methods, `ready` and `cancel`. No package form: see that module's README for why. |
 | `src/path/` | `std/path` | |
 | `src/env/` | `std/env` | |
@@ -49,13 +49,13 @@ Two things to keep in mind when adding a function:
 
 *Depends on:* `compiler/type_infer` for `TypeContext`.
 
-*Used by:* `compiler/type_infer.rs`, which calls the type-registration hooks so built-ins are visible to inference and checks `math.round`-style field access against a package's `fns`. `codegen/builtins.rs`, which reads `global_names` to decide which globals a program may read unbound, and the package lists to decide which package calls lower as methods. `project/imports.rs`, which tells a `std/*` import from a file import.
+*Used by:* `compiler/type_infer.rs`, which calls the type-registration hooks so built-ins are visible to inference and checks `math.round`-style field access against a package's `fns`. `compiler/infer/`, the static checker, which reads `all_packages` to know every package name and the method lists, such as `string::STR_METHODS`, to know which methods a primitive has. `mir/lower.rs`, which reads `all_packages` to tell a package name from a value. `project/imports.rs` and `aot/imports.rs`, which tell a `std/*` import from a file import.
 
 ## Adding a built-in
 
 1. Add its name to the package's `fns` list, or to `core::GLOBAL_NAMES` for a global.
 2. Add its type in the package's `register_types`.
-3. *Lower it in `src/codegen/`, in the same change.* A name the checker accepts and the backend cannot lower is a program that type-checks and then refuses to build. A module function goes in `chunk_module_supported` and `emit_module_call`. A bare global goes in `LOWERABLE_BUILTINS` and the `call_builtins` dispatch. `every_package_fn_lowers_in_the_chunk_backend` in `codegen::tests` fails if a package name has no lowering.
+3. *Type it, lower it, and emit it, in the same change.* A package function gets its static type in `package_call` in `compiler/infer/builtins.rs`, its MIR operation in `mir/packages.rs`, and its code in the matching file in `src/backend/`. A bare global goes in `is_builtin_value` and `builtin_result` in the same checker file, and in `builtin` in `mir/ops.rs`. A name with no checker arm is refused as `std/<pkg> has no function '<name>'`, and one with no MIR arm stops with `jade cannot compile std/<pkg> yet`. `jade check` runs both, so either gap shows up there rather than when a program tries to ship.
 4. *Write an `examples/` fixture that exercises it, with its `.expected` output*, so `src/scripts/golden.sh` runs it. A builtin no fixture touches looks fine to every test in the repo, which is how `write` and `uhttp.stream` stayed broken in compiled programs until v1.1.34.
 
 Adding a whole package also needs `pub mod <name>;` in `src/lib.rs`, a `use crate::<name>;` here, and an entry in `PACKAGES`.

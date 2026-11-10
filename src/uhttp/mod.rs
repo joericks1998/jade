@@ -9,8 +9,8 @@
 //! unix:///var/run/docker.sock:/v1.43/containers/json
 //! ```
 //!
-//! The transport lives in `jade_runtime::uhttpf`, behind the `jrt_uhttp_*`
-//! symbols compiled programs call, including `uhttpf::Stream` for `uhttp.stream`.
+//! The transport is `curl --unix-socket`, emitted into each program that uses
+//! it by `src/backend/http.rs`, including the line reader behind `uhttp.stream`.
 //! This module only names the package's functions and registers their types.
 
 use crate::builtins::Package;

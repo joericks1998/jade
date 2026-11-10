@@ -394,11 +394,12 @@ impl<'a> Lowerer<'a> {
         };
         let blocks = vec![
             Block {
+                spans: vec![Span { line: 0, col: 0 }; done.len()],
                 stmts: done,
                 term: Term::If(Operand::Copy(Place::Local(e)), BlockId(2), BlockId(1)),
             },
-            Block { stmts: Vec::new(), term: Term::Return(result) },
-            Block { stmts: Vec::new(), term: Term::Unwind },
+            Block::new(Term::Return(result)),
+            Block::new(Term::Unwind),
         ];
         let func = Func {
             name: format!("adapter {name} as {ft:?}"),
@@ -525,7 +526,7 @@ impl<'a> Lowerer<'a> {
             is_main: k.func == FnKey::Main,
             ret: if k.func == FnKey::Main { Ty::Nil } else { ret },
             locals: Vec::new(),
-            blocks: vec![Block { stmts: Vec::new(), term: Term::Unreachable }],
+            blocks: vec![Block::new(Term::Unreachable)],
             done: vec![false],
             cur: BlockId(0),
             scopes: vec![HashMap::new()],
@@ -535,6 +536,7 @@ impl<'a> Lowerer<'a> {
             handlers: Vec::new(),
             unwind: None,
             stream: None,
+            span: Span { line: 0, col: 0 },
         };
         let (name, body) = match &k.func {
             FnKey::Main => ("main".to_string(), self.top),
@@ -577,6 +579,38 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// Purpose: This function gives a statement's source position.
+///
+/// Inputs:
+/// - `s`: the statement.
+///
+/// Outputs: its span, or `None` for one that carries none.
+fn stmt_span(s: &TStmt) -> Option<Span> {
+    Some(match s {
+        TStmt::Let { span, .. }
+        | TStmt::Assign { span, .. }
+        | TStmt::FnDef { span, .. }
+        | TStmt::Return { span, .. }
+        | TStmt::Yield { span, .. }
+        | TStmt::If { span, .. }
+        | TStmt::While { span, .. }
+        | TStmt::For { span, .. }
+        | TStmt::Break { span, .. }
+        | TStmt::Continue { span, .. }
+        | TStmt::StructDef { span, .. }
+        | TStmt::ExtendBlock { span, .. }
+        | TStmt::FieldAssign { span, .. }
+        | TStmt::IndexAssign { span, .. }
+        | TStmt::PromptDecl { span, .. }
+        | TStmt::Use { span, .. }
+        | TStmt::FromUse { span, .. }
+        | TStmt::Raise { span, .. }
+        | TStmt::TryCatch { span, .. }
+        | TStmt::AsyncFnDef { span, .. } => *span,
+        TStmt::Expr(e) => e.span,
+    })
+}
+
 /// Purpose: This struct holds the state of lowering one function.
 pub(super) struct Fx<'a, 'l> {
     pub(super) l: &'l Lowerer<'a>,
@@ -607,6 +641,9 @@ pub(super) struct Fx<'a, 'l> {
     unwind: Option<BlockId>,
     /// For a generator, the array each `yield` appends to, and its element type.
     stream: Option<(Local, Ty)>,
+    /// The source position of what is being lowered, recorded with each
+    /// statement emitted.
+    span: Span,
 }
 
 impl<'a, 'l> Fx<'a, 'l> {
@@ -686,6 +723,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             _ => false,
         };
         self.blocks[self.cur.0 as usize].stmts.push(s);
+        self.blocks[self.cur.0 as usize].spans.push(self.span);
         if raises {
             self.check_err();
         }
@@ -702,6 +740,7 @@ impl<'a, 'l> Fx<'a, 'l> {
         self.blocks[self.cur.0 as usize]
             .stmts
             .push(Stmt::Assign(Place::Local(e), Rvalue::ErrPending));
+        self.blocks[self.cur.0 as usize].spans.push(self.span);
         let handler = self.handler();
         let cont = self.new_block();
         self.terminate(Term::If(Operand::Copy(Place::Local(e)), handler, cont));
@@ -734,7 +773,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     ///
     /// Outputs: its id.
     pub(super) fn new_block(&mut self) -> BlockId {
-        self.blocks.push(Block { stmts: Vec::new(), term: Term::Unreachable });
+        self.blocks.push(Block::new(Term::Unreachable));
         self.done.push(false);
         BlockId(self.blocks.len() as u32 - 1)
     }
@@ -999,10 +1038,17 @@ impl<'a, 'l> Fx<'a, 'l> {
     ///
     /// Outputs: `Ok(())` or the first error.
     fn stmt(&mut self, s: &'a TStmt) -> Result<()> {
+        let outer = self.span;
+        if let Some(sp) = stmt_span(s) {
+            self.span = sp;
+        }
         let mark = self.temps.len();
-        self.stmt_inner(s)?;
-        self.drop_temps(mark);
-        Ok(())
+        let r = self.stmt_inner(s);
+        if r.is_ok() {
+            self.drop_temps(mark);
+        }
+        self.span = outer;
+        r
     }
 
     /// Purpose: This function stores a value into a place, converting it to the
@@ -1443,6 +1489,20 @@ impl<'a, 'l> Fx<'a, 'l> {
     ///
     /// Outputs: an operand holding its value, and its type.
     pub(super) fn expr(&mut self, e: &'a TExpr) -> Result<(Operand, Ty)> {
+        let outer = self.span;
+        self.span = e.span;
+        let r = self.expr_inner(e);
+        self.span = outer;
+        r
+    }
+
+    /// Purpose: This function lowers an expression, with its span recorded.
+    ///
+    /// Inputs:
+    /// - `e`: the expression.
+    ///
+    /// Outputs: an operand holding its value, and its type.
+    fn expr_inner(&mut self, e: &'a TExpr) -> Result<(Operand, Ty)> {
         let span = e.span;
         let et = self.ty(e)?;
         let op = match &e.kind {

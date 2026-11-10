@@ -1,7 +1,9 @@
-/// The magnitude of the smallest Jade integer: `-INT_MIN`, which is 2^62 and
-/// one past `INT_MAX`. Lexed so `-4611686018427387904` can be written; see the
-/// integer-literal arm and `parser::parse_unary`.
-pub const NEGATED_INT_MIN: i64 = -(jade_runtime::value::JadeValue::INT_MIN + 1) + 1;
+/// The magnitude of the smallest Jade integer, `i64::MIN`: 2^63, one past
+/// `i64::MAX`. Jade integers are full 64-bit, as design decision 8 in
+/// `design/v2-static-values.md` settles. The magnitude does not fit an `i64`,
+/// so the lexer carries it as this marker, `i64::MIN` itself, and only
+/// `parser::parse_unary` accepts it, when it is negated.
+pub const NEGATED_INT_MIN: i64 = i64::MIN;
 
 use super::error::{JadeError, Result, Span};
 
@@ -576,32 +578,26 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                         span: Span { line, col: start_col },
                     });
                 } else {
-                    // Jade integers are 63-bit: the compiled representation
-                    // spends one bit on the value tag, and the language follows
-                    // it so both engines accept the same programs. Parsing as
-                    // i64 and then bounding gives one message for "not a
-                    // number" and "too large" alike.
-                    // The bound is one *past* `INT_MAX`, not `INT_MAX`. A
+                    // Jade integers are full 64-bit. Parsing as u64 and then
+                    // bounding gives one message for "not a number" and "too
+                    // large" alike.
+                    // The bound is one *past* `i64::MAX`, not `i64::MAX`. A
                     // literal is lexed without its sign — `-` is a separate
-                    // token the parser applies — and Jade's range is
-                    // asymmetric, so the magnitude of the smallest integer,
-                    // `INT_MIN` = -(2^62), is 2^62, which is one more than
-                    // `INT_MAX`. Bounding the bare magnitude at `INT_MAX` meant
-                    // the smallest representable integer could not be written
-                    // at all: `-4611686018427387904` was rejected as a literal
-                    // that overflows its type. So 2^62 is lexed, and
-                    // `parse_unary` folds it into `INT_MIN` when it is
-                    // negated. Anywhere else it is still refused, by
-                    // `parse_primary`.
-                    let value: i64 = num_str
-                        .parse()
-                        .ok()
-                        .filter(|v| {
-                            jade_runtime::value::JadeValue::int_fits(*v) || *v == NEGATED_INT_MIN
-                        })
-                        .ok_or(JadeError::LiteralOverflow {
-                            span: Span { line, col: start_col },
-                        })?;
+                    // token the parser applies — and the range is asymmetric,
+                    // so the magnitude of the smallest integer, `i64::MIN`, is
+                    // 2^63, one more than `i64::MAX`. So 2^63 is lexed, as the
+                    // `NEGATED_INT_MIN` marker, and `parse_unary` folds it into
+                    // `i64::MIN` when it is negated. Anywhere else it is
+                    // refused, by `parse_primary`.
+                    let value: i64 = match num_str.parse::<u64>() {
+                        Ok(v) if v <= i64::MAX as u64 => v as i64,
+                        Ok(v) if v == i64::MAX as u64 + 1 => NEGATED_INT_MIN,
+                        _ => {
+                            return Err(JadeError::LiteralOverflow {
+                                span: Span { line, col: start_col },
+                            });
+                        }
+                    };
                     tokens.push(Token {
                         kind: TokenKind::Integer(value),
                         span: Span { line, col: start_col },

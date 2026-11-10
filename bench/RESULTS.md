@@ -2,6 +2,8 @@
 
 Newest run first. Each run gets its own dated header. Numbers are never edited in place under an old header, because a timing only means something next to the platform and version that produced it.
 
+*A note for Jade 2.0.* Every run below was measured on v1, where the VM and compiled binaries both ran on v1's runtime: the `jade-runtime` crate, its C half, its pool allocator, and its escape analysis. Phase 6 of `design/v2-static-values.md` deleted all of them, along with the `alloc-profile` feature. The numbers stay as a record of v1; they do not describe a v2 binary, which carries no runtime and links the C library alone.
+
 ---
 
 # Run — 2026-07-31 (Jade 1.1.33)

@@ -5,8 +5,8 @@ use crate::compiler::{tir::JadeType, type_infer::TypeContext};
 
 /// Every global a program can name without importing anything.
 ///
-/// The compiled backend checks each global a program reads against what it
-/// binds; these are the ones it binds without being told.
+/// The static checker keeps its own list of the callable ones, in
+/// `is_builtin_value` in `compiler/infer/builtins.rs`.
 pub const GLOBAL_NAMES: &[&str] = &[
     "print",
     "len",

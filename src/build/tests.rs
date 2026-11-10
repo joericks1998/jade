@@ -1,41 +1,16 @@
 //! Tests for the in-process build path.
 //!
-//! These stop at IR (`Emit::Ir`), so they need LLVM but no linker. The
-//! link-and-load path is covered in `codegen::tests`.
+//! Most stop at IR (`Emit::Ir`), so they need LLVM but no linker; one links a
+//! binary with the LLD inside `jade`.
 
 use std::path::Path;
 
 use super::*;
-use crate::aot::CompileMode;
 
 fn tir(src: &str) -> TProgram {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
     crate::compiler::type_infer::infer(program).expect("infer")
-}
-
-// ── Emit → CompileMode ────────────────────────────────────────────────────────
-
-#[test]
-fn binary_and_ir_both_lower_as_a_binary() {
-    // IR is printed rather than linked, so it wants the binary entry point.
-    assert_eq!(CompileMode::from(&Emit::Binary), CompileMode::Binary);
-    assert_eq!(CompileMode::from(&Emit::Ir), CompileMode::Binary);
-}
-
-#[test]
-fn cdylib_carries_its_export_list_through() {
-    let emit = Emit::CDylib { exports: vec!["add".into()] };
-    assert_eq!(CompileMode::from(&emit), CompileMode::SharedLib { exports: vec!["add".into()] });
-}
-
-#[test]
-fn cdylib_with_no_exports_stays_empty() {
-    // Empty means "export everything" downstream, not "export nothing".
-    assert_eq!(
-        CompileMode::from(&Emit::CDylib { exports: vec![] }),
-        CompileMode::SharedLib { exports: vec![] }
-    );
 }
 
 #[test]
@@ -89,23 +64,6 @@ fn building_a_binary_writes_an_artifact() {
         .expect("binary build should succeed");
 
     assert!(src.out().exists(), "no binary produced at {}", src.out().display());
-}
-
-#[test]
-fn building_a_package_produces_a_loadable_library() {
-    let src = Source::new("pkg", "fn add(a, b) { return a + b }\n");
-    let out = src.dir.join(if cfg!(target_os = "macos") { "p.dylib" } else { "p.so" });
-
-    build(
-        &tir("fn add(a, b) { return a + b }\n"),
-        &src.file,
-        &out,
-        Emit::CDylib { exports: vec![] },
-    )
-    .expect("package build should succeed");
-
-    let exports = crate::pkg::bindgen::exported_symbols(&out).unwrap_or_default();
-    assert!(exports.contains("jade_pkg_init"), "a package built here must export jade_pkg_init");
 }
 
 #[test]

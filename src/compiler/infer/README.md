@@ -2,9 +2,9 @@
 
 ## What this subtree is
 
-This is Jade 2.0's type checker. It works out one concrete type for every value in a program, with no annotations, so the static backend can compile an int to a register and a struct to a fixed layout with no type tags. It also decides which programs Jade 2.0 accepts. The rules it enforces are the decisions in [`design/v2-static-values.md`](../../../design/v2-static-values.md); read that first.
+This is Jade 2.0's type checker. It works out one concrete type for every value in a program, with no annotations, so the backend can compile an int to a register and a struct to a fixed layout with no type tags. It also decides which programs Jade 2.0 accepts. The rules it enforces are the decisions in [`design/v2-static-values.md`](../../../design/v2-static-values.md); read that first.
 
-It runs on the whole merged program: after the per-file pass in `type_infer.rs`, after the import pass inlines every module, and after struct defaults are filled. It has two jobs while the static backend is being built. For the default backend it is a gate: `aot::compile_with_mode` and `aot::would_build` call `check_program`, so a program it rejects neither builds nor passes `jade check`, even though the bytecode backend could still run it. For `jade build --backend=static` it is the input: [`src/mir/`](../../mir/README.md) lowers its answer into typed code.
+It runs on the whole merged program: after the per-file pass in `type_infer.rs`, after the import pass inlines every module, and after struct defaults are filled. Its answer is the input to the rest of the build: [`src/mir/`](../../mir/README.md) lowers it into typed code. A program it rejects neither builds nor passes `jade check`.
 
 ## Why it was built
 
@@ -39,7 +39,7 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 ## Who uses it
 
-*Used by:* `aot::compile_with_mode` and `aot::would_build`, as the gate described above, and `mir::lower_program`, which reads `Typed` through `aot::compile_static`. `cli/check.rs` reaches it through `would_build`, which is also how the `every_example_matches_its_expected_check_result` test judges every fixture.
+*Used by:* `aot::compile` and `aot::would_build`, and `mir::lower_program`, which reads `Typed`. `cli/check.rs` reaches it through `would_build`, which is also how the `every_example_matches_its_expected_check_result` test judges every fixture.
 
 *Depends on:* `compiler::tir` for the merged program it reads, `frontend::ast` for struct field definitions, and `builtins` for the package and primitive-method name lists.
 
@@ -49,7 +49,7 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 *`join` must not make a type contain itself.* An array pushed into itself would need an element type that is its own array type, and `resolve` would recurse until the stack ran out. `Store::occurs` refuses that on both paths `join` can fill a slot, and it compares a slot before following what the slot holds; following first looked past the slot itself once it had been defaulted to `nil`.
 
-*Native calls are typed from `jade.toml`.* `native.rs` reads a `[lib.<name>.symbols.<fn>]` declaration, written in Jade types such as `handle<Thing>` or `fn(int, str) -> int`, and the import resolver derives one from each C dependency's symbol table. `check_program_with` takes them by `__native$<pkg>$<fn>`. A declared call checks its arguments and gives its result; an undeclared one takes its arguments as they are and its result from how it is used. A result its use never settles would default to `nil` like any open slot, so it is recorded first in `Typed.unsettled_natives`, and the static backend refuses it by name. A declared callback type gets a return slot of its own at the call, which is how the store recognizes it from pass to pass.
+*Native calls are typed from `jade.toml`.* `native.rs` reads a `[lib.<name>.symbols.<fn>]` declaration, written in Jade types such as `handle<Thing>` or `fn(int, str) -> int`, and the import resolver derives one from each C dependency's symbol table. `check_program_with` takes them by `__native$<pkg>$<fn>`. A declared call checks its arguments and gives its result; an undeclared one takes its arguments as they are and its result from how it is used. A result its use never settles would default to `nil` like any open slot, so it is recorded first in `Typed.unsettled_natives`, and MIR lowering refuses it by name. A declared callback type gets a return slot of its own at the call, which is how the store recognizes it from pass to pass.
 
 *A function only C calls is still checked.* A named function passed where a function type is declared is checked at that type when its function type settles, and each pass keeps draining its worklist until settling adds nothing new. Otherwise the final pass would leave such a function out of the answer.
 

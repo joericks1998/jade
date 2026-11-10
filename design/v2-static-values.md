@@ -287,7 +287,7 @@ Building it settled five details:
 - *Popping an empty array is a runtime error*, `pop from an empty array`. v1 returned `nil`, which an `[int]` cannot hold.
 - *Runtime errors stop the program* with v1's `jade: <message>` and exit status 1 until exceptions land in phase 3. They all go through one function, `F::fail`, which phase 3 turns into a raise.
 - *A parameter is owned by the function*, which retains it on entry. That keeps a dict parameter a copy under copy-on-write.
-- *Integer literals are still limited to 2^62* by the lexer, because the tagged backend cannot hold more. The limit lifts at the switchover in phase 6.
+- *Integer literals were limited to 2^62* by the lexer, because the tagged backend could not hold more. The limit lifted at the switchover in phase 6.
 
 *Phase 3 is done* (2026-11-04), without closures, which `design/v2-classes.md` removed. Exceptions are a thread-local error slot that MIR checks after every operation that can raise, with no unwinding library. A named function used as a value is called directly; a value of a joined function type is a pointer to a generated adapter. A stream runs its generator to the end into an array, which is what v1 printed. Parent-struct joins became classes.
 
@@ -322,7 +322,16 @@ This is the part of decision 11 that needed the input it names: a Jade-ABI packa
 - *Dependencies are flat*, as they were for prebuilt packages: adding a package adds what it declares to the project's manifest, and one copy of each package is compiled in. A path a package names is rewritten relative to the project when the package is itself a path; from a git or archive package it cannot be followed and is named for the user to add.
 - *The lock pins a hash of the source*, `jade.toml` and every `.jde` file by path and content, for all three kinds, plus the commit for git. Installing checks the unpacked tree against it, and a path package is re-pinned when it changes, as a path library always was.
 
-`jade build --lib` and the `jade_pkg_init` loader for packages built with it go away in phase 6.
+`jade build --lib` went away in phase 6, below. A native library a program calls still exports `jade_pkg_init`, since that is the boundary C code speaks.
+
+*C structs and several results are done* (2026-11-09): see the C dependency bullet above. *musl* is too: on a Linux system with no glibc, such as Alpine, the backend links against musl's loader, which is its C library, and the one `_start` the backend emits serves both.
+
+*Phase 6 is done* (2026-11-09). The static backend is the only one: `jade build`, `jade run`, `jade test` and `jade check` all go through `aot::compile` or `aot::would_build`, and the `--backend` flag and the list of covered examples are gone. Deleted: `src/bytecode/`, `src/codegen/`, `compiler/emit.rs` with its escape analysis and grammar builder, `src/runtime/` (`jade-runtime`), `src/runtime_aot/`, and `src/alloc/`, the `jade` binary's own pool allocator. The root `build.rs` builds only the LLD bridge, and a release ships one binary. Building it settled these:
+
+- *The task-safety check moved to MIR* (`src/mir/taskcheck.rs`). It ran inside bytecode emission, so the static backend had been building programs whose tasks race; it now runs on every build. MIR blocks record a span per statement for its messages. It is a little more precise than v1's: only heap values can be shared, and a write into a global's collection counts as a global write even inside a helper called with no arguments, which v1 missed.
+- *Integers are full 64-bit in source too.* The lexer reads up to `i64::MAX`, and `-9223372036854775808` folds to `i64::MIN`.
+- *Prompts wait for inference.* A prompt, a prompt field or a `Grammar` stops with `jade cannot compile prompts yet`; `jade check`'s fixture test counts those examples as pending, and `golden.sh` skips them. The Metal inference kernel is the next milestone.
+- *The value ABI number moved* from `jade_runtime::RUNTIME_ABI_VERSION` to `backend::native::VALUE_ABI_VERSION`, still 5, so a package built for v1 loads unchanged.
 
 ## Open questions
 

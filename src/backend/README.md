@@ -1,19 +1,19 @@
-# `src/backend/`: the static backend
+# `src/backend/`: the code generator
 
 ## What this subtree is
 
 This is Jade 2.0's code generator. It turns [MIR](../mir/README.md) into an LLVM module, optimizes it, and links a binary against the C library and nothing else. Every value has a type the compiler knows, so an `int` is an `i64` in a register and a struct is a fixed layout. No compiled program reads a type tag.
 
 ```sh
-./target/debug/jade build --backend=static examples/strings/unicode/unicode.jde -o unicode
+./target/debug/jade build examples/strings/unicode/unicode.jde -o unicode
 otool -L unicode        # /usr/lib/libSystem.B.dylib, and nothing else
 ```
 
-It sits behind `--backend=static` until it covers the whole language. The examples it covers so far are listed in `src/scripts/static-examples.list`, and `golden.sh --backend=static` holds them to the same recorded outputs as the default backend.
+It is the only backend. It sat behind `--backend=static` while it grew, and became the only one in phase 6 of `design/v2-static-values.md`, when v1's backend and both of its runtimes were deleted. `golden.sh` holds every example to the outputs v1.4.8 printed. Prompts do not compile yet; they return with the Metal inference kernel.
 
 ## Why it was built
 
-The v1 backend lowered bytecode into calls to two runtime libraries: about 16,600 lines of Rust and C, reached through 237 functions, with a tag check on every operation. GPU inference cannot sit on top of that, and `design/v2-static-values.md` explains the rest of the reasons. This backend replaces both runtimes. What v1 called the runtime is emitted here, into each program, only where the program uses it.
+The v1 backend lowered bytecode into calls to two runtime libraries: about 16,600 lines of Rust and C, reached through 237 functions, with a tag check on every operation. GPU inference cannot sit on top of that, and `design/v2-static-values.md` explains the rest of the reasons. This backend replaced both runtimes. What v1 called the runtime is emitted here, into each program, only where the program uses it.
 
 On one benchmark of recursion, string building, dict inserts and a float loop, a static binary ran in 0.01 seconds against 0.31 for v1, and weighed 34 KB against 4.4 MB.
 
@@ -21,7 +21,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Support code is generated on demand.* Every helper a program needs is an internal LLVM function named `jade.*`, generated the first time something asks for it through `Cx::support`. A program that never splits a string carries no split. Code that depends on a type is generated once per type the program uses, such as releasing an array of strings (`jade.release.Array(Str)`) or printing a dict of arrays. The optimizer inlines what is small and drops what is unused.
 
-*The linker is inside the compiler.* A program is linked in-process by LLD, the linker LLVM ships, built from the same LLVM 18 install. The only thing a machine needs to link a program is the C library itself: `libSystem` on macOS, whose symbols `link.rs` lists in a stub it writes, and on Linux glibc's `libc.so.6`, which every glibc system has, or on a system without glibc, such as Alpine, musl's loader, which is its C library too. So `jade build --backend=static` works with no `cc`, no Xcode tools and no development packages; a binary is ad hoc signed by LLD, as Apple Silicon requires.
+*The linker is inside the compiler.* A program is linked in-process by LLD, the linker LLVM ships, built from the same LLVM 18 install. The only thing a machine needs to link a program is the C library itself: `libSystem` on macOS, whose symbols `link.rs` lists in a stub it writes, and on Linux glibc's `libc.so.6`, which every glibc system has, or on a system without glibc, such as Alpine, musl's loader, which is its C library too. So `jade build` works with no `cc`, no Xcode tools and no development packages; a binary is ad hoc signed by LLD, as Apple Silicon requires.
 
 *The C library is the only dependency.* `Cx::libc` declares the functions used, and a test pins the list: memory, `write` and `read`, `snprintf` and `strtod`, the pthread calls behind the 256 MiB main stack and tasks, the clocks, the math library, `fopen` and the directory calls for `std::fs`, and `posix_spawn` with pipes for `std::sh` and `curl`. A few have a different symbol on some platform, such as `errno`'s accessor or Intel macOS's `stat$INODE64`; `libc_symbol` maps them. A `struct stat` or `struct dirent` field is read at an offset chosen per target in `fs.rs`. A program that calls a native package also uses `dlopen` and its siblings.
 
@@ -71,9 +71,9 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 ## Who uses it
 
-*Used by:* `aot::compile_static`, reached through `jade build --backend=static`.
+*Used by:* `aot::compile`, reached through `jade build`, `jade run` and `jade test`.
 
-*Depends on:* `mir` for its input, `inkwell` for LLVM, and LLD, LLVM's linker, which `src/runtime_aot/build.rs` compiles into the compiler from the same LLVM 18 install. No system `cc` or linker is involved.
+*Depends on:* `mir` for its input, `inkwell` for LLVM, and LLD, LLVM's linker, which the root `build.rs` compiles into the compiler from the same LLVM 18 install. No system `cc` or linker is involved.
 
 ## Gotchas
 
@@ -91,6 +91,6 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 ```sh
 cargo test backend::
-./src/scripts/golden.sh --backend=static
-./target/debug/jade build --backend=static --emit ir file.jde    # the IR, before optimization
+./src/scripts/golden.sh
+./target/debug/jade build --emit ir file.jde    # the IR, before optimization
 ```

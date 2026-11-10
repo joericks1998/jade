@@ -2,7 +2,8 @@
 //!
 //! Each package is a flat top-level module (`crate::array`, `crate::math`, …)
 //! that declares its function names and registers its types with the checker.
-//! The functions themselves are lowered by `src/codegen/`; nothing here runs.
+//! Nothing here runs: `compiler/infer/builtins.rs` types each call, `mir/`
+//! lowers it, and `src/backend/` emits the code.
 
 use crate::compiler::type_infer::TypeContext;
 
@@ -93,8 +94,8 @@ pub fn primitive_method_tables() -> [(&'static str, &'static [&'static str]); 5]
 // ── Public lookup API ─────────────────────────────────────────────────────────
 
 /// Every stdlib package, for callers that need to walk the whole set rather
-/// than look one up. The tripwire tying these tables to the compiled backend's
-/// lowering predicate uses it; see `codegen::tests`.
+/// than look one up. The static checker and MIR lowering read it to tell a
+/// package name from a value.
 pub fn all_packages() -> &'static [&'static Package] {
     PACKAGES
 }

@@ -21,8 +21,6 @@ compile_error!(
 /// (`alloc::profile`). Host-only — the `#[global_allocator]` declarations
 /// themselves live in `main.rs`, never in `jade-runtime`, so neither can reach a
 /// dlopen'd package the way mimalloc did.
-pub mod alloc;
-
 /// AOT driver: import resolution, then `codegen`, then object and link. `jade
 /// build` calls straight into this, so LLVM 18 is a build-time requirement for
 /// the toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that
@@ -38,13 +36,11 @@ pub mod builtins;
 /// The instruction set both engines consume: the compiler emits a `Chunk`, the
 /// VM interprets it and `codegen` lowers it. It belongs to neither engine,
 /// which is why it sits between them rather than inside `compiler`.
-pub mod bytecode;
 pub mod cache;
 pub mod cli;
 /// Code generation: bytecode `Chunk` → LLVM IR. The half of `jade build` that
 /// is about the language rather than about producing a file, which is why it
 /// sits beside `aot` rather than inside it.
-pub mod codegen;
 pub mod compiler;
 /// Bytecode interpreter — one of the two execution engines, peer to `aot`
 /// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses

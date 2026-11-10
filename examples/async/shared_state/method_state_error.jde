@@ -8,9 +8,9 @@
 // This file is a fixture: `jade check` must REJECT it.
 
 class Batch {
-    items
+    @public items
 
-    fn grow() {
+    @public fn grow() {
         self.items.push(3)
     }
 }

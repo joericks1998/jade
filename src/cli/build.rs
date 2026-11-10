@@ -3,121 +3,42 @@ use std::{
     process,
 };
 
-/// Where a build lands when the user did not say.
+/// Purpose: This function says where a build writes its binary.
 ///
-/// The default is the source file's own name without its extension, beside the
-/// source.  A `--lib` build gets the platform's shared-library extension
-/// instead, because `use <name>` resolves a package by stem and the loader
-/// needs a real `.dylib`/`.so` to open.
-pub(crate) fn output_path(source: &str, output: Option<&str>, lib: bool) -> PathBuf {
+/// Inputs:
+/// - `source`: the file being compiled.
+/// - `output`: the path `-o` gave, if any.
+///
+/// Outputs: `-o`'s path, else the source's stem beside it.
+pub(crate) fn output_path(source: &str, output: Option<&str>) -> PathBuf {
     if let Some(o) = output {
         return PathBuf::from(o);
     }
     let src = Path::new(source);
     let stem = src.file_stem().unwrap_or(src.as_os_str());
-    let name = if lib {
-        let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
-        PathBuf::from(format!("{}.{ext}", stem.to_string_lossy()))
-    } else {
-        PathBuf::from(stem)
-    };
-    src.parent().unwrap_or(Path::new(".")).join(name)
+    src.parent().unwrap_or(Path::new(".")).join(stem)
 }
 
-/// What a `jade build` invocation resolved to: which file to compile, where the
-/// artifact lands, and which functions a `--lib` build binds.
-struct Target {
-    source: PathBuf,
-    output: Option<String>,
-    exports: Vec<String>,
-}
-
-/// Work out what to build.
+/// Purpose: This function checks a package's `[package] sources` when the
+/// file being built is the package's entry module.
 ///
-/// With a file argument this is the long-standing behavior and nothing consults
-/// the manifest. Without one, `--lib` builds the project's `[package]` — its
-/// entry, its exports, and its artifact name — which is what makes a package's
-/// shape a property of `jade.toml` rather than of the command line somebody
-/// remembered to type.
-fn resolve_target(
-    path: Option<&str>,
-    output: Option<&str>,
-    lib: bool,
-    exports: &[String],
-) -> Target {
-    if let Some(p) = path {
-        return Target {
-            source: PathBuf::from(p),
-            output: output.map(str::to_string),
-            exports: exports.to_vec(),
-        };
-    }
-
-    if !lib {
-        eprintln!("error: `jade build` needs a file to compile");
-        eprintln!("       run `jade build <file.jde>`, or `jade build --lib` inside a");
-        eprintln!("       project whose jade.toml has a [package] section");
-        process::exit(1);
-    }
-
-    let Some(root) = crate::project::find_project_root() else {
-        eprintln!("error: `jade build --lib` without a file builds the [package] in jade.toml,");
-        eprintln!("       but this is not inside a Jade project");
-        eprintln!("       run `jade build <file.jde> --lib`, or `jade init` to create a project");
-        process::exit(1);
+/// Inputs:
+/// - `source`: the file being built.
+///
+/// Outputs: none. It exits with a message when the list and the imports
+/// disagree.
+fn check_package_sources(source: &Path) {
+    let Some(dir) = source.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+    else {
+        return;
     };
-
-    let manifest = match crate::project::load_project(&root) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
-    };
-
-    let Some(pkg) = manifest.package.as_ref() else {
-        eprintln!("error: jade.toml has no [package] section, so there is no package to build");
-        eprintln!("       add one naming what this package is:");
-        eprintln!();
-        eprintln!("           [package]");
-        eprintln!("           name    = \"mylib\"");
-        eprintln!("           version = \"0.1.0\"");
-        eprintln!();
-        eprintln!("       or name a file directly: `jade build <file.jde> --lib`");
-        process::exit(1);
-    };
-
-    if let Err(e) = pkg.validate() {
-        eprintln!("error: {e}");
-        process::exit(1);
-    }
-
+    let Some(root) = crate::project::find_project_root_from(&dir) else { return };
+    let Ok(manifest) = crate::project::load_project(&root) else { return };
+    let Some(pkg) = manifest.package.as_ref() else { return };
     let entry = root.join(pkg.entry_file());
-    if !entry.exists() {
-        eprintln!(
-            "error: [package] entry '{}' does not exist at {}",
-            pkg.entry_file(),
-            entry.display()
-        );
-        eprintln!("       set `entry` in [package], or create the file");
-        process::exit(1);
-    }
-
-    verify_sources(&root, pkg, &entry, &manifest);
-
-    // A command-line --export wins over the manifest: an explicit flag should
-    // not be silently ignored because a config file also had an opinion.
-    let exports =
-        if exports.is_empty() { pkg.exports.clone().unwrap_or_default() } else { exports.to_vec() };
-
-    Target {
-        source: entry,
-        output: Some(
-            output
-                .map(str::to_string)
-                .unwrap_or_else(|| root.join(pkg.artifact_file()).to_string_lossy().into_owned()),
-        ),
-        exports,
+    let same = |a: &Path, b: &Path| a.canonicalize().ok() == b.canonicalize().ok();
+    if same(&entry, source) {
+        verify_sources(&root, pkg, &entry, &manifest);
     }
 }
 
@@ -229,52 +150,36 @@ pub(crate) fn compare_sources(
     Err(msg)
 }
 
-/// `jade build <file.jde>` — compile to a native binary.
+/// Purpose: This function runs `jade build`.
 ///
-/// Runs the whole pipeline in-process: lex → parse → type-infer → TIR, then
-/// import resolution, LLVM code generation, and linking.
+/// Inputs:
+/// - `path`: the file to compile.
+/// - `output`: where `-o` says the binary goes, if anywhere.
+/// - `emit`: `ir` or `mir` to print that instead of writing a binary.
 ///
-/// With no file and `--lib`, builds the project's `[package]` instead; see
-/// [`resolve_target`].
-pub fn run_build(
-    path: Option<&str>,
-    output: Option<&str>,
-    emit: Option<&str>,
-    backend: Option<&str>,
-    lib: bool,
-    exports: &[String],
-) {
-    let target = resolve_target(path, output, lib, exports);
-    let path = &target.source.to_string_lossy().into_owned();
-    let out = output_path(path, target.output.as_deref(), lib);
+/// Outputs: none. It exits with a message on failure.
+pub fn run_build(path: Option<&str>, output: Option<&str>, emit: Option<&str>) {
+    let Some(path) = path else {
+        eprintln!("error: `jade build` needs a file to compile");
+        eprintln!("       run `jade build <file.jde>`");
+        process::exit(1);
+    };
+    check_package_sources(Path::new(path));
+    let out = output_path(path, output);
 
-    let emit_ir = emit.is_some();
-    let emit = match (backend, emit) {
-        (None, None) if lib => crate::build::Emit::CDylib { exports: target.exports.clone() },
-        (None, None) => crate::build::Emit::Binary,
-        (None, Some("ir")) => crate::build::Emit::Ir,
-        (Some("static"), _) if lib => {
-            eprintln!("error: --backend=static cannot build a --lib package yet");
-            process::exit(1);
-        }
-        (Some("static"), None) => crate::build::Emit::Static(crate::aot::StaticEmit::Binary),
-        (Some("static"), Some("ir")) => crate::build::Emit::Static(crate::aot::StaticEmit::Ir),
-        (Some("static"), Some("mir")) => crate::build::Emit::Static(crate::aot::StaticEmit::Mir),
-        (Some(b), None) => {
-            eprintln!("error: unknown backend '{b}'; the one other backend is 'static'");
-            process::exit(1);
-        }
-        (_, Some(e)) => {
-            eprintln!(
-                "error: unknown --emit format '{e}'; use 'ir', or 'mir' with --backend=static"
-            );
+    let emit = match emit {
+        None => crate::build::Emit::Binary,
+        Some("ir") => crate::build::Emit::Ir,
+        Some("mir") => crate::build::Emit::Mir,
+        Some(e) => {
+            eprintln!("error: unknown --emit format '{e}'; use 'ir' or 'mir'");
             process::exit(1);
         }
     };
 
     let bundled = compile_file(path, &out, emit);
 
-    if !emit_ir {
+    if emit == crate::build::Emit::Binary {
         if bundled.is_empty() {
             eprintln!("built: {}", out.display());
         } else {

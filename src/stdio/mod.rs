@@ -29,7 +29,7 @@ pub fn write_str(s: &str) {
     if let Err(e) = lock.write_all(s.as_bytes()) {
         exit_if_broken_pipe(&e);
         // Any other write error is reported the way the macros would have, but
-        // without unwinding through the VM.
+        // without unwinding through the compiler.
         let _ = writeln!(std::io::stderr(), "jade: error writing to stdout: {e}");
     }
 }
@@ -57,9 +57,9 @@ fn exit_if_broken_pipe(e: &std::io::Error) {
 
 /// Install a panic hook that turns a broken-pipe panic into a quiet exit.
 ///
-/// The runtime print path calls [`write_str`] and never needs this. The CLI is
-/// the reason it exists: `print!`/`println!` panic on a failed write and are used
-/// in ~100 places (help text, `jade env`, `jade fmt`, the REPL, the test runner,
+/// [`write_str`] never needs this. The CLI is the reason it exists:
+/// `print!`/`println!` panic on a failed write and are used in ~100 places
+/// (help text, `jade env`, `jade fmt`, the test runner,
 /// the `--verbose` globals dump). Rewriting every one would be churn that the
 /// next `println!` silently undoes, so this backstops all of them at once.
 ///

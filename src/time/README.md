@@ -4,11 +4,11 @@
 
 `use std::time` binds one global, `time`, holding nine functions: two wall clocks, a monotonic clock, `sleep`, a deadline you can wait on, and four ways to move between a timestamp and a calendar.
 
-This directory holds only their names. Every function's actual behavior lives once in [`jade-runtime::timef`](../runtime/src/timef.rs), and the AOT backend calls it through the `jrt_time_*` C-ABI wrappers at the bottom of that file. The exception is `after`, which is a future, so it lives with the task pool in `jade-runtime`'s `task.rs` and is reached through `jade_time_after` in `runtime_aot/posix.c`. Until v1.4.8 this directory was the *VM half*: a `VmValue` wrapper around the same cores, which is why the two engines could not drift on what a date means.
+This directory holds only their names. Every function's actual behavior lives once in [`src/backend/time.rs`](../backend/README.md), which emits it into the program that calls it, with the same calendar arithmetic v1 used. The exception is `after`, which is a future, so it lives with the task queue in `src/backend/tasks.rs`. Until phase 6 the behavior lived in `jade-runtime::timef`, and until v1.4.8 this directory was the *VM half*: a `VmValue` wrapper around the same cores, which is why the two engines could not drift on what a date means.
 
 ## What each file does
 
-- *`mod.rs`* holds `TIME_PKG`, the `Package` that names the nine functions, and the type registration for the `time` global. The calendar arithmetic is tested in `jade-runtime`, against dates checked independently with `date -u`.
+- *`mod.rs`* holds `TIME_PKG`, the `Package` that names the nine functions, and the type registration for the `time` global. The calendar arithmetic is pinned by `examples/time/calendar/`, whose recorded output came from v1's arithmetic, which was tested against dates checked independently with `date -u`.
 
 ## The surface
 
@@ -21,7 +21,7 @@ This directory holds only their names. Every function's actual behavior lives on
 | `time.after(secs)` | `future` | finishes with nil at the deadline |
 | `time.local(tz)` | `str` | formatted local time, `nil` tz for the system zone |
 | `time.utc(ts)` | `str` | ISO 8601, `2026-08-16T14:03:22Z` |
-| `time.parts(ts)` | `dict` | eight UTC calendar fields |
+| `time.parts(ts)` | `TimeParts` | eight UTC calendar fields, read as `p.year` or `p["year"]` |
 | `time.stamp(y, mo, d[, h[, mi[, s]]])` | `int` | the inverse of `parts` |
 
 ## Three things that are the way they are on purpose
@@ -35,5 +35,6 @@ This directory holds only their names. Every function's actual behavior lives on
 ## Who uses it
 
 - [`src/builtins/`](../builtins/README.md) registers `TIME_PKG` in the package table.
-- [`src/codegen/builtins.rs`](../codegen/README.md) lowers each `time.*` call to the matching `jrt_time_*` symbol, or `jade_time_after` for `after`. A function added here without an arm there is a program `jade check` accepts and `jade build` refuses. `every_package_fn_lowers_in_the_chunk_backend` in `src/codegen/tests.rs` exists to catch exactly that.
-- [`src/runtime_aot/runtime.h`](../runtime_aot/README.md) declares the C-ABI prototypes the generated code calls.
+- [`compiler/infer/builtins.rs`](../compiler/infer/README.md) gives each `time.*` call its static type, such as the `TimeParts` struct `time.parts` returns.
+- [`mir/packages.rs`](../mir/README.md) lowers each call to its MIR operation. A function added here without an arm there is a program the checker types and MIR refuses, and `jade check` reports it, since it runs MIR lowering too.
+- [`src/backend/time.rs`](../backend/README.md) and `src/backend/tasks.rs` emit the code.

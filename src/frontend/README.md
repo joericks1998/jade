@@ -2,12 +2,12 @@
 
 ## What this subtree is
 
-This is the front half of the Jade compiler. It takes raw `.jde` source text and turns it into a `Program`, the untyped abstract syntax tree every later stage builds on. Nothing here knows about types, bytecode, or LLVM. Its whole job is working out what the programmer wrote.
+This is the front half of the Jade compiler. It takes raw `.jde` source text and turns it into a `Program`, the untyped abstract syntax tree every later stage builds on. Nothing here knows about types, MIR, or LLVM. Its whole job is working out what the programmer wrote.
 
 It is the first link in the one-way chain that defines the toolchain:
 
 ```
-source text → frontend → compiler (TIR) → bytecode → aot
+source text → frontend → compiler (TIR, static types) → mir → backend
 ```
 
 No stage reaches backwards, so a change here ripples forward and never the other way.
@@ -20,7 +20,7 @@ Two ideas shape the code.
 
 *Every failure carries a span.* Every `JadeError` variant holds a `Span { line, col }`, because an error with no location is nearly useless to whoever is writing the program. That is also why there are no panics on the compiler path. An `unwrap()` on anything derived from user input turns a good message into a backtrace.
 
-A third choice is worth knowing before you add syntax: *prefer desugaring*. If the parser can rewrite new syntax into an AST node that already exists, the rest of the pipeline never learns about it. The `~>` operator is the model. It is a parser-level rewrite to the prompt-dereference node, so type inference, the emitter, and both backends were left untouched.
+A third choice is worth knowing before you add syntax: *prefer desugaring*. If the parser can rewrite new syntax into an AST node that already exists, the rest of the pipeline never learns about it. The `~>` operator is the model. It is a parser-level rewrite to the prompt-dereference node, so nothing past the parser had to learn about it.
 
 *But desugar only what the parser can actually decide.* `|>` is the counter-example, and it is worth reading before you reach for the rule above.
 
@@ -33,7 +33,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 - *`lexer.rs`* turns source text into a `Vec<Token>`. It handles Jade's string forms, meaning plain, single-quoted, triple-quoted, and f-strings, plus numeric literals with overflow detection and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
 - *`parser.rs`* turns tokens into a `Program`. It is the largest file here. Operator precedence lives in its call chain, which runs `parse_or`, then `parse_and`, and on down to `parse_primary`. Add a precedence level by inserting a function at the right point in that chain, rather than special-casing inside an existing one.
 - *`ast.rs`* holds the AST node types, plus the small enums shared with later stages: `BinOpKind`, `UnaryOpKind`, `StructFieldDef`, and `FStrPart`. All of them are serde-serializable, because the on-disk cache stores them.
-- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here rather than in the backend, because type inference and the AOT backend both report an undefined name, the backend for programs that type inference had to let through, and the two should word it the same way.
+- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here, beside the `UndefinedVariable` message it extends. Until phase 6 v1's backend also reported undefined names, for programs type inference had to let through, and it shared the hint so the two worded it the same way.
 
   It also holds two limits. `MAX_NESTING_DEPTH` is how deeply the parser descends before refusing the source. `COMPILER_STACK_SIZE` is the stack `main.rs` runs the whole CLI on, 3 GiB in a debug build and 256 MiB in a release build, because every compiler stage recurses over the source. It replaced the VM's `VM_STACK_SIZE` in v2.
 - *`mod.rs`* holds module declarations only.
@@ -43,7 +43,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 
 *Depends on:* nothing else in the crate. This is the bottom of the stack.
 
-*Used by:* nearly everything. `compiler/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, the bytecode, `codegen`, and the AOT backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
+*Used by:* nearly everything. `compiler/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
 
 ## Gotchas
 
@@ -57,7 +57,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 
 *Closures were removed in 2.0.1.* A `|` or `||` where an expression starts is refused with `JadeError::ClosureRemoved`, which names the replacement, rather than with "expected expression". `||` between two expressions is still logical or.
 
-`loop_depth` is *reset* across a function boundary rather than merely saved, in both places a body is parsed: `fn` and `async fn`. A loop outside the enclosing function is not one its body can break out of, because leaving it would mean crossing a call frame, and `return` is the statement for that. Getting this wrong fails silently. The parse succeeds, and the emitter produces a jump to an address in another chunk.
+`loop_depth` is *reset* across a function boundary rather than merely saved, in both places a body is parsed: `fn` and `async fn`. A loop outside the enclosing function is not one its body can break out of, because leaving it would mean crossing a call frame, and `return` is the statement for that. Getting this wrong fails silently. The parse succeeds, and in v1 the emitter produced a jump to an address in another chunk.
 
 *A rule that applies to `fn` almost certainly applies to `async fn`, and separate functions parse the two.* `parse_fn_with_decorators` rejected nesting while `parse_async_fn_with_decorators` did not, even though both increment `fn_depth` in the body. That was an omission, not a decision.
 
@@ -65,7 +65,7 @@ It cost users two surprises they could not connect to each other. A nested `asyn
 
 *A decorator means two different things depending on what it sits on, and only one of them lives here.* On a `let` or a `prompt`, the parser rewrites it into a call, so `@f let x = v` becomes `let x = f(v)`. Nothing downstream learns the syntax exists, and the feature costs one desugar with no new AST node.
 
-On a `fn` it cannot work that way, because the value being wrapped is a function the emitter has yet to build. That path lives in `emit.rs` and runs at emit time. The two paths must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
+On a `fn` it cannot work that way, because the value being wrapped is a function the compiler has yet to build. In v1 that path lived in the bytecode emitter. In v2 the checker types a decorated `fn` in `compiler/infer/`, and MIR lowering stops with `jade cannot compile decorators yet` until the backend builds it. The two paths must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
 
 ## Building and testing
 

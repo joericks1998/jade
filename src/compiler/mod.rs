@@ -1,14 +1,11 @@
-//! The compiler proper: source AST → typed IR → bytecode.
+//! The compiler proper: source AST → typed IR → static types.
 //!
-//! Ends at a [`crate::bytecode::Chunk`]. What consumes that chunk, the LLVM
-//! backend in `src/codegen/`, is not this module's concern; it lives alongside
-//! it rather than within it.
+//! `type_infer` turns each file's AST into typed IR, and `infer` gives every
+//! value of the merged program one static type. What consumes that answer,
+//! `src/mir/` and `src/backend/`, lives alongside this module rather than
+//! within it.
 
-pub mod emit;
-pub mod escape;
-pub mod gbnf;
 pub mod infer;
-pub mod taskcheck;
 pub mod tir;
 pub mod type_infer;
 

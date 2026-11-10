@@ -249,11 +249,12 @@ impl Parser {
     /// `let x = b(a(v))`.
     ///
     /// This happens in the parser, so nothing downstream learns that a
-    /// declaration can carry a decorator — `type_infer`, `emit`, the VM and the
-    /// AOT backend all see an ordinary call. A `fn` decorator cannot work this
-    /// way, because the value it wraps is a function the emitter has yet to
-    /// build; that path lives in `emit.rs` and is the reason the two look
-    /// different despite meaning the same thing.
+    /// declaration can carry a decorator — `type_infer`, the static checker,
+    /// MIR and the backend all see an ordinary call. A `fn` decorator cannot
+    /// work this way, because the value it wraps is a function the compiler has
+    /// yet to build; the checker types it in `compiler/infer/`, MIR lowering
+    /// does not compile it yet, and that is the reason the two look different
+    /// despite meaning the same thing.
     ///
     /// Source order is innermost-first, matching `fn`: the decorator written
     /// first is applied first. That is the reverse of Python's rule, and
@@ -1667,10 +1668,7 @@ impl Parser {
                 {
                     self.advance(); // `-`
                     self.advance(); // the magnitude
-                    return Ok(Expr::Integer {
-                        value: jade_runtime::value::JadeValue::INT_MIN,
-                        span,
-                    });
+                    return Ok(Expr::Integer { value: i64::MIN, span });
                 }
                 self.advance();
                 let operand = self.parse_unary()?;
@@ -1881,10 +1879,10 @@ impl Parser {
         match token.kind {
             TokenKind::Integer(value) => {
                 self.advance();
-                // The lexer lets `-INT_MIN`'s magnitude through so the negated
-                // form can be written; reaching here means it was not negated,
-                // and on its own it is out of range.
-                if !jade_runtime::value::JadeValue::int_fits(value) {
+                // The lexer lets `i64::MIN`'s magnitude through, as a marker, so
+                // the negated form can be written; reaching here means it was
+                // not negated, and on its own it is out of range.
+                if value == super::lexer::NEGATED_INT_MIN {
                     return Err(JadeError::LiteralOverflow { span: token.span });
                 }
                 Ok(Expr::Integer { value, span: token.span })

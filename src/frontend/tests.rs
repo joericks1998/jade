@@ -1869,17 +1869,22 @@ mod parser {
     /// type.
     #[test]
     fn the_smallest_integer_can_be_written() {
-        let p = parse_src("let x = -4611686018427387904");
+        let p = parse_src("let x = -9223372036854775808");
         assert_eq!(p.stmts.len(), 1);
-
-        // On its own, without the negation, that magnitude is still out of
-        // range.
         assert!(matches!(
-            parse_src_err("let x = 4611686018427387904"),
+            &p.stmts[0],
+            Stmt::Let { value: Expr::Integer { value: i64::MIN, .. }, .. }
+        ));
+        // The largest is written as it is.
+        parse_src("let x = 9223372036854775807");
+
+        // On its own, without the negation, that magnitude is out of range.
+        assert!(matches!(
+            parse_src_err("let x = 9223372036854775808"),
             JadeError::LiteralOverflow { .. }
         ));
-        // And anything past it is refused by the lexer as before.
-        assert!(lexer::tokenize("let x = 4611686018427387905").is_err());
+        // And anything past it is refused by the lexer.
+        assert!(lexer::tokenize("let x = 9223372036854775809").is_err());
     }
 }
 

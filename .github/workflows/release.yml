@@ -75,20 +75,14 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      # The tarball ships the toolchain, not just the binary: `jade build` links
-      # libJadeRuntime.a (C) and libjade_runtime.a (Rust) into every executable
-      # it emits. Shipping only `jade` left installed users with a working
-      # `jade run` and a `jade build` that failed with "cannot find
-      # -lJadeRuntime", because the paths baked in at compile time point into
-      # this runner's target/ directory. Layout is `jade` + `lib/*.a`, which
-      # install.sh unpacks to <prefix>/bin and <prefix>/lib/jade.
-
+      # The tarball holds the one binary. Until Jade 2.0 it also shipped the two
+      # runtime archives every program linked against; a program now links the
+      # C library alone, through the LLD inside `jade`, so there is nothing else
+      # to install.
       - name: Package
         run: |
-          mkdir -p dist/lib
+          mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/jade
-          cp target/${{ matrix.target }}/release/libJadeRuntime.a dist/lib/
-          cp target/${{ matrix.target }}/release/libjade_runtime.a dist/lib/
           tar -czf ${{ matrix.archive }} -C dist .
 
       - name: Upload artifact

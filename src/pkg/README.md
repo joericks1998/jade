@@ -51,7 +51,7 @@ That choice has one consequence worth stating plainly: *there is no version solv
 
 What *has* changed is the part that used to read "and no transitive resolution, because a `.so` carries no manifest of its own". A Jade package now carries one.
 
-`jade build --lib` emits `jade_pkg_deps`, a function whose entire body returns the `[[package]]` tables of the lock it was built against. `declared_dependencies` reads that back. It checks statically first, through `exported_symbols`, so a plain C library is never opened at all.
+A package built by v1's `jade build --lib` carries `jade_pkg_deps`, a function whose entire body returns the `[[package]]` tables of the lock it was built against, and `declared_dependencies` reads that back. Jade 2.0 builds no such packages, since a Jade package is shared as source now, but a v1 one still loads. The reader checks statically first, through `exported_symbols`, so a plain C library is never opened at all.
 
 `jade pkg add` merges what it finds into the consuming project's `jade.toml`. A transitive dependency is a real dependency, and the manifest is what a person reads to know what their project uses.
 
@@ -219,7 +219,7 @@ Two rules follow from where the callback runs:
 
 *The registration outlives the call that made it, and it is not thread-local.* Both used to be the other way round, and both had to change together for a library that *stores* a callback. Such a library invokes the callback from a later call entirely. Under the VM, each native call ran on its own worker thread, so a thread-local slot set during one call would read empty in the next, even if nothing cleared it.
 
-In a compiled binary, `jade_ffi_free` in `runtime_aot/native.c` deliberately never frees a callback's wrapper, so the Jade function stays reachable until the process exits. Until v1.4.8 the VM did the same with `native::CallbackBus`. Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe.
+In a compiled program, the backend caches one wrapper per Jade function and never frees it (`backend/native.rs`), so the Jade function stays reachable until the process exits. Until v1.4.8 the VM did the same with `native::CallbackBus`. Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe.
 
 *There is one slot per symbol, which is not always enough.* Two outstanding registrations on one symbol collide, and the second takes the first's answers.
 

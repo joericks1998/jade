@@ -2,19 +2,6 @@ use jade::cli;
 
 use clap::{Parser, Subcommand};
 
-// The `jade` binary's global allocator. Declared HERE, in the binary — never in
-// `jade-runtime` — so it applies only to the `jade` process and can never be
-// linked into a dlopen'd package (the mistake mimalloc made). Normally the
-// Phase-1 segregated free-list pool; the `alloc-profile` feature swaps in the
-// measuring allocator instead.
-#[cfg(not(feature = "alloc-profile"))]
-#[global_allocator]
-static ALLOC: jade::alloc::pool::PoolAlloc = jade::alloc::pool::PoolAlloc;
-
-#[cfg(feature = "alloc-profile")]
-#[global_allocator]
-static ALLOC: jade::alloc::profile::ProfilingAlloc = jade::alloc::profile::ProfilingAlloc;
-
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -30,6 +17,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per process, so the size of its largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Run a Jade file, project entry point, or named script
     ///
@@ -52,23 +41,18 @@ enum Commands {
 
     /// Compile a Jade file to a native binary
     Build {
-        /// Source file to compile (omit with --lib to build the [package] in jade.toml)
+        /// Source file to compile
         file: Option<String>,
         /// Output binary path (default: input filename without extension)
         #[arg(short, long, value_name = "PATH")]
         output: Option<String>,
-        /// Emit LLVM IR instead of compiling a binary (`ir`; `mir` with --backend=static)
+        /// Print LLVM IR (`ir`) or the typed middle layer (`mir`) instead of
+        /// compiling a binary
         #[arg(long = "emit", value_name = "FORMAT")]
         emit: Option<String>,
-        /// Compile with Jade 2.0's static backend (`static`), which is in progress
-        #[arg(long, value_name = "NAME")]
-        backend: Option<String>,
-        /// Build a shared library other Jade projects can depend on
-        #[arg(long)]
+        /// Removed in Jade 2.0: a Jade package is shared as source
+        #[arg(long, hide = true)]
         lib: bool,
-        /// Export only these functions (repeatable; default: all of them)
-        #[arg(long = "export", value_name = "NAME", requires = "lib")]
-        export: Vec<String>,
     },
 
     /// Create a new Jade project in a new directory
@@ -284,11 +268,6 @@ fn main() {
         })
         .join()
         .expect("the main thread panicked");
-
-    #[cfg(feature = "alloc-profile")]
-    if std::env::var_os("JADE_ALLOC_PROFILE").is_some() {
-        eprint!("{}", jade::alloc::profile::report());
-    }
 }
 
 /// Say where this project's dependencies live, before anything can load one.
@@ -298,10 +277,10 @@ fn main() {
 /// image has to resolve to the same path, which means agreeing on one root. The
 /// CLI is the host here, so the CLI is what says which.
 ///
-/// The channel is the environment because it is the only one there is: every
-/// package carries its own statically linked copy of the runtime, so no global
-/// crosses a `dlopen` boundary, while the environment is held by libc and
-/// shared. `runtime_aot/native.c` has the longer version.
+/// The channel is the environment because it is the only one there is: the
+/// program runs as its own process, and a native package it loads is another
+/// image, while the environment is held by libc and shared by both.
+/// `backend/native.rs` reads it as the first place to look.
 ///
 /// The root is taken from the *source file's* directory rather than the working
 /// directory, matching `cli::run::run_file` — reading it from the CWD is what
@@ -363,15 +342,14 @@ fn run_cli(cli: Cli) {
         }
 
         // ── build ─────────────────────────────────────────────────────────────
-        Commands::Build { file, output, emit, backend, lib, export } => {
-            cli::build::run_build(
-                file.as_deref(),
-                output.as_deref(),
-                emit.as_deref(),
-                backend.as_deref(),
-                lib,
-                &export,
-            );
+        Commands::Build { lib: true, .. } => {
+            eprintln!("error: `jade build --lib` is gone in Jade 2.0; a Jade package is shared");
+            eprintln!("       as source: give its jade.toml a [package] section, and a project");
+            eprintln!("       depends on it with `jade pkg add <name> --path <its directory>`");
+            std::process::exit(1);
+        }
+        Commands::Build { file, output, emit, .. } => {
+            cli::build::run_build(file.as_deref(), output.as_deref(), emit.as_deref());
         }
 
         // ── new ──────────────────────────────────────────────────────────────

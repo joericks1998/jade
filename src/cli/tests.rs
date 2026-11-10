@@ -398,29 +398,18 @@ mod build {
 
     #[test]
     fn explicit_output_wins() {
-        assert_eq!(output_path("src/app.jde", Some("dist/app"), false), PathBuf::from("dist/app"));
-        // …including for a library, extension and all.
-        assert_eq!(output_path("src/app.jde", Some("libapp.so"), true), PathBuf::from("libapp.so"));
+        assert_eq!(output_path("src/app.jde", Some("dist/app")), PathBuf::from("dist/app"));
     }
 
     #[test]
     fn defaults_to_the_source_stem_beside_the_source() {
-        assert_eq!(output_path("src/app.jde", None, false), PathBuf::from("src/app"));
-        assert_eq!(output_path("app.jde", None, false), PathBuf::from("app"));
-    }
-
-    #[test]
-    fn a_library_gets_the_platform_extension() {
-        // `use <name>` resolves a package by stem, so the loader needs a real
-        // shared-library file to open.
-        let out = output_path("src/mathlib.jde", None, true);
-        let expected = if cfg!(target_os = "macos") { "mathlib.dylib" } else { "mathlib.so" };
-        assert_eq!(out, PathBuf::from("src").join(expected));
+        assert_eq!(output_path("src/app.jde", None), PathBuf::from("src/app"));
+        assert_eq!(output_path("app.jde", None), PathBuf::from("app"));
     }
 
     #[test]
     fn a_source_without_an_extension_still_produces_a_path() {
-        assert_eq!(output_path("app", None, false), PathBuf::from("app"));
+        assert_eq!(output_path("app", None), PathBuf::from("app"));
     }
 }
 
@@ -866,7 +855,7 @@ fn check_agrees_with_build_about_calls() {
         let err = crate::aot::would_build(&program, Some(&path))
             .expect_err("the backend refuses this, so check must too");
         assert!(err.contains(want), "{name}: expected {want:?}, got {err:?}");
-        // And it names where, like every interpreter error does.
+        // And it names where, like every compile error does.
         assert!(err.starts_with('['), "{name}: should carry a position: {err}");
     }
 

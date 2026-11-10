@@ -2,27 +2,25 @@
 
 ## What this subtree is
 
-This is a thin layer between the CLI and the LLVM backend. It takes a `TProgram`, decides which artifact to produce, and calls into `src/aot/`.
+This is a thin layer between the CLI and the driver. It takes a `TProgram`, asks `src/aot/` to compile it, and prints the IR or MIR when that is what was asked for.
 
 ## Why it exists separately
 
-It is what is left of a much larger module. This used to be a *client* for a build daemon listening on `$HOME/.jade/build.sock`. Code generation and the C runtime lived in a separate repository then, and keeping LLVM out of the `jade` binary seemed worth a socket. Both halves of that argument are gone, because `src/aot/` now owns the backend and the C runtime. The daemon's only remaining job was forwarding a request to a function this crate already exported.
+It is what is left of a much larger module. This used to be a *client* for a build daemon listening on `$HOME/.jade/build.sock`. Code generation lived in a separate repository then, and keeping LLVM out of the `jade` binary seemed worth a socket. That argument is gone, because `src/aot/` and `src/backend/` now own the driver and the code generation. The daemon's only remaining job was forwarding a request to a function this crate already exported.
 
-What is left is the `Emit` decision and the plumbing around it. It stays a separate module because "what artifact do we want" is a different question from "how do we lower an opcode". Keeping the CLI out of `aot/` internals also means the backend can be restructured without touching command wiring.
+It stays a separate module so the CLI never reaches into `aot/` internals, and the driver can be restructured without touching command wiring.
 
 ## What each file does
 
-- *`mod.rs`* holds the `Emit` enum, whose variants are `Binary`, `Ir`, `CDylib { exports }` and `Static(how)`, its conversion into `aot::CompileMode`, and the function that drives compilation. `Static` sends the build to `aot::compile_static`, Jade 2.0's static backend, and `how` picks a binary, the IR or the MIR.
-- *`tests.rs`* holds tests for the emit-mode plumbing.
+- *`mod.rs`* re-exports `aot::Emit`, whose variants are `Binary`, `Ir` and `Mir`, and holds `build`, which compiles and writes IR or MIR to standard output.
+- *`tests.rs`* holds tests for building a binary, printing IR, and a missing source file.
 
 ## Who uses it
 
-*Depends on:* `compiler/tir` for the `TProgram` and `aot/` for the actual lowering.
+*Depends on:* `compiler/tir` for the `TProgram` and `aot/` for the compile.
 
-*Used by:* `cli/build.rs`, which implements `jade build`.
+*Used by:* `cli/build.rs`, which implements `jade build` and the builds behind `jade run` and `jade test`.
 
 ## Gotchas
 
-Building this module, and therefore the whole toolchain, requires LLVM 18, because `aot/` links it in. Set `LLVM_SYS_180_PREFIX` if you are not on Apple Silicon Homebrew. `.cargo/config.toml` carries that path as a default, and Cargo's `[env]` section does not overwrite a variable you have already set.
-
-`Emit::Ir` prints IR rather than linking, so it uses the same `CompileMode::Binary` entry-point shape a real binary uses. The mode only decides which entry point gets generated.
+Building this module, and therefore the whole toolchain, requires LLVM 18 and LLD, because `backend/` links both in. Set `LLVM_SYS_180_PREFIX` if you are not on Apple Silicon Homebrew. `.cargo/config.toml` carries that path as a default, and Cargo's `[env]` section does not overwrite a variable you have already set.
