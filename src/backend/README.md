@@ -21,6 +21,8 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Support code is generated on demand.* Every helper a program needs is an internal LLVM function named `jade.*`, generated the first time something asks for it through `Cx::support`. A program that never splits a string carries no split. Code that depends on a type is generated once per type the program uses, such as releasing an array of strings (`jade.release.Array(Str)`) or printing a dict of arrays. The optimizer inlines what is small and drops what is unused.
 
+*The linker is inside the compiler.* A program is linked in-process by LLD, the linker LLVM ships, built from the same LLVM 18 install. The only thing a machine needs to link a program is the C library itself: `libSystem` on macOS, whose symbols `link.rs` lists in a stub it writes, and glibc's `libc.so.6` on Linux, which every glibc system has. So `jade build --backend=static` works with no `cc`, no Xcode tools and no development packages; a binary is ad hoc signed by LLD, as Apple Silicon requires.
+
 *The C library is the only dependency.* `Cx::libc` declares the functions used, and a test pins the list: memory, `write` and `read`, `snprintf` and `strtod`, the pthread calls behind the 256 MiB main stack and tasks, the clocks, the math library, `fopen` and the directory calls for `std::fs`, and `posix_spawn` with pipes for `std::sh` and `curl`. A few have a different symbol on some platform, such as `errno`'s accessor or Intel macOS's `stat$INODE64`; `libc_symbol` maps them. A `struct stat` or `struct dirent` field is read at an offset chosen per target in `fs.rs`. A program that calls a native package also uses `dlopen` and its siblings.
 
 *Native packages speak v1's `JadeVal` boundary, with static types on the Jade side.* A package is opened the first time the program calls it, from `JADE_LIBS` or the `libs/` beside the program, and its value ABI must match. Each call marshals its arguments by their static types and reads its result back as the type the checker gave it, raising when the package hands back another kind; text from a package is tainted. A handle is `{ rc, ptr, name }`, and releasing one frees the wrapper, never the pointee. A Jade function goes over as a `JadeFn` whose `invoke` is a trampoline generated for its type; a raise inside it waits in the error slot until the library returns, so it never unwinds through the library's frames. `native.rs` has it all.
@@ -41,7 +43,9 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 ## What each file does
 
-- *`mod.rs`* holds `Cx`, the module being built, with `support`, `libc` and string literals. It also builds the module from a program, emits the C `main`, and runs optimization, object output and the link.
+- *`mod.rs`* holds `Cx`, the module being built, with `support`, `libc` and string literals. It also builds the module from a program, emits the C `main`, and runs optimization and object output.
+- *`link.rs`* links the object into a program with LLD, in-process. On macOS it writes the `libSystem.tbd` stub the linker reads, listing exactly the symbols the object imports, so no Apple SDK is needed. On Linux it links against glibc's runtime `libc.so.6`, and the program's `_start` comes from the backend, so no development package is needed either.
+- *`lld.cpp`* is the C entry point into LLD's Mach-O and ELF drivers, and the only C++ in the compiler.
 - *`fb.rs`* is `F`, a function-building layer over inkwell. Its methods return values directly, and `if_`, `if_else`, `while_` and `for_range` take closures. All the support code is written in it.
 - *`layout.rs`* maps types to LLVM types, holds the object offsets, and reads and makes optionals.
 - *`func.rs`* lowers one MIR function: locals as zeroed stack slots, statements with the ownership rules, terminators, every binary operator with its overflow and zero checks, and every support operation.
@@ -69,7 +73,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Used by:* `aot::compile_static`, reached through `jade build --backend=static`.
 
-*Depends on:* `mir` for its input, `inkwell` for LLVM, and the system `cc` for the link.
+*Depends on:* `mir` for its input, `inkwell` for LLVM, and LLD, LLVM's linker, which `src/runtime_aot/build.rs` compiles into the compiler from the same LLVM 18 install. No system `cc` or linker is involved.
 
 ## Gotchas
 

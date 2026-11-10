@@ -19,11 +19,12 @@ jobs:
       # `jade build` compiles in-process, so LLVM 18 is a hard build dependency
       # of the toolchain. libpolly-18-dev is not optional: llvm-config lists
       # Polly in --libnames, so without it llvm-sys fails with "could not find
-      # native static library `Polly`".
+      # native static library `Polly`". liblld-18-dev carries LLD's static
+      # libraries, which the static backend links programs with in-process.
       - name: Install LLVM 18
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev
 
       # glib is the FFI gate's fixture — see src/scripts/ffi-gate.sh for why a
       # big ordinary library is the point. pkg-config is how the gate finds it,

@@ -10,6 +10,11 @@
 //! The archive lands in `$OUT_DIR`; we surface that directory to the build
 //! driver via the `JADE_RT_LIB_DIR` compile-time env so it can point the linker
 //! at it.
+//!
+//! It also builds the linker into the compiler: `src/backend/lld.cpp`, a C entry
+//! point into LLD, linked against LLD's static libraries from the same LLVM 18
+//! install `llvm-sys` uses. That is what lets the static backend link a program
+//! in-process instead of running the system `cc`. See [`link_lld`].
 
 use std::path::PathBuf;
 
@@ -32,27 +37,8 @@ fn main() {
     let rt = PathBuf::from("src/runtime_aot");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
 
-    // Apple's `ar` rejects `-D` (deterministic mode). `cc` does not know that in
-    // advance: it *probes*, running `ar cqD` and falling back to
-    // `ZERO_AR_DATE=1 ar cq` when that fails. The archive it ends up with is
-    // correct and deterministic either way — but the failed probe's usage text
-    // reaches the build log as a dozen `cargo:warning=` lines on every macOS
-    // build, including the release job, which buries anything worth reading.
-    //
-    // `llvm-ar` takes the flag, so the probe succeeds first time and there is
-    // nothing to print. It is not a new dependency: `jade build` links LLVM 18
-    // in-process, so `LLVM_SYS_180_PREFIX` already has to point at an install
-    // for this crate to compile at all. If it does not resolve, `cc` is left to
-    // probe as before rather than being handed a path that is not there.
-    let mut build = cc::Build::new();
-    if std::env::var_os("AR").is_none()
-        && let Some(prefix) = std::env::var_os("LLVM_SYS_180_PREFIX")
-    {
-        let llvm_ar = PathBuf::from(prefix).join("bin/llvm-ar");
-        if llvm_ar.is_file() {
-            build.archiver(&llvm_ar);
-        }
-    }
+    // Archived with `llvm-ar`; see `new_build`.
+    let mut build = new_build();
 
     build
         .file(rt.join("common.c"))
@@ -109,6 +95,85 @@ fn main() {
         let _ = std::fs::copy(&c_archive, profile_dir.join("libJadeRuntime.a"));
     }
 
+    link_lld();
+
     println!("cargo:rerun-if-changed=src/runtime_aot");
     println!("cargo:rerun-if-changed=src/runtime/src");
+    println!("cargo:rerun-if-changed=src/backend/lld.cpp");
+}
+
+/// Purpose: This function makes a `cc` build that archives with `llvm-ar`.
+///
+/// Apple's `ar` rejects `-D` (deterministic mode). `cc` does not know that in
+/// advance: it *probes*, running `ar cqD` and falling back to
+/// `ZERO_AR_DATE=1 ar cq` when that fails. The archive it ends up with is
+/// correct and deterministic either way, but the failed probe's usage text
+/// reaches the build log as a dozen `cargo:warning=` lines on every macOS
+/// build, which buries anything worth reading. `llvm-ar` takes the flag, and it
+/// is not a new dependency: LLVM 18 has to be installed for this crate to
+/// compile at all. If it does not resolve, `cc` is left to probe as before.
+fn new_build() -> cc::Build {
+    let mut build = cc::Build::new();
+    if std::env::var_os("AR").is_none()
+        && let Some(prefix) = std::env::var_os("LLVM_SYS_180_PREFIX")
+    {
+        let llvm_ar = PathBuf::from(prefix).join("bin/llvm-ar");
+        if llvm_ar.is_file() {
+            build.archiver(&llvm_ar);
+        }
+    }
+    build
+}
+
+/// Purpose: This function compiles the LLD bridge and links LLD's libraries.
+///
+/// The libraries come from the LLVM 18 install `LLVM_SYS_181_PREFIX` or
+/// `LLVM_SYS_180_PREFIX` names, as `llvm-sys` finds LLVM itself. LLD needs the
+/// LLVM libraries too, and `llvm-sys` already links every one of them. The
+/// order matters to a GNU linker: the bridge, then LLD's drivers, then LLD's
+/// common code, all ahead of LLVM, which `llvm-sys` emits after this crate.
+///
+/// On Debian and Ubuntu the static libraries and headers are in
+/// `liblld-18-dev`; Homebrew's `llvm@18` carries them.
+fn link_lld() {
+    let prefix = ["LLVM_SYS_181_PREFIX", "LLVM_SYS_180_PREFIX"]
+        .iter()
+        .find_map(std::env::var_os)
+        .map(PathBuf::from)
+        .expect("set LLVM_SYS_180_PREFIX to an LLVM 18 install; see CLAUDE.md");
+    let config = prefix.join("bin/llvm-config");
+    let ask = |arg: &str| -> String {
+        let out = std::process::Command::new(&config)
+            .arg(arg)
+            .output()
+            .unwrap_or_else(|e| panic!("could not run {}: {e}", config.display()));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let libdir = PathBuf::from(ask("--libdir"));
+    let includedir = PathBuf::from(ask("--includedir"));
+    for lib in ["lldMachO", "lldELF", "lldCommon"] {
+        if !libdir.join(format!("lib{lib}.a")).is_file() {
+            panic!(
+                "LLD's static library lib{lib}.a is not in {}. `jade build` links programs \
+                 with LLD; install it with LLVM 18 (Debian and Ubuntu: liblld-18-dev).",
+                libdir.display()
+            );
+        }
+    }
+
+    let mut build = new_build();
+    build.cpp(true).file("src/backend/lld.cpp").include(&includedir).warnings(false);
+    // LLVM's own flags, so the bridge agrees with how LLVM was built about the
+    // language level, RTTI and the standard library.
+    for flag in ask("--cxxflags").split_whitespace() {
+        if !flag.starts_with("-I") {
+            build.flag(flag);
+        }
+    }
+    build.compile("jadelld");
+
+    println!("cargo:rustc-link-search=native={}", libdir.display());
+    for lib in ["lldMachO", "lldELF", "lldCommon"] {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
 }

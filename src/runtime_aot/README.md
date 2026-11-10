@@ -43,7 +43,7 @@ docker run --rm -v "$PWD:/w" -w /w gcc:13 sh -c \
 
 - *`native.c`* supports native C-ABI packages: the registry, calling `jade_pkg_init`, and value marshalling. Until v1.4.8 it mirrored `load_native_package`, `vm_to_ffi`, and `ffi_to_vm` in `src/native/mod.rs`, the VM's loader, so one `.dylib` served both engines. It is the only loader now. The `dlopen` primitives themselves are backend hooks.
 - *`infer/infer.c`* and *`infer/infer.h`* hold every `jrt_prompt_*` entry point. Each one builds an `InferRequest` and drives the installed provider package through `native.c`, so this file carries no transport of its own. Since v2 nothing installs a provider, because `jade register` was removed, so these entry points have nothing to load until the compiler emits inference itself.
-- *`build.rs`* is the Cargo build script. It compiles every `.c` file here into `libJadeRuntime.a`, exposes the output directory to the linker, and copies the archive up beside the Rust one so both sit in one predictable place. It also enforces the Unix-only rule before `cc` runs.
+- *`build.rs`* is the Cargo build script. It compiles every `.c` file here into `libJadeRuntime.a`, exposes the output directory to the linker, and copies the archive up beside the Rust one so both sit in one predictable place. It also enforces the Unix-only rule before `cc` runs, and it builds the linker into the compiler: it compiles `src/backend/lld.cpp` and links LLD's static libraries from the LLVM 18 install, which the static backend links programs with.
 
 ## Who uses it
 

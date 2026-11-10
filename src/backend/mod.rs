@@ -51,6 +51,7 @@ mod func;
 mod http;
 mod json;
 mod layout;
+mod link;
 mod math;
 mod native;
 mod random;
@@ -427,6 +428,11 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     });
     let main_ty = cx.i32t().fn_type(&[cx.i32t().into(), ptr.into()], false);
     let main = cx.module.add_function("main", main_ty, Some(Linkage::External));
+    // Where the program begins before `main`, on a system whose linker would
+    // otherwise want it from a development package; see `link.rs`.
+    if let Some(start) = link::start_code() {
+        cx.module.set_inline_assembly(start);
+    }
     let f = F::new(cx, main);
     // `env.args()` reads the arguments from where `main` leaves them.
     if cx.module.get_function("jade.env.args").is_some() {
@@ -513,35 +519,8 @@ pub fn compile(prog: &mir::Program, out: &Path, emit: Emit) -> Result<Option<Str
         .map_err(|e| e.to_string())?;
     let obj = out.with_extension("o");
     machine.write_to_file(&module, FileType::Object, &obj).map_err(|e| e.to_string())?;
-    let linked = link(&obj, out);
+    let linked = link::link(&obj, out);
     std::fs::remove_file(&obj).ok();
     linked?;
     Ok(None)
-}
-
-/// Purpose: This function links an object file against the C library alone.
-///
-/// Inputs:
-/// - `obj`: the object file.
-/// - `out`: the binary to write.
-///
-/// Outputs: `Ok(())`, or the linker's own message.
-fn link(obj: &Path, out: &Path) -> Result<(), String> {
-    let mut cc = std::process::Command::new("cc");
-    cc.arg(obj).arg("-o").arg(out);
-    if cfg!(target_os = "macos")
-        && let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output()
-        && let Ok(s) = std::str::from_utf8(&ver.stdout)
-    {
-        let short = s.trim().splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
-        cc.arg(format!("-mmacosx-version-min={short}"));
-    }
-    if cfg!(target_os = "linux") {
-        cc.arg("-lpthread").arg("-lm").arg("-ldl");
-    }
-    let result = cc.output().map_err(|e| format!("linker not found: {e}"))?;
-    if !result.status.success() {
-        return Err(format!("linking failed\n{}", String::from_utf8_lossy(&result.stderr).trim()));
-    }
-    Ok(())
 }
