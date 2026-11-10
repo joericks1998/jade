@@ -35,8 +35,10 @@ pub fn socket_path() -> PathBuf {
 
 /// The advice every failure to reach dovata ends with.
 const START: &str = "a program that dereferences a prompt runs a model the dovata process \
-                     holds; start it with `dovata start` and add a model with `dovata add \
-                     <model>` (https://github.com/jadeinc/dovata)";
+                     holds; install it with `curl -fsSL \
+                     https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh \
+                     | sh`, start it with `dovata start`, and add a model with `dovata add \
+                     <model>`";
 
 /// Purpose: This function sends one request to the dovata process and reads
 /// its answer.

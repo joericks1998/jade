@@ -29,3 +29,28 @@ inkwell = { version = "0.8", features = ["llvm18-1"] }
 [build-dependencies]
 # Compiles src/backend/lld.cpp, the bridge into LLD; see build.rs.
 cc = "1"
+
+# ── Workspace ─────────────────────────────────────────────────────────────────
+# dovata, the process that holds a model's memory, lives under dovata/ as its own
+# crate and its own programs, with its own version and its own releases. This
+# package is the workspace root, so `cargo build` here builds jade alone, and
+# `cargo build -p dovata` builds dovata, which needs no LLVM.
+[workspace]
+members = [
+    ".",
+    "dovata",
+    # `dovata-chat-template`: the optional chat-template package for Jade users. Its
+    # own crate because templates are the programmer's to choose; dovata's plan carries
+    # the tokenizer, and this package uses dovata's vocabulary check. See its README.
+    "dovata/src/chat_template",
+    # `refback`: dovata's test-only reference backend. It sets up a plan's memory for
+    # real and checks every tensor against the model file, so it needs unsafe code and
+    # Apple's Metal framework, neither of which belongs in dovata. Never published.
+    "dovata/src/refback",
+]
+
+# What dovata's crates inherit. jade sets its own edition, 2024, in [package].
+[workspace.package]
+edition = "2021"
+authors = ["JADE OS Contributors"]
+license = "MIT"

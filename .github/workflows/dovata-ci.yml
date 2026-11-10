@@ -1,17 +1,33 @@
 # Author: Joe Ricks
-# File: .github/workflows/ci.yml
-# Description: Builds and tests dovata on Linux and macOS for every pull request and
-# push to main, and tags a release when main's version is new.
+# File: .github/workflows/dovata-ci.yml
+# Description: Builds and tests dovata, under dovata/, on Linux and macOS for every
+# pull request and push to main that touches it, and tags a dovata release when
+# dovata/Cargo.toml's version is new.
 
-name: CI
+name: dovata CI
 
+# Only changes that can change dovata's build: its own tree, the workspace's root
+# manifest and lockfile, and its two workflows. The compiler's ci.yml ignores the
+# same tree, so each crate is built and tagged from its own changes.
 on:
   push:
     branches: [main]
+    paths:
+      - "dovata/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/dovata-*.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "dovata/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/dovata-*.yml"
   workflow_dispatch:
 
+# Every cargo command names dovata's packages with -p, never `--workspace`: the
+# workspace holds the compiler too, which needs LLVM 18 to build.
 jobs:
   build:
     name: Test on ${{ matrix.os }}
@@ -37,10 +53,10 @@ jobs:
         run: brew install llama.cpp
 
       - name: Build
-        run: cargo build --workspace --locked --verbose
+        run: cargo build -p dovata -p dovata-chat-template -p refback --locked --verbose
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test -p dovata -p dovata-chat-template -p refback --locked
 
       # A defaults-on build never takes the other arm of a `#[cfg(feature = ...)]`,
       # so this is where a stale one shows up.
@@ -57,14 +73,14 @@ jobs:
       # must still get an answer, not an error.
       - name: Run dovata on this runner
         run: |
-          cargo run --locked --bin dovata -- --version
-          cargo run --locked --bin dovata -- machine info
-          cargo run --locked --bin dovata -- machine target
+          cargo run --locked -p dovata --bin dovata -- --version
+          cargo run --locked -p dovata --bin dovata -- machine info
+          cargo run --locked -p dovata --bin dovata -- machine target
 
-      # Not `-D warnings`, the same as jadelang: clippy's correctness lints are
+      # Not `-D warnings`, the same as the compiler: clippy's correctness lints are
       # errors by default, which is the class that matters.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy -p dovata -p dovata-chat-template -p refback --all-targets --locked
 
       # There is deliberately no `cargo fmt --check`. dovata puts each parameter on
       # its own line with the brace below, which stable rustfmt cannot produce.
@@ -79,10 +95,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # dovata releases when its own version, dovata/Cargo.toml's, is new. Its tags
+      # are `dovata-v3.2.0`, so they never meet the compiler's `v2.0.1`.
       - name: Create version tag if new
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG="v$VERSION"
+          VERSION=$(grep '^version' dovata/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="dovata-v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "Tag $TAG already exists, so there is nothing to release."
             echo "NEW_TAG=false" >> "$GITHUB_ENV"
@@ -101,8 +119,8 @@ jobs:
         run: |
           gh api "repos/$GITHUB_REPOSITORY/dispatches" \
             --method POST \
-            -f event_type=release \
+            -f event_type=release-dovata \
             -f "client_payload[tag]=$TAG"
-          echo "Dispatched the release workflow for $TAG."
+          echo "Dispatched the dovata release workflow for $TAG."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

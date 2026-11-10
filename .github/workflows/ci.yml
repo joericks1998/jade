@@ -1,10 +1,14 @@
 name: CI/CD
 
+# The compiler's workflow. dovata, under dovata/, has its own in dovata-ci.yml, so a
+# change to dovata alone does not install LLVM and build the compiler.
 on:
   push:
     branches: [main]
+    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml"]
   pull_request:
     branches: [main, "2.0.0"]
+    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml"]
   workflow_dispatch:
 
 jobs:
@@ -60,9 +64,11 @@ jobs:
       # says what the code was already written to, and this keeps it true —
       # which is the only way the command stays safe to run.
       #
-      # Needs no LLVM: rustfmt parses, it does not build.
+      # Needs no LLVM: rustfmt parses, it does not build. `-p jade`, not `--all`:
+      # dovata is in the workspace and is not formatted with rustfmt, for the reason
+      # dovata-ci.yml gives.
       - name: Rust formatting
-        run: cargo fmt --all --check
+        run: cargo fmt -p jade --check
 
       # Exercises the real `jade check` binary against every committed fixture,
       # covering the CLI wiring and on-disk cache that the in-process test in
@@ -131,6 +137,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The compiler releases when its own version, the root Cargo.toml's, is new.
+      # Its tags stay plain `v2.0.1`, the scheme every earlier release used; dovata's
+      # are `dovata-v3.2.0`, pushed by dovata-ci.yml from dovata/Cargo.toml.
       - name: Create version tag if new
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')

@@ -1,5 +1,7 @@
 name: Release
 
+# The compiler's release, from a `v*` tag such as v2.0.1. dovata's tags start with
+# `dovata-v`, which this pattern does not match; dovata-release.yml publishes those.
 on:
   push:
     tags:
@@ -130,6 +132,10 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
+          # The repo's latest release is the compiler's: `jade upgrade` and
+          # install.sh ask GitHub for it and read its tag as jade's version.
+          # dovata's releases are published with make_latest false for that reason.
+          make_latest: true
           files: |
             jade-linux-x86_64.tar.gz
             jade-macos-arm64.tar.gz

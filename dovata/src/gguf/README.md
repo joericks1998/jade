@@ -177,14 +177,14 @@ out. Fixtures are kilobytes; a real model is not something to build this way.
 
 ```sh
 # What is in this file
-cargo run --bin gguf-inspect -- model.gguf
+cargo run -p dovata --bin gguf-inspect -- model.gguf
 
 # Everything, including tokenizer.chat_template printed verbatim
-cargo run --bin gguf-inspect -- model.gguf --all
+cargo run -p dovata --bin gguf-inspect -- model.gguf --all
 
 # Look at a model you have not downloaded
 curl -sL -r 0-41943039 -o head.gguf "<huggingface resolve url>"
-cargo run --bin gguf-inspect -- head.gguf
+cargo run -p dovata --bin gguf-inspect -- head.gguf
 ```
 
 Exit status is 0 when no required key is missing and 1 when one is, so it drops into a

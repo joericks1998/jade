@@ -235,8 +235,8 @@ Each file's tests cover its parser and its text.
 The binary needs the `machine` and `host` features, which are on by default:
 
 ```sh
-cargo run --bin dovata -- machine info
-cargo run --bin dovata -- plan /path/to/model.gguf
+cargo run -p dovata --bin dovata -- machine info
+cargo run -p dovata --bin dovata -- plan /path/to/model.gguf
 ```
 
 ## Who uses it

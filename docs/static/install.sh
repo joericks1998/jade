@@ -107,6 +107,6 @@ fi
 echo ""
 
 # A program that dereferences a prompt runs a model the dovata process holds;
-# see https://github.com/jadeinc/dovata to install it and add a model.
+# dovata/install.sh in this repo installs it.
 echo ""
 echo "Run 'jade --help' to get started."

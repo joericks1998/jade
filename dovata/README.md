@@ -18,6 +18,11 @@ model's math.
 
 The first targets are NVIDIA GPUs on Linux, Apple Silicon on macOS, and CPU only.
 
+dovata lives in the Jade repo, beside the compiler, as its own crate and its own
+programs. It has its own version, in `dovata/Cargo.toml`, and its own releases, tagged
+`dovata-v3.2.0` and so on. It joined the repo at 3.2.0; its history from
+`jadeinc/dovata` came with it.
+
 ## What changed in 3.0
 
 Up to 2.x, dovata was a runtime: a provider library a running Jade program loaded to do
@@ -127,6 +132,10 @@ Outside `src/`:
 
 ## Building and testing
 
+These run from the repo root, where the workspace is. Each names dovata's package,
+because a bare `cargo build` there builds the compiler, which needs LLVM 18. Inside
+`dovata/`, cargo picks dovata by itself.
+
 ```sh
 # The library. Runs anywhere; no model and no GPU. The quantize tests also run
 # llama.cpp's llama-quantize, and skip when it is not installed: brew install llama.cpp
@@ -136,20 +145,20 @@ cargo test -p dovata
 cargo test -p dovata --lib --no-default-features
 
 # Look at a model file
-cargo run --bin gguf-inspect -- /path/to/model.gguf
+cargo run -p dovata --bin gguf-inspect -- /path/to/model.gguf
 
 # This machine's memory and GPUs, and their use
-cargo run --bin dovata -- machine info
-cargo run --bin dovata -- machine watch
+cargo run -p dovata --bin dovata -- machine info
+cargo run -p dovata --bin dovata -- machine watch
 
 # Plan a model for this machine
-cargo run --bin dovata -- plan /path/to/model.gguf
+cargo run -p dovata --bin dovata -- plan /path/to/model.gguf
 
 # Start the dovata process, hold a model in it, look at it, and stop it
-cargo run --bin dovata -- start
-cargo run --bin dovata -- add https://huggingface.co/unsloth/Qwen3-0.6B-GGUF --quant Q4_K_M
-cargo run --bin dovata -- status
-cargo run --bin dovata -- kill
+cargo run -p dovata --bin dovata -- start
+cargo run -p dovata --bin dovata -- add https://huggingface.co/unsloth/Qwen3-0.6B-GGUF --quant Q4_K_M
+cargo run -p dovata --bin dovata -- status
+cargo run -p dovata --bin dovata -- kill
 
 # The process test: starts the real program, adds a model, maps it, and stops it
 cargo test -p dovata --test host-process
@@ -159,31 +168,34 @@ cargo test -p refback
 cargo test -p refback --features metal
 ```
 
-The repo is pure Rust. One dependency, `ring`, which the Hugging Face downloads use for
+dovata is pure Rust. One dependency, `ring`, which the Hugging Face downloads use for
 HTTPS, compiles a little C, so a build needs a C compiler too. Xcode's command line tools
 and every Linux distribution's build tools have one.
 
 ## Installing
 
 The programs `dovata` and `gguf-inspect` are released for Apple Silicon Macs and for
-x86_64 Linux. This installs the latest release into `/usr/local/bin`:
+x86_64 Linux. This installs the newest dovata release into `/usr/local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jadeinc/dovata/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh | sh
 ```
 
 `DOVATA_INSTALL_DIR` picks another directory. The script checks the download against
 the release's `checksums.txt` before installing anything.
 
-The Jade compiler takes the library as a cargo dependency on a release tag:
+Another Rust project can take the library as a cargo dependency on a release tag.
+Cargo finds the `dovata` package inside the repo by its name:
 
 ```toml
-dovata = { git = "https://github.com/jadeinc/dovata", tag = "v3.2.0" }
+dovata = { git = "https://github.com/joericks1998/jade", tag = "dovata-v3.2.0" }
 ```
 
 ## Releasing
 
-A release is a version bump. Change `version` in `Cargo.toml`, run `cargo build` so
-`Cargo.lock` follows, and merge to `main`. When CI passes on `main`, it tags the new
-version and the release workflow publishes the programs. The details are in
-[`.github/workflows/README.md`](.github/workflows/README.md).
+A release is a version bump. Change `version` in `dovata/Cargo.toml`, run
+`cargo build -p dovata` so the repo's `Cargo.lock` follows, and merge to `main`. When
+`dovata-ci.yml` passes on `main`, it tags `dovata-v<version>` and `dovata-release.yml`
+publishes the programs. The compiler's version is separate, so a dovata release does
+not release the compiler, and the other way around. The details are in
+[`.github/workflows/README.md`](../.github/workflows/README.md).

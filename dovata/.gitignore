@@ -1,5 +1,6 @@
-# Rust. Anchored to the root, where every crate in the workspace builds, so that
-# src/target/, the planner's machine description, is not ignored.
+# Rust. The workspace builds into the repo root's target/, which the root .gitignore
+# covers; this catches a build started with dovata/ as its own root. Anchored, so
+# that src/target/, the planner's machine description, is not ignored.
 /target/
 **/*.rs.bk
 

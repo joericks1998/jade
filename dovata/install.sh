@@ -2,16 +2,16 @@
 # Author: Joe Ricks
 # File: install.sh
 # Description: Installs the prebuilt dovata and gguf-inspect programs for this machine
-# from the latest GitHub release.
+# from the newest dovata release in the Jade repo.
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/jadeinc/dovata/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh | sh
 #
 # DOVATA_INSTALL_DIR picks the directory, /usr/local/bin by default. The script uses
 # sudo only when it cannot write there itself.
 
 set -e
 
-REPO="jadeinc/dovata"
+REPO="joericks1998/jade"
 INSTALL_DIR="${DOVATA_INSTALL_DIR:-/usr/local/bin}"
 BINARIES="dovata gguf-inspect"
 
@@ -26,7 +26,7 @@ case "$OS" in
         echo "Unsupported macOS architecture: $ARCH"
         echo "dovata ships an Apple Silicon (arm64) build only; Intel macOS is not supported."
         echo "On an Intel Mac, run the arm64 build under Rosetta 2, or build from source:"
-        echo "  https://github.com/$REPO"
+        echo "  https://github.com/$REPO/tree/main/dovata"
         exit 1
         ;;
     esac
@@ -36,7 +36,7 @@ case "$OS" in
       x86_64|amd64) ARCHIVE="dovata-linux-x86_64.tar.gz" ;;
       *)
         echo "Unsupported Linux architecture: $ARCH"
-        echo "Build from source: https://github.com/$REPO"
+        echo "Build from source: https://github.com/$REPO/tree/main/dovata"
         exit 1
         ;;
     esac
@@ -48,13 +48,16 @@ case "$OS" in
     ;;
 esac
 
-# The latest release's tag, from the GitHub API.
-TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"tag_name"' \
+# The newest dovata release's tag, from the GitHub API. The repo's latest release is
+# the compiler's, so this lists the releases, newest first, and takes the first whose
+# tag starts with dovata-v.
+TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100" \
+  | grep '"tag_name": *"dovata-v' \
+  | head -n 1 \
   | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
 if [ -z "$TAG" ]; then
-  echo "Could not find the latest release. Check https://github.com/$REPO/releases"
+  echo "Could not find a dovata release. Check https://github.com/$REPO/releases"
   exit 1
 fi
 

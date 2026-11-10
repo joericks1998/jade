@@ -111,24 +111,7 @@ libc = { version = "0.2", optional = true }
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice"], optional = true }
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
-[workspace]
-# This package IS the workspace root, the way jadelang's is: `src/` holds the
-# capabilities as plain modules of this crate, and the directories under it that are
-# separate crates are members below, each for a reason stated where it sits.
-members = [
-    # `dovata-chat-template`: the optional chat-template package for Jade users. Its
-    # own crate because templates are the programmer's to choose; dovata's plan carries
-    # the tokenizer, and this package uses dovata's vocabulary check. See its README.
-    "src/chat_template",
-    # `refback`: the test-only reference backend. It sets up a plan's memory for real
-    # and checks every tensor against the model file, so it needs unsafe code and
-    # Apple's Metal framework, neither of which belongs in dovata. Never published.
-    "src/refback",
-]
-resolver = "2"
-
-[workspace.package]
-edition = "2021"
-authors = ["JADE OS Contributors"]
-license = "MIT"
+# dovata is a member of the jadelang repo's workspace, whose root Cargo.toml lists
+# chat_template and refback beside it and holds the [workspace.package] values these
+# crates inherit. It keeps its own version and its own releases, tagged dovata-v*.
 
