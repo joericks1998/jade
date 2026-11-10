@@ -4,9 +4,9 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
-## Unreleased
+## v2.0.1
 
-*Jade 2.0 is in progress, and the first step removes the interpreter.* v2 makes Jade a pure ahead-of-time compiler, with model inference compiled into the program rather than handed to a provider at run time. These changes are on the `2.0.0` and `2.0.1` branches and are not released.
+*Jade 2.0: a pure ahead-of-time compiler, with no interpreter and no runtime library.* Model inference is compiled into the program, over memory the dovata process holds, rather than handed to a provider at run time. There is no v2.0.0 release: its changes and 2.0.1's ship together here, and the bullets marked 2.0.1 are the ones made on that branch.
 
 - *`jade run` builds, then runs.* There is no bytecode VM any more. `jade run app.jde` compiles the file into a scratch directory, runs the binary with the same input and output, and exits with its status. Arguments for the program go after `--`, as in `jade run app.jde -- input.txt`. `jade test` builds and runs each test file the same way.
 - *The REPL is gone*, along with `jade run -v`, which printed the interpreter's globals.
