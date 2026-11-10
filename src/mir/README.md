@@ -60,6 +60,8 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 *Anything a later phase adds stops here.* A prompt, or a C symbol whose signature cannot be derived, returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
 
+*A prompt is its text.* `norm` turns the prompt type into `str`, so a prompt, a prompt literal and a prompt field lower as strings. `?p` itself never reaches MIR: `src/infer/rewrite.rs` turns it into a call into the inference prelude first, and what the prelude asks of the backend is `Op::Infer`, one `InferFn` per request. A dereference into a class or through a grammar is still refused here by name. `Program::infer` carries the model's plan into the backend, filled in by `aot::compile` when a program that runs a model is built.
+
 *A call into a native package is `Op::Native`*, carrying the function and the static types its arguments go as and its result comes back as. The types are the declared ones from `jade.toml` where there are any (`compiler::infer::native`), and otherwise the ones the call has; a result nothing settles is an error naming the declaration to add. `Program.natives` says where each package is found.
 
 *A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s the backend implements in `backend/tasks.rs`.

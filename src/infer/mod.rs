@@ -57,3 +57,6 @@ pub static INFER_PKG: Package = Package {
     ],
     register_types: register_infer_pkg_types,
 };
+
+#[cfg(test)]
+mod tests;

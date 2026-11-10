@@ -121,6 +121,8 @@ pub(super) fn is_builtin_value(name: &str) -> bool {
             | "input"
             | "max_tasks"
             | "set_max_tasks"
+            | "max_tokens"
+            | "set_max_tokens"
             | "cancelled"
     )
 }
@@ -223,13 +225,13 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
                 t => Err(format!("char() cannot convert {t}")),
             }
         }
-        "max_tasks" => arity(0).map(|_| Ty::Int),
+        "max_tasks" | "max_tokens" => arity(0).map(|_| Ty::Int),
         "cancelled" => arity(0).map(|_| Ty::Bool),
-        "set_max_tasks" => {
+        "set_max_tasks" | "set_max_tokens" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Int | Ty::Var(_) => Ok(Ty::Int),
-                t => Err(format!("set_max_tasks() takes an int, got {t}")),
+                t => Err(format!("{name}() takes an int, got {t}")),
             }
         }
         other => Err(format!("'{other}' cannot be called")),

@@ -44,7 +44,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 ## What each file does
 
 - *`mod.rs`* holds `Cx`, the module being built, with `support`, `libc` and string literals. It also builds the module from a program, emits the C `main`, and runs optimization and object output.
-- *`link.rs`* links the object into a program with LLD, in-process. On macOS it writes the `libSystem.tbd` stub the linker reads, listing exactly the symbols the object imports, so no Apple SDK is needed. On Linux it links against glibc's runtime `libc.so.6`, or musl's loader where there is no glibc, and the program's `_start` comes from the backend, so no development package is needed either. One `_start` serves both, since musl's `__libc_start_main` reads only the first three of the arguments glibc's takes.
+- *`link.rs`* links the object into a program with LLD, in-process. On macOS it writes a stub the linker reads for each system library the object imports from, `libSystem` always and for a program that runs a model the Objective-C runtime and Metal, listing exactly the symbols it uses, so no Apple SDK is needed. On Linux it links against glibc's runtime `libc.so.6`, or musl's loader where there is no glibc, and the program's `_start` comes from the backend, so no development package is needed either. One `_start` serves both, since musl's `__libc_start_main` reads only the first three of the arguments glibc's takes.
 - *`lld.cpp`* is the C entry point into LLD's Mach-O and ELF drivers, and the only C++ in the compiler.
 - *`fb.rs`* is `F`, a function-building layer over inkwell. Its methods return values directly, and `if_`, `if_else`, `while_` and `for_range` take closures. All the support code is written in it.
 - *`layout.rs`* maps types to LLVM types, holds the object offsets, and reads and makes optionals.
@@ -66,6 +66,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`random.rs`* has `std::random`: v1's xoshiro256** generator, so a seeded program draws the same numbers.
 - *`json.rs`* has the `Json` value, `json.parse` with serde_json's grammar and messages, and `json.stringify`, generated per type.
 - *`native.rs`* has native packages: loading, marshalling to and from `JadeVal` by static type, handles, callbacks and their trampolines, and freeing what crossed.
+- *`infer.rs`* has inference: the tokenizer's tables and Unicode classes, connecting to dovata and mapping the model's memory with the descriptors it sends, Metal through `objc_msgSend`, one forward step as one command buffer over the op table, and greedy generation. `src/infer/README.md` describes the whole path.
 - *`http.rs`* has `std::http` and `std::uhttp`, both through `curl`, and `uhttp.stream`, which calls the handler through a function pointer once a line.
 - *`tests.rs`* builds small programs, runs them, and checks what they print. One test checks that a program declares only C library functions.
 

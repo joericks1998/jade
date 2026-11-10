@@ -243,6 +243,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let (v, _) = one(argv, span)?;
                 Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::SetMaxTasks, vec![v])), Ty::Int))
             }
+            "max_tokens" => Ok((
+                self.assign_temp(Ty::Int, Rvalue::Op(Op::Infer(InferFn::MaxTokens), Vec::new())),
+                Ty::Int,
+            )),
+            "set_max_tokens" => {
+                let (v, _) = one(argv, span)?;
+                let op = Op::Infer(InferFn::SetMaxTokens);
+                Ok((self.assign_temp(Ty::Int, Rvalue::Op(op, vec![v])), Ty::Int))
+            }
             other => {
                 let _ = et;
                 Err(internal(format!("an unknown builtin '{other}'"), span))
@@ -565,7 +574,7 @@ impl<'a, 'l> Fx<'a, 'l> {
 /// Outputs: the type it returns.
 fn builtin_result(name: &str) -> Ty {
     match name {
-        "len" | "int" | "max_tasks" | "set_max_tasks" => Ty::Int,
+        "len" | "int" | "max_tasks" | "set_max_tasks" | "max_tokens" | "set_max_tokens" => Ty::Int,
         "str" | "input" => Ty::Str,
         "float" => Ty::Float,
         "bool" | "cancelled" => Ty::Bool,

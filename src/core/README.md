@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the primitive conversions such as `int` and `str`, and `Grammar`.
+The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the reply length `max_tokens` and `set_max_tokens`, the primitive conversions such as `int` and `str`, and `Grammar`.
 
 `GLOBAL_NAMES` lists them, and `register_types` declares the type of each to the checker. The two sit side by side so a name cannot be callable without being typed. Nothing here runs: `compiler/infer/builtins.rs` gives each one its static type, `mir/ops.rs` lowers each call, and the code they run is support code emitted by `src/backend/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
 
@@ -17,6 +17,8 @@ The async names are the interesting case, and they are here for the same reason 
 - *`mod.rs`* holds `GLOBAL_NAMES` and `register_types`.
 
 ## The concurrency limit
+
+`max_tokens()` answers how many tokens a prompt's reply runs to, 256 unless `set_max_tokens(n)` changes it, to at least 1. It lives in the program like the task limit, in `src/backend/infer.rs`, and setting it runs no model.
 
 `max_tasks()` answers how many tasks may run at once, and `set_max_tasks(n)` changes it. The number itself lives in the program, in the task queue `src/backend/tasks.rs` emits, because a compiled binary obeys it through its own worker pool.
 

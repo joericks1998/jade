@@ -39,6 +39,9 @@ use crate::mir::{InferFn, Ty};
 /// The Metal kernels, compiled when the program first runs a prompt.
 const KERNELS_SOURCE: &str = include_str!("../infer/kernels.metal");
 
+/// How many tokens a reply runs to unless `set_max_tokens` says otherwise.
+const DEFAULT_MAX_TOKENS: i64 = 256;
+
 /// The most file descriptors a map reply carries, as dovata limits it.
 const MAX_FDS: u32 = 64;
 
@@ -63,11 +66,28 @@ impl<'ctx> Cx<'ctx> {
     ) -> (BasicValueEnum<'ctx>, Ty) {
         let t = match m {
             InferFn::Data | InferFn::Taint | InferFn::Text | InferFn::DovataMap => Ty::Str,
-            InferFn::Config | InferFn::CharClass => Ty::Int,
+            InferFn::Config | InferFn::CharClass | InferFn::MaxTokens | InferFn::SetMaxTokens => {
+                Ty::Int
+            }
             InferFn::Ready => Ty::Bool,
             InferFn::MapRegion | InferFn::Setup => Ty::Nil,
             InferFn::Generate => Ty::Array(Box::new(Ty::Int)),
         };
+        // The reply's length is the one setting a program without a model has.
+        let limit = self.infer_global("jade.infer.max_tokens", self.i64t().into());
+        match m {
+            InferFn::MaxTokens => {
+                let v = f.load_i64(limit);
+                return (f.select_int(f.eq(v, f.i64(0)), f.i64(DEFAULT_MAX_TOKENS), v).into(), t);
+            }
+            InferFn::SetMaxTokens => {
+                let n = args[0].into_int_value();
+                let n = f.select_int(f.slt(n, f.i64(1)), f.i64(1), n);
+                f.store(limit, n);
+                return (n.into(), t);
+            }
+            _ => {}
+        }
         // `aot::compile` reads the plan before any program that runs a model is
         // built, so this is a compiler bug, said as an error rather than a crash.
         if self.infer.is_none() {
@@ -123,6 +143,7 @@ impl<'ctx> Cx<'ctx> {
                 f.call(fun, args);
                 f.i8(0).into()
             }
+            InferFn::MaxTokens | InferFn::SetMaxTokens => unreachable!("answered above"),
             InferFn::Generate => {
                 let (ptr, i64t) = (self.ptrt().into(), self.i64t().into());
                 let fun = self.infer_locked_fn("generate", Some(ptr), &[ptr, i64t], |f, ps| {

@@ -187,18 +187,6 @@ fn by_library(symbols: &[String]) -> Vec<(&'static str, Vec<String>)> {
     out
 }
 
-/// Purpose: This function writes a `libSystem.tbd` exporting the given
-/// symbols, for one architecture.
-///
-/// Inputs:
-/// - `arch`: `arm64` or `x86_64`.
-/// - `symbols`: the symbol names, with Mach-O's leading underscore.
-///
-/// Outputs: the stub, in Apple's text format, version 4.
-fn libsystem_tbd(arch: &str, symbols: &[String]) -> String {
-    stub_tbd(arch, "/usr/lib/libSystem.B.dylib", symbols)
-}
-
 /// Purpose: This function writes a stub for one system library exporting the
 /// given symbols, for one architecture.
 ///
@@ -435,7 +423,8 @@ mod tests {
 
     #[test]
     fn the_libsystem_stub_lists_what_the_object_imports() {
-        let tbd = libsystem_tbd("arm64", &["_malloc".into(), "___error".into()]);
+        let tbd =
+            stub_tbd("arm64", "/usr/lib/libSystem.B.dylib", &["_malloc".into(), "___error".into()]);
         assert!(tbd.starts_with("--- !tapi-tbd\n"));
         assert!(tbd.contains("install-name:    '/usr/lib/libSystem.B.dylib'"));
         assert!(tbd.contains("[ arm64-macos ]"));
@@ -477,6 +466,22 @@ mod tests {
         assert_eq!(c.libs.last().unwrap(), "-l:libc.musl-aarch64.so.1");
         let _ = std::fs::remove_dir_all(&root);
         assert!(c_library_in(&root, "aarch64").is_err());
+    }
+
+    #[test]
+    fn imports_are_sorted_by_the_library_that_exports_them() {
+        let syms: Vec<String> =
+            ["_malloc", "_objc_msgSend", "_sel_registerName", "_MTLCreateSystemDefaultDevice"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let libs = by_library(&syms);
+        assert_eq!(libs[0].1, vec!["_malloc".to_string()]);
+        assert!(libs[1].0.ends_with("libobjc.A.dylib"));
+        assert_eq!(libs[1].1.len(), 2);
+        assert!(libs[2].0.ends_with("Metal"));
+        // Only libSystem's stub lists the stub binder.
+        assert!(!stub_tbd("arm64", libs[2].0, &libs[2].1).contains("dyld_stub_binder"));
     }
 
     #[test]

@@ -51,6 +51,8 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 *Native calls are typed from `jade.toml`.* `native.rs` reads a `[lib.<name>.symbols.<fn>]` declaration, written in Jade types such as `handle<Thing>` or `fn(int, str) -> int`, and the import resolver derives one from each C dependency's symbol table. `check_program_with` takes them by `__native$<pkg>$<fn>`. A declared call checks its arguments and gives its result; an undeclared one takes its arguments as they are and its result from how it is used. A result its use never settles would default to `nil` like any open slot, so it is recorded first in `Typed.unsettled_natives`, and MIR lowering refuses it by name. A declared callback type gets a return slot of its own at the call, which is how the store recognizes it from pass to pass.
 
+*An `==` between a char and a string waits for its unknown side.* A char compares equal to the one-character string spelling it, so when one side of `==` or `!=` is a string or char and the other is not known yet, the checker does not make them one type on that pass: the unknown side may come from a call checked later, such as `let c = first(s)` where `first` returns a char, and forcing it to `str` first made the program fail. If the passes settle with such a side still unknown, `deferred_eq` turns on `force_eq` for one more pass, which joins the two sides as before.
+
 *A function only C calls is still checked.* A named function passed where a function type is declared is checked at that type when its function type settles, and each pass keeps draining its worklist until settling adds nothing new. Otherwise the final pass would leave such a function out of the answer.
 
 ## Building and testing

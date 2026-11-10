@@ -222,6 +222,8 @@ This breaks the Jade-level FFI entry point `jade-graphics` uses today, and needs
 
 Prompts keep their current types: `?p` is a `str`, `?p |> T` decodes into a primitive or a struct, and streaming gives a stream of strings. Inference itself is the next milestone; this one only gives the prompt types static layouts. The struct coercion behind `?p |> City` becomes generated per struct type, and decision 5's typed JSON decoding shares it.
 
+*Inference on Metal is done* (2026-11-09), unoptimized on purpose; `src/infer/README.md` describes it. A prompt lowers as its text, and `?p` and `?p |> int`, `float`, `bool`, `char` and `str` become calls into a Jade prelude that tokenizes and decodes; `?p |> City` and grammars are not compiled yet. Replies run to `max_tokens()`, 256 unless `set_max_tokens(n)` says otherwise.
+
 ## How the compiler changes
 
 ```

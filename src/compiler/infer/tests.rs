@@ -506,3 +506,14 @@ fn a_destructor_chain_is_recorded_for_each_class_and_never_called() {
         "takes no arguments",
     );
 }
+
+#[test]
+fn a_comparison_with_a_string_waits_for_the_call_that_settles_its_side() {
+    // `first` is checked after the top level reads `c == "a"`, and returns a
+    // char, which compares with a string.
+    ok(
+        "fn first(text) {\n    for c in text {\n        return c\n    }\n    raise \"empty\"\n}\nlet c = first(\"x\")\nprint(c == \"a\")\n",
+    );
+    // A side nothing else settles still becomes the other side's type.
+    ok("let xs = []\nprint(len(xs) == 0)\nfn g(v) {\n    return v == \"q\"\n}\nprint(g(\"q\"))\n");
+}

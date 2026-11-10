@@ -14,7 +14,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
 ## What each file does
 
-- *`golden.sh`* builds every example, runs the binary, and compares its output and exit status to the `<name>.expected` and optional `<name>.expected-exit` beside it. An example with no `.expected` file fails rather than passes. It takes an optional path to a `jade` binary, and keeps a skip list: the network examples, the `*_error.jde` fixtures that `jade check` covers, and the examples that dereference a prompt, which wait on v2's inference. Read the header before assuming an example is covered.
+- *`golden.sh`* builds every example, runs the binary, and compares its output and exit status to the `<name>.expected` and optional `<name>.expected-exit` beside it. An example with no `.expected` file fails rather than passes. It takes an optional path to a `jade` binary, and keeps a skip list: the network examples, the `*_error.jde` fixtures that `jade check` covers, and the examples that dereference a prompt, whose recorded output came from v1's mock provider; a prompt now runs a real model, which `src/infer/tests.rs` checks against llama.cpp. Read the header before assuming an example is covered.
 
   It also runs the native handle round-trip, against `handle-fixture.expected`, and the C struct round-trip, against `struct-fixture.expected`.
 

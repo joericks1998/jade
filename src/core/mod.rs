@@ -15,6 +15,8 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "cancelled",
     "max_tasks",
     "set_max_tasks",
+    "max_tokens",
+    "set_max_tokens",
     "wait",
     "route",
     "int",
@@ -58,6 +60,14 @@ pub fn register_types(ctx: &mut TypeContext) {
     );
     ctx.define(
         "set_max_tasks".to_string(),
+        JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Int) },
+    );
+    ctx.define(
+        "max_tokens".to_string(),
+        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) },
+    );
+    ctx.define(
+        "set_max_tokens".to_string(),
         JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Int) },
     );
     ctx.define(

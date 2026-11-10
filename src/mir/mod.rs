@@ -98,11 +98,13 @@ impl Program {
         self.funcs.iter().any(|f| {
             f.blocks.iter().any(|b| {
                 b.stmts.iter().any(|s| {
-                    matches!(
-                        s,
-                        Stmt::Assign(_, Rvalue::Op(Op::Infer(_), _))
-                            | Stmt::Eval(Rvalue::Op(Op::Infer(_), _))
-                    )
+                    let op = match s {
+                        Stmt::Assign(_, Rvalue::Op(Op::Infer(m), _))
+                        | Stmt::Eval(Rvalue::Op(Op::Infer(m), _)) => Some(*m),
+                        _ => None,
+                    };
+                    // Setting the reply's length runs nothing.
+                    op.is_some_and(|m| !matches!(m, InferFn::MaxTokens | InferFn::SetMaxTokens))
                 })
             })
         })
@@ -644,6 +646,10 @@ pub enum InferFn {
     /// `(ids: [int], max: int) -> [int]`: run the model on a prompt's tokens and
     /// return the ones it generates, greedily, up to a stop token or `max`.
     Generate,
+    /// `() -> int`: the most tokens a reply runs to, `max_tokens()`.
+    MaxTokens,
+    /// `(n: int) -> int`: set it, at least 1, and return what it is now.
+    SetMaxTokens,
 }
 
 /// Purpose: This enum lists the `std::env` functions.

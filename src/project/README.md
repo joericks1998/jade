@@ -18,6 +18,8 @@ The package manager reuses that mechanism rather than adding a second one beside
 
 A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resolves to, and `exports`, the entry module's names other projects may use. A source package's `[lib]` entry, which `pkg/` builds from its lock entry, carries both. A file inside a source package resolves its imports against the package's own `jade.toml` first, so the package's `[lib]` entries work wherever it is installed.
 
+`[model]` names the model a program that dereferences a prompt runs, by its name in the dovata process: `[model] name = "qwen3-0.6b"`. Without it, a program runs the one model dovata holds.
+
 `[package]` covers the other direction: a project that *is* a package, rather than one that uses packages. It names the entry module, the file list, and the exported functions, so `jade build --lib` reads a package's shape from the manifest rather than from flags. `[dependencies]` and `[package]` can both appear, because a package can depend on another package.
 
 ## What each file does

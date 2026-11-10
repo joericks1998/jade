@@ -31,9 +31,10 @@ skip_reason() {
     # Fixtures that document rejected programs. `jade check` in CI asserts they fail.
     *_error.jde)
       echo "intentional-error fixture" ;;
-    # Dereference a prompt, or build a grammar for one. v2 dropped the provider
-    # packages these ran against, and inference returns when the compiler emits
-    # it over dovata's memory.
+    # Dereference a prompt, or build a grammar for one. Their recorded output
+    # came from v1's mock provider, and a prompt now runs a real model the
+    # dovata process holds, so what they print is the model's; src/infer/tests.rs
+    # checks inference against llama.cpp instead.
     examples/classes/prompt_fields/*|examples/llvm/grammar_new/*|\
     examples/decorators/prompt_tags/*|examples/llm/async_prompts/*|\
     examples/llm/basic_prompt/*|examples/llm/fstring_interp/*|\

@@ -430,7 +430,7 @@ fn ensure_model() {
 // reply, tainted, since the program did not write it.
 fn reply(text) {
     ensure_model()
-    let ids = __infer.generate(encode(text), 256)
+    let ids = __infer.generate(encode(text), max_tokens())
     return __infer.taint(decode(ids))
 }
 
