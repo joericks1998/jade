@@ -1,0 +1,134 @@
+[package]
+name = "dovata"
+version = "3.2.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "JADE OS model memory and inference layout planner, used by the Jade compiler at build time, and the process that holds a model in memory"
+
+[lib]
+name = "dovata"
+path = "src/lib.rs"
+# A plain Rust library. The Jade compiler is Rust and takes dovata as a cargo
+# dependency, so there is no C ABI and no shared object to ship. 2.x was a cdylib
+# loaded into running programs; 3.0 runs at build time and never executes a model.
+crate-type = ["rlib"]
+
+# `gguf-inspect` vets a model file — architecture, hparams, quant, split parts —
+# without llama.cpp, so it runs on a laptop before a GPU box ever sees the model. It is
+# a bin of this package rather than its own crate because the reader it wraps is
+# `src/gguf/`, a plain module of this library, and a crate boundary between them would
+# buy nothing but a second manifest.
+[[bin]]
+name = "gguf-inspect"
+path = "src/gguf/main.rs"
+
+# `dovata`, the command line: `dovata start`, `status` and `kill` run a model's process,
+# `dovata plan` plans a model, and `dovata machine` reports the current machine.
+# `doc = false` because the library has the same name.
+[[bin]]
+name = "dovata"
+path = "src/cli/main.rs"
+required-features = ["machine", "host"]
+doc = false
+
+# Starts the real `dovata` program on a tiny model, maps its memory from this process,
+# and stops it. An integration test, so cargo builds the program first and names it in
+# CARGO_BIN_EXE_dovata. It sits with the code it tests rather than in a `tests/`
+# directory, the way every other file of this crate sits under `src/`.
+[[test]]
+name = "host-process"
+path = "src/host/process_test.rs"
+required-features = ["machine", "host"]
+
+# ── Capabilities ──────────────────────────────────────────────────────────────
+[features]
+# Every capability is on by default, so a plain `cargo build` is the whole library.
+# The features exist to make each capability's boundary explicit and checkable: if a
+# capability can't be switched off, its edges aren't real.
+default = ["moe", "quantize", "hf-hub", "machine", "host", "tokenize"]
+
+# MoE expert ranking: the `expert_order` loader that says which experts are hot. The
+# planner will use it to decide which experts stay resident in VRAM.
+moe = []
+
+# Quantizing a GGUF by running llama.cpp's `llama-quantize` program, which must be
+# installed on the machine and on PATH. Nothing of llama.cpp is compiled or linked.
+# Off, `quantize::quantize` returns an error naming this feature.
+quantize = []
+
+# Fetching a GGUF from the Hugging Face Hub into the shared hf-hub cache. Off, a Hub
+# source is refused with an error naming this feature; local paths still work.
+hf-hub = ["dep:hf-hub"]
+
+# Reading the current machine's memory and GPUs, for the `dovata machine` commands. It
+# runs the system's own tools, and on macOS reads Metal's limits through objc2-metal.
+# Off, `machine::current` and `machine::usage` return an error naming this feature.
+machine = ["dep:objc2-metal"]
+
+# Running a model's tokenizer: `tokenize::Tokenizer` encodes and decodes with the
+# `tokenizer.json` a plan carries, and `tokenize::describe` checks one against a GGUF's
+# vocabulary when a plan is made. Off, both return an error naming this feature; the
+# plan's tokenizer section is still a type every build has.
+tokenize = ["dep:tokenizers"]
+
+# Running a model's process: `host::serve` holds a model's memory and answers requests on
+# a Unix socket, and `host::start`, `attach` and `Hosted` start, map and stop it from
+# another program. It maps memory and passes file descriptors between processes, which
+# takes libc. It reads this machine to plan for it, and checks each model's tokenizer
+# for its plan, so it turns on `machine` and `tokenize`. Unix only.
+# Off, every call returns an error naming this feature.
+host = ["machine", "tokenize", "dep:libc"]
+
+[dependencies]
+serde_json = { version = "1", features = ["std"] }
+# Layout files are TOML, and the plan serializes to JSON for the compiler.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# The plan records a SHA-256 of each GGUF part's header, so the program can refuse a
+# file other than the one its offsets were computed for. Pure Rust.
+sha2 = "0.10"
+
+# 0.4 rather than 1.x: the 0.4 line has a blocking client over `ureq`, so the Jade
+# compiler's build does not pull in tokio. 1.x is async-first and its blocking
+# feature wraps a tokio runtime.
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"], optional = true }
+
+# Hugging Face's tokenizer, which runs a tokenizer.json. Its default features compile C
+# and C++: the Oniguruma regex library and a suffix array used only for training. With
+# them off, `fancy-regex` is its pure-Rust regex backend. The same pin and features as
+# dovata-chat-template, so a build with both has one copy.
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
+
+# mmap, shared memory, mincore, and passing file descriptors over a Unix socket, for
+# the `host` capability. Already in the build through other crates.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+# Metal's GPU memory limits, `recommendedMaxWorkingSetSize` and `maxBufferLength`, which
+# no command-line tool reports. Rust bindings to Apple's Metal framework; macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice"], optional = true }
+
+# ── Workspace ─────────────────────────────────────────────────────────────────
+[workspace]
+# This package IS the workspace root, the way jadelang's is: `src/` holds the
+# capabilities as plain modules of this crate, and the directories under it that are
+# separate crates are members below, each for a reason stated where it sits.
+members = [
+    # `dovata-chat-template`: the optional chat-template package for Jade users. Its
+    # own crate because templates are the programmer's to choose; dovata's plan carries
+    # the tokenizer, and this package uses dovata's vocabulary check. See its README.
+    "src/chat_template",
+    # `refback`: the test-only reference backend. It sets up a plan's memory for real
+    # and checks every tensor against the model file, so it needs unsafe code and
+    # Apple's Metal framework, neither of which belongs in dovata. Never published.
+    "src/refback",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["JADE OS Contributors"]
+license = "MIT"
+

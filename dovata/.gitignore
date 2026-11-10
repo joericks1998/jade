@@ -1,0 +1,44 @@
+# Rust. Anchored to the root, where every crate in the workspace builds, so that
+# src/target/, the planner's machine description, is not ignored.
+/target/
+**/*.rs.bk
+
+# C / CUDA build artifacts. Nothing in the 3.0 tree is C++ or CUDA of our own; these
+# stay so a stray CMake build of llama.cpp or a checkout of `main` stays clean.
+*.o
+build/
+
+# Packaging output from 2.x. The packaging xtask is gone in 3.0; this keeps an old
+# dist/ from showing up as untracked.
+dist/
+
+# Local model files.
+# Hardware path: /jade/inference/model.gguf (not in repo)
+# Dev path:      models/model.gguf
+*.gguf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+CLAUDE.md
+
+# Credentials and machine-local state
+jade.toml
+.env
+# No trailing slash: on a dev box this is a symlink to a venv shared with the
+# sibling jade-os repo, and `.venv/` matches only a real directory.
+.venv
+
+# Python bytecode cache, from src/chat_template/jinja2_cases.py
+__pycache__/
+*.pyc
+
+# Jade/native build artifacts (provider .so live in dist/ or the release bundle)
+*.so
+*.dylib
