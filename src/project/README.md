@@ -16,13 +16,15 @@ The `files` list carries file extensions on purpose. An extension does two jobs:
 
 The package manager reuses that mechanism rather than adding a second one beside it. Resolved dependencies come back from `pkg/` as synthetic `LibraryEntry` values, which are merged into the `[lib]` map. So nothing downstream ever learns what a dependency is.
 
+A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resolves to, and `exports`, the entry module's names other projects may use. A source package's `[lib]` entry, which `pkg/` builds from its lock entry, carries both. A file inside a source package resolves its imports against the package's own `jade.toml` first, so the package's `[lib]` entries work wherever it is installed.
+
 `[package]` covers the other direction: a project that *is* a package, rather than one that uses packages. It names the entry module, the file list, and the exported functions, so `jade build --lib` reads a package's shape from the manifest rather than from flags. `[dependencies]` and `[package]` can both appear, because a package can depend on another package.
 
 ## What each file does
 
 - *`mod.rs`* holds the manifest types, which are `ProjectManifest`, `ProjectSection`, `PackageSection`, `LibraryEntry`, `DependencyEntry`, `Abi`, and `CSymbol`. It also holds the resolution API:
   - `PackageSection::validate` checks a `[package]` before a build reads it. The name has to be a valid identifier, because it becomes both a filename and the name `use` binds. An empty `sources` or `exports` is rejected, rather than silently meaning the opposite of the default.
-  - `find_project_root` and `find_project_root_from` walk up the directory tree looking for `jade.toml`.
+  - `find_project_root` and `find_project_root_from` walk up the directory tree looking for a `jade.toml` with a `[project]` or a `[package]` section. A package counts so that its author can install its dependencies and build it in place, and so that its files resolve imports against it.
   - `load_project` parses the manifest.
   - `resolve_library_import` resolves a `use <lib>.<module>` path against the `[lib]` map.
   - `resolve_relative_import` resolves a sibling-file import.

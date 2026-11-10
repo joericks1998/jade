@@ -32,6 +32,17 @@ The placeholder is a legal manifest state on purpose, so `list` and `remove` kee
 
 That same export table gives the one number that says whether a binding is usable: *coverage*. "181 bound" reads as success whether the library has 190 entry points or 900, so the report says how many of the library's exports were covered.
 
+A third kind of dependency is *Jade source*: a directory, git repository or `.tar.gz` archive holding a project with a `[package]` section. Design decision 11 in `design/v2-static-values.md` makes this the way Jade packages are shared, because a prebuilt library cannot hold a generic function: the checker copies a function per set of argument types, and a library cannot know a caller's types. A source package's files join the program's import graph instead, and are checked and compiled with it.
+
+```toml
+[dependencies]
+geometry = { path = "../geometry", abi = "source" }
+shapes   = { git = "https://github.com/me/shapes", tag = "v1.2.0", abi = "source" }
+vectors  = { url = "https://example.com/vectors-1.0.tar.gz", version = "1.0", abi = "source" }
+```
+
+`jade pkg add` picks the kind on its own: a `--path` that is a directory, a `--git` repository, or a `--url` ending in `.tar.gz` is source. A path package is read where it is. A git or archive package is unpacked into `libs/<name>-<version>/`. The lock pins a hash of the package's `jade.toml` and every `.jde` file rather than the bytes it came in, so the same check covers all three, and a README edit does not move a pin. A git dependency's lock source also records the commit, as `git+<url>#<commit>`.
+
 ## Why it was built this way
 
 A dependency is a *prebuilt native shared library*, sourced from a local path or a URL. There is deliberately no package registry. As in Go, a dependency names where it lives rather than an entry in a central index.
@@ -63,6 +74,7 @@ The whole surface between this module and the rest of the compiler is one functi
 ## What each file does
 
 - *`mod.rs`* handles resolution and materialization. `dependency_libraries` is the one public seam into the rest of the compiler. It also holds the local-source group described above, meaning `refresh_local`, `verify_local_unchanged`, and `local_drift`. It defines `LIBS_DIR`, which is `libs/` and is gitignored because `jade.lock` is what travels. It also defines `ANY_PLATFORM`, the artifact key for a URL with no `{platform}` placeholder.
+- *`source.rs`* handles source packages: reading a package's `[package]`, the tree hash the lock pins, checking out a git commit, unpacking an archive, installing into `libs/`, the `[lib]` entry a package becomes, and the dependencies a package declares, rewritten for the project adding it. It runs the `git` and `tar` programs, which only `jade pkg` needs.
 - *`lock.rs`* defines the `jade.lock` format: `LockedPackage`, `LockedArtifact`, and one digest per platform. The lock is meant to be committed.
 - *`fetch.rs`* handles fetching artifacts and checking their integrity, behind a `Fetcher` trait. Everything in this module takes a `&dyn Fetcher` rather than reaching the network directly, so the whole package manager can be tested offline against a map of canned responses.
 - *`manifest.rs`* makes format-preserving edits to `jade.toml` through `toml_edit`. `jade pkg add` and `jade pkg remove` rewrite a file a person wrote by hand. Parsing and re-serializing it instead would silently discard every comment and all the original layout.

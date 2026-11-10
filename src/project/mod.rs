@@ -175,11 +175,19 @@ impl PackageSection {
 /// `.dylib` / `.so` / `.dll` is a native shared library (loaded over the
 /// `jade_pkg_init` C ABI). Omit `files` to make every recognized file in `path`
 /// importable.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct LibraryEntry {
     pub path: String,
     #[serde(default)]
     pub files: Option<Vec<String>>,
+    /// The module a bare `use <name>` names, relative to `path`. A source
+    /// package's entry module, which need not share the package's name.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// The entry module's names other projects may use, from a source
+    /// package's `[package] exports`. `None` shows every top-level name.
+    #[serde(default)]
+    pub exports: Option<Vec<String>>,
     /// What a native library's functions take and return, for the static
     /// checker: `[lib.<name>.symbols.<fn>]` with `args` and `ret` written in
     /// Jade types. A Jade-ABI library carries no types of its own, so this is
@@ -213,6 +221,22 @@ pub enum ImportKind {
 pub struct ResolvedLib {
     pub path: PathBuf,
     pub kind: ImportKind,
+    /// The names an importer may use, when the file is a source package's
+    /// entry module and the package lists its exports.
+    pub exports: Option<Vec<String>>,
+}
+
+impl ResolvedLib {
+    /// Purpose: This function makes a resolved import that shows every name.
+    ///
+    /// Inputs:
+    /// - `path`: the file.
+    /// - `kind`: how it loads.
+    ///
+    /// Outputs: the resolved import.
+    fn open(path: PathBuf, kind: ImportKind) -> Self {
+        ResolvedLib { path, kind, exports: None }
+    }
 }
 
 /// Map a recognized library file extension to its import kind.
@@ -257,6 +281,22 @@ pub fn resolve_library_import(
 ) -> Result<Option<ResolvedLib>, String> {
     let (lib_name, rest) = match import_path.split_once('/') {
         Some(pair) => pair,
+        // A source package names its entry module, and a bare `use geometry`
+        // means that module whatever it is called.
+        None if libs.get(import_path).is_some_and(|e| e.entry.is_some()) => {
+            let entry = &libs[import_path];
+            let base = if Path::new(&entry.path).is_absolute() {
+                PathBuf::from(&entry.path)
+            } else {
+                root.join(&entry.path)
+            };
+            let file = entry.entry.as_deref().unwrap_or_default();
+            return Ok(Some(ResolvedLib {
+                path: base.join(file),
+                kind: ImportKind::Jade,
+                exports: entry.exports.clone(),
+            }));
+        }
         // A bare path — `use fastmath`. A dependency is a single artifact with
         // no second segment to name, so a lone name that matches a registered
         // library resolves to the module of the same name: `fastmath` →
@@ -288,7 +328,7 @@ pub fn resolve_library_import(
                          extension (expected .jde, .dylib, .so, or .dll)"
                     )
                 })?;
-                return Ok(Some(ResolvedLib { path: base.join(f), kind }));
+                return Ok(Some(ResolvedLib::open(base.join(f), kind)));
             }
         }
         return Err(format!(
@@ -301,17 +341,17 @@ pub fn resolve_library_import(
     // No allowlist: prefer a Jade source module, then probe for a native library.
     let jde = base.join(format!("{module}.jde"));
     if jde.exists() {
-        return Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }));
+        return Ok(Some(ResolvedLib::open(jde, ImportKind::Jade)));
     }
     for suffix in [".dylib", ".so", ".dll"] {
         let cand = base.join(format!("{module}{suffix}"));
         if cand.exists() {
-            return Ok(Some(ResolvedLib { path: cand, kind: ImportKind::Native }));
+            return Ok(Some(ResolvedLib::open(cand, ImportKind::Native)));
         }
     }
     // Nothing on disk — return the `.jde` candidate so the caller surfaces a
     // normal not-found error.
-    Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }))
+    Ok(Some(ResolvedLib::open(jde, ImportKind::Jade)))
 }
 
 /// Resolve a bare/`::` import that is **not** a registered library to a file
@@ -329,15 +369,15 @@ pub fn resolve_library_import(
 pub fn resolve_relative_import(dir: &Path, import_path: &str) -> ResolvedLib {
     let jde = dir.join(format!("{import_path}.jde"));
     if jde.exists() {
-        return ResolvedLib { path: jde, kind: ImportKind::Jade };
+        return ResolvedLib::open(jde, ImportKind::Jade);
     }
     for suffix in ["dylib", "so", "dll"] {
         let cand = dir.join(format!("{import_path}.{suffix}"));
         if cand.exists() {
-            return ResolvedLib { path: cand, kind: ImportKind::Native };
+            return ResolvedLib::open(cand, ImportKind::Native);
         }
     }
-    ResolvedLib { path: jde, kind: ImportKind::Jade }
+    ResolvedLib::open(jde, ImportKind::Jade)
 }
 
 // ── Dependencies ──────────────────────────────────────────────────────────────
@@ -353,6 +393,10 @@ pub enum Abi {
     /// A plain C library with no knowledge of Jade. Requires a `[symbols]`
     /// table; a generated shim supplies `jade_pkg_init` at install time.
     C,
+    /// Jade source: a directory, git repository or `.tar.gz` archive holding a
+    /// project with a `[package]` section. Its files are compiled into each
+    /// program that uses it, the way design decision 11 settles.
+    Source,
 }
 
 impl Abi {
@@ -362,6 +406,7 @@ impl Abi {
         match self {
             Abi::Jade => "jade",
             Abi::C => "c",
+            Abi::Source => "source",
         }
     }
 }
@@ -580,6 +625,12 @@ pub struct DependencyEntry {
     pub path: Option<String>,
     /// Download URL, optionally containing `{platform}`.
     pub url: Option<String>,
+    /// A git repository holding a source package. One of `rev`, `tag` or
+    /// `branch` names the commit, and `jade.lock` pins the commit it was.
+    pub git: Option<String>,
+    pub rev: Option<String>,
+    pub tag: Option<String>,
+    pub branch: Option<String>,
     #[serde(default)]
     pub abi: Abi,
     /// Required for `abi = "c"`: the symbols to bind, and their prototypes.
@@ -707,20 +758,42 @@ impl DependencyEntry {
     /// Check the entry is well-formed, naming `name` in every error so the
     /// message is actionable without the user hunting for which table is wrong.
     pub fn validate(&self, name: &str) -> Result<(), String> {
-        match (&self.path, &self.url) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "dependency '{name}' sets both 'path' and 'url' in jade.toml \
-                     (a dependency has exactly one source)"
-                ));
-            }
-            (None, None) => {
+        let sources = [self.path.is_some(), self.url.is_some(), self.git.is_some()];
+        match sources.iter().filter(|s| **s).count() {
+            0 => {
                 return Err(format!(
                     "dependency '{name}' has no source in jade.toml \
-                     (set either 'path' or 'url')"
+                     (set one of 'path', 'url' or 'git')"
                 ));
             }
-            _ => {}
+            1 => {}
+            _ => {
+                return Err(format!(
+                    "dependency '{name}' sets more than one of 'path', 'url' and 'git' in \
+                     jade.toml (a dependency has exactly one source)"
+                ));
+            }
+        }
+
+        let refs = [&self.rev, &self.tag, &self.branch];
+        let named = refs.iter().filter(|r| r.is_some()).count();
+        if self.git.is_some() {
+            if named != 1 {
+                return Err(format!(
+                    "dependency '{name}' needs exactly one of 'rev', 'tag' or 'branch' beside \
+                     its 'git' in jade.toml, to say which commit to build"
+                ));
+            }
+            if self.abi != Abi::Source {
+                return Err(format!(
+                    "dependency '{name}' comes from git, which holds Jade source; set \
+                     abi = \"source\" in jade.toml, or name a prebuilt library with 'url'"
+                ));
+            }
+        } else if named > 0 {
+            return Err(format!(
+                "dependency '{name}' sets 'rev', 'tag' or 'branch' without 'git' in jade.toml"
+            ));
         }
 
         // A url dependency is fetched into `libs/<name>-<version>/`, so the
@@ -765,6 +838,21 @@ impl DependencyEntry {
                         "dependency '{name}' declares [dependencies.{name}.symbols] but \
                          does not set abi = \"c\" in jade.toml — a Jade-ABI package \
                          exports jade_pkg_init and describes its own bindings"
+                    ));
+                }
+            }
+            Abi::Source => {
+                if self.symbols.is_some() {
+                    return Err(format!(
+                        "dependency '{name}' declares [dependencies.{name}.symbols] but is \
+                         Jade source in jade.toml; a source package declares the C libraries \
+                         it calls in its own jade.toml"
+                    ));
+                }
+                if self.is_platform_template() {
+                    return Err(format!(
+                        "dependency '{name}' is Jade source, which is the same on every \
+                         platform, so its url in jade.toml takes no {{platform}}"
                     ));
                 }
             }
@@ -817,7 +905,9 @@ pub struct ProjectSection {
 impl ProjectManifest {
     /// Returns true if this toml file actually declares a Jade project.
     pub fn is_project(&self) -> bool {
-        self.project.is_some()
+        // A package is a project too: its author installs its dependencies and
+        // builds it in place, and its own files resolve imports against it.
+        self.project.is_some() || self.package.is_some()
     }
 
     /// The entry-point file for this project (default: `main.jde`).

@@ -399,6 +399,8 @@ fn process_file(
     // `__native$<pkgid>$<fn>`.
     let mut native_aliases: HashMap<String, u32> = HashMap::new();
     let mut native_from: HashMap<String, u32> = HashMap::new();
+    // Alias → the source package and the names it does not export.
+    let mut hidden: HashMap<String, (String, HashSet<String>)> = HashMap::new();
     let mut kept: Vec<TStmt> = Vec::new();
 
     for s in stmts {
@@ -416,12 +418,27 @@ fn process_file(
                         native_aliases.insert(alias, pkgid);
                         // No body to inline — the lib is dlopen'd at runtime.
                     }
-                    Resolved::Jade(dep) => {
+                    Resolved::Jade(dep, exports) => {
                         load_dep(reg, &dep)?;
                         let alias = as_name.unwrap_or_else(|| stem(&path));
                         let id = reg.id[&dep];
-                        aliases
-                            .insert(alias, (id, reg.values[&dep].clone(), reg.types[&dep].clone()));
+                        let (mut values, mut types) =
+                            (reg.values[&dep].clone(), reg.types[&dep].clone());
+                        if let Some(ex) = exports {
+                            let kept = |set: &mut HashSet<String>| {
+                                let gone: HashSet<String> = set
+                                    .iter()
+                                    .filter(|n| !ex.names.contains(*n))
+                                    .cloned()
+                                    .collect();
+                                set.retain(|n| ex.names.contains(n));
+                                gone
+                            };
+                            let mut gone = kept(&mut values);
+                            gone.extend(kept(&mut types));
+                            hidden.insert(alias.clone(), (ex.package.clone(), gone));
+                        }
+                        aliases.insert(alias, (id, values, types));
                         // `use` itself is dropped — the body is inlined+mangled already.
                     }
                 }
@@ -458,9 +475,21 @@ fn process_file(
                         }
                         // `from ... use` is dropped — selected names map to native refs.
                     }
-                    Resolved::Jade(dep) => {
+                    Resolved::Jade(dep, exports) => {
                         load_dep(reg, &dep)?;
                         let id = reg.id[&dep];
+                        if let Some(ex) = &exports
+                            && let Some(n) = names.iter().find(|n| !ex.names.contains(*n))
+                        {
+                            return Err(ResolveError::Program(
+                                JadeError::NotExported {
+                                    package: ex.package.clone(),
+                                    name: n.clone(),
+                                    span,
+                                }
+                                .to_string(),
+                            ));
+                        }
                         for n in &names {
                             if reg.values[&dep].contains(n) {
                                 from_value.insert(n.clone(), mangle(n, id));
@@ -486,6 +515,7 @@ fn process_file(
         from_type,
         native_aliases,
         native_from,
+        hidden,
         native_symbols: reg.native_symbols.clone(),
         errors: Vec::new(),
         locals: Vec::new(),
@@ -506,7 +536,17 @@ fn process_file(
 /// or a Jade source module (inlined + mangled).
 enum Resolved {
     Native(PathBuf),
-    Jade(PathBuf),
+    /// A Jade module, and the names an importer may use when it is a source
+    /// package's entry module that lists its exports.
+    Jade(PathBuf, Option<Exports>),
+}
+
+/// What a source package lets other projects use from its entry module.
+#[derive(Clone)]
+struct Exports {
+    /// The package's name, for messages.
+    package: String,
+    names: HashSet<String>,
 }
 
 /// Resolve a `use` path to a canonical file. Registered `[lib]` libraries take
@@ -514,7 +554,24 @@ enum Resolved {
 /// everything else resolves relative to the importing file's `dir`. The resolved
 /// file's extension (via `resolve_library_import`) decides whether it's a native
 /// library or a Jade module.
-fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, String> {
+fn resolve_use(reg: &mut Registry, dir: &Path, path: &str) -> Result<Resolved, String> {
+    // A file inside a source package resolves against the package's own
+    // `[lib]` entries first, anchored at the package, then the build's.
+    if let Some((pkg_root, manifest)) = package_context(reg, dir)
+        && let Some(libs) = &manifest.lib
+        && let Some(r) = crate::project::resolve_library_import(libs, path, &pkg_root)?
+    {
+        let canon = r.path.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
+        if r.kind == crate::project::ImportKind::Native {
+            // The package declares its native functions' types in its own
+            // manifest; the project's own declarations win.
+            for (name, decls) in native_declarations(&manifest)? {
+                reg.native_decls.entry(name).or_insert(decls);
+            }
+            return Ok(Resolved::Native(canon));
+        }
+        return Ok(Resolved::Jade(canon, None));
+    }
     if let Some(message) = crate::project::ambiguous_bare_import(path, &reg.libraries, dir) {
         return Err(message);
     }
@@ -525,15 +582,47 @@ fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, Strin
         let r = crate::project::resolve_relative_import(dir, path);
         (r.path, r.kind == crate::project::ImportKind::Native)
     };
+    let mut exports = None;
     let (target, is_native) = match &reg.lib_root {
         Some(root) => match crate::project::resolve_library_import(&reg.libraries, path, root)? {
-            Some(r) => (r.path, r.kind == crate::project::ImportKind::Native),
+            Some(r) => {
+                exports = r.exports.map(|names| Exports {
+                    package: path.to_string(),
+                    names: names.into_iter().collect(),
+                });
+                (r.path, r.kind == crate::project::ImportKind::Native)
+            }
             None => relative(),
         },
         None => relative(),
     };
     let canon = target.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
-    Ok(if is_native { Resolved::Native(canon) } else { Resolved::Jade(canon) })
+    Ok(if is_native { Resolved::Native(canon) } else { Resolved::Jade(canon, exports) })
+}
+
+/// Purpose: This function finds the source package a directory belongs to,
+/// when it is not the project being built.
+///
+/// Inputs:
+/// - `reg`: the registry, which knows the project's root.
+/// - `dir`: the importing file's directory.
+///
+/// Outputs: the package's root and manifest, or `None` for a file of the
+/// project itself or one outside any package.
+fn package_context(
+    reg: &Registry,
+    dir: &Path,
+) -> Option<(PathBuf, crate::project::ProjectManifest)> {
+    let root = crate::project::find_project_root_from(dir)?;
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    };
+    if reg.lib_root.as_deref().is_some_and(|r| same(r, &root)) {
+        return None;
+    }
+    let manifest = crate::project::load_project(&root).ok()?;
+    manifest.package.is_some().then_some((root, manifest))
 }
 
 fn stem(path: &str) -> String {
@@ -675,6 +764,9 @@ struct Renamer {
     /// name → pkgid. References through these rewrite to `__native$<pkgid>$<fn>`.
     native_aliases: HashMap<String, u32>,
     native_from: HashMap<String, u32>,
+    /// Import alias → the source package it names and the top-level names the
+    /// package keeps to itself.
+    hidden: HashMap<String, (String, HashSet<String>)>,
     /// pkgid → the symbols that package's `[symbols]` table declares. A pkgid
     /// that is absent is one with nothing to check against, and its references
     /// pass through as they always did.
@@ -772,6 +864,30 @@ impl Renamer {
         }
         let (id, values, _) = self.aliases.get(alias)?;
         if values.contains(field) { Some(mangle(field, *id)) } else { None }
+    }
+
+    /// Purpose: This function records an error when `alias.field` names a
+    /// top-level name its source package does not export.
+    ///
+    /// Inputs:
+    /// - `alias`: the import's name.
+    /// - `field`: the name after the dot, or a class before its `::`.
+    /// - `span`: where the reference is, for the message.
+    ///
+    /// Outputs: none.
+    fn check_exported(&mut self, alias: &str, field: &str, span: Span) {
+        if self.is_shadowed(alias) {
+            return;
+        }
+        let name = field.split_once("::").map_or(field, |(class, _)| class);
+        if let Some((package, gone)) = self.hidden.get(alias)
+            && gone.contains(name)
+        {
+            self.errors.push(
+                JadeError::NotExported { package: package.clone(), name: name.to_string(), span }
+                    .to_string(),
+            );
+        }
     }
 
     /// Resolve a type name (possibly `alias.Type`). Types share no namespace with
@@ -1050,6 +1166,7 @@ impl Renamer {
             _ => None,
         };
         let collapse = qualified.and_then(|(alias, field)| {
+            self.check_exported(&alias, &field, e.span);
             self.ref_native_qual(&alias, &field, e.span)
                 .or_else(|| self.ref_value_qual(&alias, &field))
                 // `shapes.Animal` as a value is a class view, `shapes.Animal(x)`,
@@ -1187,6 +1304,7 @@ impl Renamer {
             _ => None,
         };
         let repl = qualified.and_then(|(alias, field, span)| {
+            self.check_exported(&alias, &field, span);
             self.ref_native_qual(&alias, &field, span)
                 .or_else(|| self.ref_value_qual(&alias, &field))
                 .map(|m| (m, span))
@@ -1296,6 +1414,7 @@ mod tests {
             from_type: HashMap::new(),
             native_aliases: HashMap::new(),
             native_from: HashMap::new(),
+            hidden: HashMap::new(),
             native_symbols: HashMap::new(),
             errors: Vec::new(),
             locals: Vec::new(),
@@ -1405,6 +1524,7 @@ mod ffi_symbol_tests {
             from_type: HashMap::new(),
             native_aliases,
             native_from: HashMap::new(),
+            hidden: HashMap::new(),
             native_symbols,
             errors: Vec::new(),
             locals: Vec::new(),
@@ -1530,7 +1650,7 @@ mod ffi_symbol_tests {
         let mut libs = HashMap::new();
         libs.insert(
             "gfx".to_string(),
-            LibraryEntry { path: "other.dylib".to_string(), files: None, symbols: None },
+            LibraryEntry { path: "other.dylib".to_string(), ..Default::default() },
         );
         m.lib = Some(libs);
         assert!(declared_c_symbols(&m).is_empty());

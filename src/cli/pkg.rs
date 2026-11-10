@@ -15,7 +15,9 @@ fn root_or_exit() -> PathBuf {
     match project::find_project_root() {
         Some(r) => r,
         None => {
-            eprintln!("error: not inside a Jade project (no jade.toml with a [project] section)");
+            eprintln!(
+                "error: not inside a Jade project (no jade.toml with a [project] or [package] section)"
+            );
             eprintln!("       run `jade init` to create one");
             std::process::exit(1);
         }
@@ -169,16 +171,31 @@ pub(crate) fn check_defines(defines: &[String]) -> Result<(), String> {
 /// adding one is a single step: the symbol table is generated and the shim is
 /// built before the command returns. Requiring a separate `jade pkg bind` was
 /// asking the user to know about a stage that has no decision in it.
+#[allow(clippy::too_many_arguments)]
 pub fn run_add(
     name: &str,
     path: Option<&str>,
     url: Option<&str>,
+    git: Option<GitSource<'_>>,
     version: Option<&str>,
     c_abi: bool,
     header: Option<&str>,
     opts: HeaderOptions<'_>,
 ) {
     let root = root_or_exit();
+
+    // Jade source is told apart before anything about shared libraries runs:
+    // a git repository, a directory holding a package, or an archive of one.
+    let source = match (path, url, &git) {
+        (None, None, Some(g)) => Some(manifest::Source::Git(g.url, g.reference)),
+        (Some(p), None, None) if root.join(p).is_dir() => Some(manifest::Source::Path(p)),
+        (None, Some(u), None) if pkg::source::is_archive_url(u) => Some(manifest::Source::Url(u)),
+        _ => None,
+    };
+    if let Some(source) = source {
+        add_source(&root, name, source, version);
+        return;
+    }
 
     // Before the manifest is touched, since a bad -D is a typo to fix rather
     // than a state to roll back.
@@ -264,7 +281,7 @@ pub fn run_add(
                 println!("{name} exports no jade_pkg_init, so it is a plain C library");
                 Abi::C
             }
-            Some(Abi::Jade) => Abi::Jade,
+            Some(Abi::Jade | Abi::Source) => Abi::Jade,
             // A URL dependency has nothing to read yet, and an unreadable table
             // proves nothing. Assume a Jade package, which is what `--c-abi` is
             // there to correct.
@@ -402,6 +419,86 @@ pub fn run_add(
         && let Some(installed) = lib_path.as_deref().and_then(pkg::declared_dependencies)
     {
         add_declared_dependencies(&root, name, installed);
+    }
+}
+
+/// Purpose: This struct holds a `--git` source and the commit it names.
+#[derive(Clone, Copy)]
+pub struct GitSource<'a> {
+    /// The repository.
+    pub url: &'a str,
+    /// `("tag", "v1.0")`, `("rev", …)` or `("branch", …)`.
+    pub reference: (&'a str, &'a str),
+}
+
+/// Purpose: This function adds a Jade source package, then the dependencies it
+/// declares.
+///
+/// Inputs:
+/// - `root`: the project root.
+/// - `name`: the name the program imports it by.
+/// - `source`: where it is.
+/// - `version`: the version to record, if given.
+///
+/// Outputs: none. It exits with a message on failure, leaving `jade.toml` as it
+/// was.
+fn add_source(
+    root: &std::path::Path,
+    name: &str,
+    source: manifest::Source<'_>,
+    version: Option<&str>,
+) {
+    if let manifest::Source::Path(p) = &source
+        && let Err(e) = pkg::source::package_section(&root.join(p))
+    {
+        fail(e);
+    }
+    let existed = dependency_exists(root, name);
+    manifest::add_dependency(root, name, source, version, Abi::Source, None)
+        .unwrap_or_else(|e| fail(e));
+    let manifest = load_or_exit(root);
+    try_relock_and_install(root, &manifest)
+        .unwrap_or_else(|e| fail_new_dependency(root, name, existed, e));
+    println!("added {name}, compiled from source into each program that uses it");
+
+    let Some(locked) = lock::read(root).ok().flatten().and_then(|l| l.get(name).cloned()) else {
+        return;
+    };
+    let dir = pkg::source::package_dir(root, &locked);
+    let local = locked.source.starts_with(lock::PATH_SOURCE);
+    let (declared, unfollowed) = pkg::source::declared_dependencies(&dir, root, local);
+
+    let have = load_or_exit(root).dependencies.unwrap_or_default();
+    let mut added = Vec::new();
+    for (dep, entry) in declared {
+        match have.get(&dep) {
+            // Two packages needing the same dependency is the ordinary case.
+            Some(mine) if mine.version == entry.version => {}
+            Some(mine) => fail(format!(
+                "'{name}' needs {dep} {}, and this project already has {dep} {}.\n  \
+                 One copy of a package is compiled into a program, so the two have to agree. \
+                 Align them in jade.toml.",
+                entry.version.as_deref().unwrap_or(pkg::LOCAL_VERSION),
+                mine.version.as_deref().unwrap_or(pkg::LOCAL_VERSION)
+            )),
+            None => {
+                manifest::add_entry(root, &dep, &entry).unwrap_or_else(|e| fail(e));
+                added.push(dep);
+            }
+        }
+    }
+    if !unfollowed.is_empty() {
+        eprintln!(
+            "note: '{name}' also needs {}, which it names by a path on the machine it came \
+             from.\n  Add each one yourself:\n    jade pkg add {} --path <where it is here>",
+            unfollowed.join(", "),
+            unfollowed[0]
+        );
+    }
+    if !added.is_empty() {
+        println!("{name} also needs {}", added.join(", "));
+        let manifest = load_or_exit(root);
+        try_relock_and_install(root, &manifest).unwrap_or_else(|e| fail(e));
     }
 }
 

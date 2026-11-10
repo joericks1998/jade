@@ -36,6 +36,7 @@ pub mod cshim;
 pub mod fetch;
 pub mod lock;
 pub mod manifest;
+pub mod source;
 
 use std::{
     collections::BTreeMap,
@@ -127,6 +128,9 @@ fn resolve_one(
     entry: &DependencyEntry,
     fetcher: &dyn Fetcher,
 ) -> Result<LockedPackage, String> {
+    if entry.abi == crate::project::Abi::Source {
+        return source::resolve(root, name, entry, fetcher);
+    }
     let version = entry.version.clone().unwrap_or_else(|| LOCAL_VERSION.to_string());
     let abi = entry.abi.as_str().to_string();
 
@@ -261,6 +265,10 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
 
     for pkg in &lock.packages {
         let (_, artifact) = select_artifact(pkg, platform)?;
+        if is_source(pkg) {
+            source::materialize(root, pkg, artifact, fetcher)?;
+            continue;
+        }
         let dir = root.join(LIBS_DIR).join(pkg.install_dir());
         let dest = dir.join(&artifact.file);
 
@@ -392,6 +400,11 @@ fn is_local(pkg: &LockedPackage) -> bool {
     pkg.source.starts_with(lock::PATH_SOURCE)
 }
 
+/// Whether a locked package is Jade source rather than a prebuilt library.
+fn is_source(pkg: &LockedPackage) -> bool {
+    pkg.abi == crate::project::Abi::Source.as_str()
+}
+
 /// Current SHA-256 of a local dependency's source file.
 ///
 /// `None` when the file cannot be read. That is not treated as an error
@@ -400,6 +413,9 @@ fn is_local(pkg: &LockedPackage) -> bool {
 /// working exactly as it did before.
 fn local_source_digest(root: &Path, pkg: &LockedPackage) -> Option<String> {
     let src = local_source_path(root, pkg).ok()?;
+    if is_source(pkg) {
+        return source::tree_hash(&src).ok();
+    }
     std::fs::read(&src).ok().map(|b| fetch::sha256_hex(&b))
 }
 
@@ -1169,20 +1185,25 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
 /// A dependency with no artifact for this platform is skipped rather than
 /// failing here: this runs on the import path, where the useful error is
 /// "unknown module", and the actionable one comes from [`materialize`].
-pub fn dependency_libraries(lock: &Lockfile) -> std::collections::HashMap<String, LibraryEntry> {
+pub fn dependency_libraries(
+    root: &Path,
+    lock: &Lockfile,
+) -> std::collections::HashMap<String, LibraryEntry> {
     let platform = fetch::platform_tag();
     let mut out = std::collections::HashMap::new();
 
     for pkg in &lock.packages {
         if let Ok((_, artifact)) = select_artifact(pkg, platform) {
-            out.insert(
-                pkg.name.clone(),
+            let entry = if is_source(pkg) {
+                source::library(root, pkg, artifact)
+            } else {
                 LibraryEntry {
                     path: format!("{LIBS_DIR}/{}", pkg.install_dir()),
                     files: Some(vec![module_file(pkg, artifact)]),
-                    symbols: None,
-                },
-            );
+                    ..Default::default()
+                }
+            };
+            out.insert(pkg.name.clone(), entry);
         }
     }
 
@@ -1249,7 +1270,7 @@ pub fn resolved_libraries(
     manifest: &ProjectManifest,
 ) -> std::collections::HashMap<String, LibraryEntry> {
     let mut out = match lock::read(root) {
-        Ok(Some(l)) => dependency_libraries(&l),
+        Ok(Some(l)) => dependency_libraries(root, &l),
         Ok(None) => std::collections::HashMap::new(),
         Err(e) => {
             eprintln!("warning: {e}");

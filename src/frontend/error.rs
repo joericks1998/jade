@@ -254,6 +254,10 @@ pub enum JadeError {
         span: Span,
     },
 
+    /// A program names something a source package keeps to itself: the
+    /// package lists its `[package] exports`, and the name is not one of them.
+    NotExported { package: String, name: String, span: Span },
+
     /// A spawned function mutates state its spawner can still reach. Tasks run
     /// concurrently on a shared heap with no lock on collection payloads, so
     /// this is a data race; see `compiler::taskcheck`.
@@ -564,6 +568,12 @@ impl std::fmt::Display for JadeError {
                 f,
                 "[{}:{}] cannot find import '{}': file not found",
                 span.line, span.col, path
+            ),
+            JadeError::NotExported { package, name, span } => write!(
+                f,
+                "[{}:{}] package '{}' does not export '{}'; its jade.toml lists what other \
+                 projects may use under [package] exports",
+                span.line, span.col, package, name
             ),
             JadeError::UnknownFfiSymbol { module, symbol, suggestion, span } => {
                 write!(f, "[{}:{}] '{}' has no symbol '{}'", span.line, span.col, module, symbol)?;

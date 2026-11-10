@@ -1,0 +1,6 @@
+// `scale` is a top-level function of the geometry package, and the package's
+// [package] exports leaves it out, so a program using the package cannot call it.
+use geometry
+
+let r = geometry.Rect { w: 3, h: 4, label: "rect" }
+print(geometry.scale(r, 2))

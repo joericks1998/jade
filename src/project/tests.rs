@@ -170,7 +170,8 @@ fn libs_with(name: &str, entry: LibraryEntry) -> HashMap<String, LibraryEntry> {
 
 #[test]
 fn resolve_import_not_a_library_reference() {
-    let libs = libs_with("utils", LibraryEntry { path: "src".into(), files: None, symbols: None });
+    let libs =
+        libs_with("utils", LibraryEntry { path: "src".into(), files: None, ..Default::default() });
     // Bare name that matches no registered library → not a lib reference, so a
     // plain relative import still falls through to file resolution.
     assert!(matches!(resolve_library_import(&libs, "plainimport", Path::new("/root")), Ok(None)));
@@ -185,7 +186,7 @@ fn resolve_import_with_allowlist_hit() {
         LibraryEntry {
             path: "src/utils".into(),
             files: Some(vec!["math.jde".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let resolved =
@@ -201,7 +202,7 @@ fn resolve_import_with_allowlist_native() {
         LibraryEntry {
             path: "src/utils".into(),
             files: Some(vec!["fast.dylib".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let resolved =
@@ -217,7 +218,7 @@ fn resolve_import_allowlist_miss_is_err() {
         LibraryEntry {
             path: "src/utils".into(),
             files: Some(vec!["math.jde".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let err = resolve_library_import(&libs, "utils/missing", Path::new("/root"));
@@ -232,7 +233,7 @@ fn resolve_import_absolute_lib_path() {
         LibraryEntry {
             path: "/abs/utils".into(),
             files: Some(vec!["m.jde".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let resolved = resolve_library_import(&libs, "utils/m", Path::new("/root")).unwrap().unwrap();
@@ -247,8 +248,10 @@ fn resolve_import_no_allowlist_probes_disk() {
     std::fs::create_dir_all(&libdir).unwrap();
     std::fs::write(libdir.join("thing.jde"), "").unwrap();
 
-    let libs =
-        libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None, symbols: None });
+    let libs = libs_with(
+        "mylib",
+        LibraryEntry { path: "mylib".into(), files: None, ..Default::default() },
+    );
     let resolved = resolve_library_import(&libs, "mylib/thing", tmp.path()).unwrap().unwrap();
     assert_eq!(resolved.kind, ImportKind::Jade);
     assert_eq!(resolved.path, libdir.join("thing.jde"));
@@ -257,8 +260,10 @@ fn resolve_import_no_allowlist_probes_disk() {
 #[test]
 fn resolve_import_no_allowlist_missing_returns_jde_candidate() {
     let tmp = TempDir::new("libmiss");
-    let libs =
-        libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None, symbols: None });
+    let libs = libs_with(
+        "mylib",
+        LibraryEntry { path: "mylib".into(), files: None, ..Default::default() },
+    );
     // Nothing on disk → returns the `.jde` candidate as Jade so caller emits a
     // normal not-found error.
     let resolved = resolve_library_import(&libs, "mylib/ghost", tmp.path()).unwrap().unwrap();
@@ -417,7 +422,7 @@ fn bare_import_resolves_registered_library() {
         LibraryEntry {
             path: "libs/fastmath-1.0.0".into(),
             files: Some(vec!["fastmath.so".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let resolved = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap().unwrap();
@@ -431,7 +436,11 @@ fn bare_import_still_honours_the_allowlist() {
     // same as for a slashed import.
     let libs = libs_with(
         "fastmath",
-        LibraryEntry { path: "libs".into(), files: Some(vec!["other.so".into()]), symbols: None },
+        LibraryEntry {
+            path: "libs".into(),
+            files: Some(vec!["other.so".into()]),
+            ..Default::default()
+        },
     );
     let err = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap_err();
     assert!(err.contains("fastmath"), "error should name the module: {err}");
@@ -444,7 +453,7 @@ fn slashed_imports_are_unaffected_by_bare_name_support() {
         LibraryEntry {
             path: "src/utils".into(),
             files: Some(vec!["math.jde".into()]),
-            symbols: None,
+            ..Default::default()
         },
     );
     let resolved =
@@ -515,7 +524,7 @@ fn validate_rejects_both_path_and_url() {
 fn validate_rejects_no_source() {
     let err = dep("version = \"1.0.0\"\n").validate("orphan").unwrap_err();
     assert!(err.contains("orphan"));
-    assert!(err.contains("'path' or 'url'"), "unexpected message: {err}");
+    assert!(err.contains("'path', 'url' or 'git'"), "unexpected message: {err}");
 }
 
 #[test]
@@ -866,4 +875,27 @@ fn a_lib_entry_declares_its_functions_types() {
     assert_eq!(syms["open"].args.as_deref(), Some(&["str".to_string()][..]));
     assert_eq!(syms["open"].ret.as_deref(), Some("handle<Thing>"));
     assert!(syms["live"].args.is_none());
+}
+
+#[test]
+fn validate_takes_git_with_one_reference() {
+    let ok = dep("git = \"https://x/r\"\ntag = \"v1\"\nabi = \"source\"\n");
+    assert!(ok.validate("r").is_ok());
+    let none = dep("git = \"https://x/r\"\nabi = \"source\"\n").validate("r").unwrap_err();
+    assert!(none.contains("exactly one of 'rev', 'tag' or 'branch'"), "{none}");
+    let two = dep("git = \"https://x/r\"\ntag = \"v1\"\nrev = \"abc\"\nabi = \"source\"\n");
+    assert!(two.validate("r").is_err());
+    let prebuilt = dep("git = \"https://x/r\"\ntag = \"v1\"\n").validate("r").unwrap_err();
+    assert!(prebuilt.contains("abi = \"source\""), "{prebuilt}");
+    let stray = dep("path = \"a.so\"\ntag = \"v1\"\n").validate("r").unwrap_err();
+    assert!(stray.contains("without 'git'"), "{stray}");
+}
+
+#[test]
+fn a_package_manifest_is_a_project_root() {
+    let tmp = TempDir::new("pkgroot");
+    std::fs::write(tmp.path().join("jade.toml"), "[package]\nname = \"geo\"\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    let found = find_project_root_from(&tmp.path().join("src")).unwrap();
+    assert_eq!(found.canonicalize().unwrap(), tmp.path().canonicalize().unwrap());
 }

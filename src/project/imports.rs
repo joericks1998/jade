@@ -79,6 +79,21 @@ pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, S
         return Ok(ImportTarget::Builtin);
     }
 
+    // A file inside a source package resolves against the package's own
+    // `[lib]` entries first, the way the build does.
+    if let Some(pkg_root) = super::find_project_root_from(&ctx.source_dir)
+        && ctx.project_root.is_none_or(|r| !same_dir(r, &pkg_root))
+        && let Ok(manifest) = super::load_project(&pkg_root)
+        && manifest.package.is_some()
+        && let Some(libs) = &manifest.lib
+        && let Some(r) = resolve_library_import(libs, path, &pkg_root)?
+    {
+        return Ok(match r.kind {
+            ImportKind::Native => ImportTarget::Native(r.path),
+            ImportKind::Jade => ImportTarget::Jade(r.path),
+        });
+    }
+
     if let Some(root) = ctx.project_root {
         if let Some(message) = ambiguous_bare_import(path, ctx.libraries, &ctx.source_dir) {
             return Err(message);
@@ -96,6 +111,19 @@ pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, S
         ImportKind::Native => ImportTarget::Native(r.path),
         ImportKind::Jade => ImportTarget::Jade(r.path),
     })
+}
+
+/// Purpose: This function says whether two paths name one directory.
+///
+/// Inputs:
+/// - `a`, `b`: the paths.
+///
+/// Outputs: whether both resolve to the same place on disk.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Every `use` / `from ... use` path in a program, with the span to blame.

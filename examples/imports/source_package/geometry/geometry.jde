@@ -1,0 +1,29 @@
+// The package's entry module. Its own imports resolve from this directory, the
+// way they would if the package were built alone, so `shapes` below is the
+// sibling file and not something in the project that uses the package.
+use shapes
+
+class Rect(shapes.Shape) {
+    @public w,
+    @public h
+}
+
+fn area(r) {
+    return r.w * r.h
+}
+
+fn scale(r, k) {
+    return Rect { w: r.w * k, h: r.h * k, label: r.label }
+}
+
+fn largest(xs) {
+    let best = xs[0]
+    for x in xs {
+        if x > best { best = x }
+    }
+    return best
+}
+
+fn describe(r) {
+    return f"{shapes.kind(r)} {r.w}x{r.h}"
+}

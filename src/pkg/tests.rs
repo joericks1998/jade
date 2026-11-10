@@ -748,7 +748,7 @@ fn a_fully_bound_dependency_reports_nothing_unresolved() {
 #[test]
 fn dependency_libraries_produces_a_lib_entry_per_package() {
     let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
-    let libs = dependency_libraries(&lock);
+    let libs = dependency_libraries(Path::new("/root"), &lock);
 
     let entry = libs.get("tok").expect("dependency exposed as a library");
     assert_eq!(entry.path, "libs/tok-1.0.0");
@@ -760,7 +760,7 @@ fn dependency_libraries_resolve_as_bare_name_imports() {
     // The end-to-end claim: a dependency reaches the compiler as an ordinary
     // [lib] entry, so `use tok` resolves through the unchanged shared resolver.
     let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
-    let libs = dependency_libraries(&lock);
+    let libs = dependency_libraries(Path::new("/root"), &lock);
 
     let resolved = crate::project::resolve_library_import(&libs, "tok", Path::new("/root"))
         .unwrap()
@@ -798,7 +798,7 @@ fn dependency_libraries_picks_this_platform() {
         artifacts,
     });
 
-    let libs = dependency_libraries(&lock);
+    let libs = dependency_libraries(Path::new("/root"), &lock);
     assert_eq!(
         libs["multi"].files.as_ref().unwrap(),
         &vec!["native.so".to_string()],
@@ -819,7 +819,7 @@ fn dependency_libraries_skips_a_package_with_no_artifact_here() {
         artifacts: BTreeMap::new(),
     });
 
-    assert!(dependency_libraries(&lock).is_empty());
+    assert!(dependency_libraries(Path::new("/root"), &lock).is_empty());
 }
 
 // ── resolved_libraries ────────────────────────────────────────────────────────
@@ -906,7 +906,7 @@ fn a_renamed_artifact_resolves_as_a_bare_import() {
          path = \"vendor/libfastmath.dylib\"\n",
     );
     let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
-    let libs = dependency_libraries(&lock);
+    let libs = dependency_libraries(Path::new("/root"), &lock);
 
     let resolved = crate::project::resolve_library_import(&libs, "fastmath", tmp.path())
         .unwrap()
@@ -1410,4 +1410,145 @@ fn a_row_of_structs_is_readable_end_to_end() {
 /// Whether the library at `path` exports the Jade package entry point.
 fn exports_pkg_init(path: &std::path::Path) -> bool {
     crate::pkg::bindgen::exported_symbols(path).is_some_and(|e| e.contains("jade_pkg_init"))
+}
+
+// ── source packages ───────────────────────────────────────────────────────────
+
+/// Write a small source package into `dir`.
+fn write_package(dir: &Path, exports: Option<&str>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut toml = String::from("[package]\nname = \"geo\"\n");
+    if let Some(e) = exports {
+        toml.push_str(&format!("exports = [{e}]\n"));
+    }
+    std::fs::write(dir.join("jade.toml"), toml).unwrap();
+    std::fs::write(dir.join("geo.jde"), "fn area(w, h) {\n    return w * h\n}\n").unwrap();
+}
+
+#[test]
+fn a_path_source_package_is_locked_by_its_tree_and_used_in_place() {
+    let tmp = TempDir::new("srcpath");
+    write_package(&tmp.path().join("geo"), Some("\"area\""));
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.geo]\npath = \"geo\"\nabi = \"source\"\n",
+    );
+    let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    let pkg = lock.get("geo").unwrap();
+    assert_eq!(pkg.abi, "source");
+    let art = &pkg.artifacts[ANY_PLATFORM];
+    assert_eq!(art.file, "geo.jde");
+    assert_eq!(art.sha256, source::tree_hash(&tmp.path().join("geo")).unwrap());
+
+    // Nothing is copied: the package is read where it is.
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+    assert!(!tmp.path().join(LIBS_DIR).join("geo-local").exists());
+
+    let libs = dependency_libraries(tmp.path(), &lock);
+    let resolved =
+        crate::project::resolve_library_import(&libs, "geo", tmp.path()).unwrap().unwrap();
+    assert_eq!(resolved.path, tmp.path().join("geo/geo.jde"));
+    assert_eq!(resolved.exports, Some(vec!["area".to_string()]));
+}
+
+#[test]
+fn a_source_tree_hash_covers_source_and_nothing_else() {
+    let tmp = TempDir::new("srchash");
+    let dir = tmp.path().join("geo");
+    write_package(&dir, None);
+    let before = source::tree_hash(&dir).unwrap();
+
+    // A README and a git directory do not change what a program compiles to.
+    std::fs::write(dir.join("README.md"), "hello").unwrap();
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::write(dir.join(".git/HEAD"), "ref").unwrap();
+    assert_eq!(source::tree_hash(&dir).unwrap(), before);
+
+    // Source does.
+    std::fs::write(dir.join("geo.jde"), "fn area(w, h) {\n    return w + h\n}\n").unwrap();
+    assert_ne!(source::tree_hash(&dir).unwrap(), before);
+}
+
+#[test]
+fn a_changed_path_package_is_repinned() {
+    let tmp = TempDir::new("srcdrift");
+    write_package(&tmp.path().join("geo"), None);
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.geo]\npath = \"geo\"\nabi = \"source\"\n",
+    );
+    let mut lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    std::fs::write(tmp.path().join("geo/extra.jde"), "fn x() {\n    return 1\n}\n").unwrap();
+    assert!(local_drift(tmp.path(), lock.get("geo").unwrap()));
+    assert!(verify_local_unchanged(tmp.path(), &lock).is_err());
+    assert_eq!(refresh_local(tmp.path(), &mut lock), vec!["geo".to_string()]);
+    assert!(verify_local_unchanged(tmp.path(), &lock).is_ok());
+}
+
+#[test]
+fn an_archive_source_package_is_unpacked_into_libs_and_checked() {
+    let tmp = TempDir::new("srcarchive");
+    // GitHub wraps an archive's files in one directory, which is stepped into.
+    let staging = TempDir::new("srcarchive_stage");
+    write_package(&staging.path().join("geo-1.0"), None);
+    let archive = staging.path().join("geo.tar.gz");
+    let ok = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(staging.path())
+        .arg("geo-1.0")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "tar must pack the fixture");
+    let bytes = std::fs::read(&archive).unwrap();
+
+    let url = "https://example.com/geo-1.0.tar.gz";
+    let fetcher = MockFetcher::new().with(url, &bytes);
+    let m = manifest(&format!(
+        "[project]\nname = \"app\"\n[dependencies.geo]\nurl = \"{url}\"\nversion = \"1.0\"\n\
+         abi = \"source\"\n"
+    ));
+    let lock = resolve(tmp.path(), &m, &fetcher).unwrap();
+    materialize(tmp.path(), &lock, &fetcher).unwrap();
+    let installed = tmp.path().join(LIBS_DIR).join("geo-1.0");
+    assert!(installed.join("geo.jde").is_file());
+
+    // A tampered install is noticed and replaced.
+    std::fs::write(installed.join("geo.jde"), "fn area(w, h) {\n    return 0\n}\n").unwrap();
+    materialize(tmp.path(), &lock, &fetcher).unwrap();
+    let fixed = std::fs::read_to_string(installed.join("geo.jde")).unwrap();
+    assert!(fixed.contains("w * h"));
+
+    // An archive whose contents differ from the lock is refused.
+    let other = MockFetcher::new().with(url, b"not an archive");
+    std::fs::remove_dir_all(&installed).unwrap();
+    assert!(materialize(tmp.path(), &lock, &other).is_err());
+}
+
+#[test]
+fn a_package_names_its_own_dependencies_relative_to_the_project_adding_it() {
+    let tmp = TempDir::new("srcdeps");
+    write_package(&tmp.path().join("pkgs/units"), None);
+    let physics = tmp.path().join("pkgs/physics");
+    std::fs::create_dir_all(&physics).unwrap();
+    std::fs::write(
+        physics.join("jade.toml"),
+        "[package]\nname = \"physics\"\n[dependencies.units]\npath = \"../units\"\n\
+         abi = \"source\"\n[dependencies.remote]\ngit = \"https://x/r\"\ntag = \"v1\"\n\
+         abi = \"source\"\n",
+    )
+    .unwrap();
+    let app = tmp.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+
+    let (deps, unfollowed) = source::declared_dependencies(&physics, &app, true);
+    let names: Vec<&str> = deps.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["remote", "units"]);
+    assert_eq!(deps[1].1.path.as_deref(), Some("../pkgs/units"));
+    assert!(unfollowed.is_empty());
+
+    // From a package that came from elsewhere, a path means nothing here.
+    let (deps, unfollowed) = source::declared_dependencies(&physics, &app, false);
+    assert_eq!(deps.len(), 1);
+    assert_eq!(unfollowed, vec!["units".to_string()]);
 }

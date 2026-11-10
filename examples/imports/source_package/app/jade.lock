@@ -1,0 +1,11 @@
+version = 1
+
+[[package]]
+name = "geometry"
+version = "local"
+source = "path+../geometry"
+abi = "source"
+
+[package.artifacts.any]
+file = "geometry.jde"
+sha256 = "dabaaebac213e2dd5211b80d70bbc1d48cc495d3ef71af7e16c74148a29a314a"

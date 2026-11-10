@@ -28,6 +28,9 @@ fn save(root: &Path, doc: &toml_edit::DocumentMut) -> Result<(), String> {
 pub enum Source<'a> {
     Path(&'a str),
     Url(&'a str),
+    /// A git repository, and which commit: `("tag", "v1.0")`, `("rev", …)` or
+    /// `("branch", …)`.
+    Git(&'a str, (&'a str, &'a str)),
 }
 
 /// Add or replace `[dependencies.<name>]`.
@@ -60,9 +63,13 @@ pub fn add_dependency(
     match source {
         Source::Path(p) => table.insert("path", toml_edit::value(p)),
         Source::Url(u) => table.insert("url", toml_edit::value(u)),
+        Source::Git(u, (key, value)) => {
+            table.insert("git", toml_edit::value(u));
+            table.insert(key, toml_edit::value(value))
+        }
     };
-    if abi == Abi::C {
-        table.insert("abi", toml_edit::value("c"));
+    if abi != Abi::Jade {
+        table.insert("abi", toml_edit::value(abi.as_str()));
     }
 
     if let Some(symbols) = symbols {
@@ -79,6 +86,57 @@ pub fn add_dependency(
 
     deps.insert(name, toml_edit::Item::Table(table));
     save(root, &doc)
+}
+
+/// Purpose: This function writes a whole dependency entry, as a source
+/// package's own `jade.toml` declares it, into this project's manifest.
+///
+/// Inputs:
+/// - `root`: the project root.
+/// - `name`: the dependency's name.
+/// - `entry`: the entry, with any path already relative to `root`.
+///
+/// Outputs: `Ok(())`, or a message when the manifest cannot be written.
+pub fn add_entry(
+    root: &Path,
+    name: &str,
+    entry: &crate::project::DependencyEntry,
+) -> Result<(), String> {
+    let git_ref = [("rev", &entry.rev), ("tag", &entry.tag), ("branch", &entry.branch)]
+        .into_iter()
+        .find_map(|(k, v)| v.as_deref().map(|v| (k, v)));
+    let source = match (&entry.path, &entry.url, &entry.git) {
+        (Some(p), _, _) => Source::Path(p),
+        (_, Some(u), _) => Source::Url(u),
+        (_, _, Some(g)) => Source::Git(g, git_ref.unwrap_or(("branch", "main"))),
+        _ => return Err(format!("dependency '{name}' has no source")),
+    };
+    add_dependency(
+        root,
+        name,
+        source,
+        entry.version.as_deref(),
+        entry.abi,
+        entry.symbols.as_ref(),
+    )?;
+    let has_extra = entry.structs.is_some()
+        || entry.headers.is_some()
+        || entry.include_dirs.is_some()
+        || entry.defines.is_some();
+    if has_extra {
+        let structs: std::collections::BTreeMap<_, _> =
+            entry.structs.clone().unwrap_or_default().into_iter().collect();
+        set_bindings(
+            root,
+            name,
+            &std::collections::BTreeMap::new(),
+            &structs,
+            entry.headers.as_deref().unwrap_or_default(),
+            entry.include_dirs.as_deref().unwrap_or_default(),
+            entry.defines.as_deref().unwrap_or_default(),
+        )?;
+    }
+    Ok(())
 }
 
 /// One `[dependencies.<pkg>.symbols.<sym>]` entry.

@@ -99,6 +99,9 @@ examples/imports/class_methods/class_methods.jde
 examples/imports/class_methods/shapes.jde
 examples/imports/project_lib/app/project_lib.jde
 examples/imports/project_lib/shared/units.jde
+examples/imports/source_package/app/source_package.jde
+examples/imports/source_package/geometry/geometry.jde
+examples/imports/source_package/geometry/shapes.jde
 examples/json/parse/parse.jde
 examples/llvm/dict_in/dict_in.jde
 examples/llvm/kwargs/kwargs.jde

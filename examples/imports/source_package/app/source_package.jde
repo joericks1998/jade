@@ -1,0 +1,11 @@
+// A source package is imported like any module: `use geometry` names its entry
+// module, and its exports are reached through the name.
+use geometry
+
+let r = geometry.Rect { w: 3, h: 4, label: "rect" }
+print(geometry.area(r))
+print(geometry.describe(r))
+
+// One function, two element types: each call gets its own checked copy.
+print(geometry.largest([3, 9, 2]))
+print(geometry.largest([1.5, 0.5]))

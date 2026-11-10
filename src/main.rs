@@ -180,12 +180,25 @@ enum PkgCommands {
     Add {
         /// Name the dependency is imported by (`use <name>`)
         name: String,
-        /// Local .so/.dylib, relative to the project root
-        #[arg(long, value_name = "FILE", conflicts_with = "url")]
+        /// Local .so/.dylib, or a directory holding a Jade source package,
+        /// relative to the project root
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "git"])]
         path: Option<String>,
-        /// Download URL; may contain {platform}
-        #[arg(long, value_name = "URL")]
+        /// Download URL; may contain {platform}. A .tar.gz is a Jade source package
+        #[arg(long, value_name = "URL", conflicts_with = "git")]
         url: Option<String>,
+        /// A git repository holding a Jade source package
+        #[arg(long, value_name = "URL")]
+        git: Option<String>,
+        /// The tag of --git to build
+        #[arg(long, value_name = "TAG", requires = "git", conflicts_with_all = ["rev", "branch"])]
+        tag: Option<String>,
+        /// The commit of --git to build
+        #[arg(long, value_name = "COMMIT", requires = "git", conflicts_with = "branch")]
+        rev: Option<String>,
+        /// The branch of --git to build; jade.lock pins the commit it is at
+        #[arg(long, value_name = "BRANCH", requires = "git")]
+        branch: Option<String>,
         /// Exact version (required for --url; there are no version ranges)
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
@@ -396,11 +409,33 @@ fn run_cli(cli: Cli) {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add { name, path, url, version, c_abi, header, include, define, only } => {
+            PkgCommands::Add {
+                name,
+                path,
+                url,
+                git,
+                tag,
+                rev,
+                branch,
+                version,
+                c_abi,
+                header,
+                include,
+                define,
+                only,
+            } => {
+                let reference = match (&tag, &rev, &branch) {
+                    (Some(t), _, _) => ("tag", t.as_str()),
+                    (_, Some(r), _) => ("rev", r.as_str()),
+                    (_, _, Some(b)) => ("branch", b.as_str()),
+                    _ => ("branch", "main"),
+                };
+                let git = git.as_deref().map(|url| cli::pkg::GitSource { url, reference });
                 cli::pkg::run_add(
                     &name,
                     path.as_deref(),
                     url.as_deref(),
+                    git,
                     version.as_deref(),
                     c_abi,
                     header.as_deref(),

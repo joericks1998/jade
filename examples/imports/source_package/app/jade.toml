@@ -1,0 +1,9 @@
+# Depends on ../geometry as Jade source. `jade pkg add geometry --path ../geometry`
+# wrote the entry below and jade.lock beside it, which pins a hash of the
+# package's jade.toml and .jde files.
+[project]
+name = "source-package-example"
+
+[dependencies.geometry]
+path = "../geometry"
+abi = "source"

@@ -313,7 +313,16 @@ With phases 3 and 4, 94 examples pass under `--backend=static`.
 - *A C dependency's Jade signature is derived from its symbol table*, through the same parse the shim generator uses. A C struct crossing either way, or several results coming back as one record, is refused by name for now; every other shape works, and glib's fixture and the `alloc_str` long run pass under `--backend=static`.
 - *An undeclared function still checks*: its arguments go as they are, and its result takes the type its use gives it. Where nothing settles the result, the build names the declaration to add. A callback always needs one, since nothing else says what C will pass it.
 
-This is the part of decision 11 that needed the input it names: a Jade-ABI package such as jade-graphics now builds under `--backend=static` once its `[lib]` entry declares what its functions take and return, and its calls whose results the program uses are typed even without that. Jade packages as source dependencies remain.
+This is the part of decision 11 that needed the input it names: a Jade-ABI package such as jade-graphics now builds under `--backend=static` once its `[lib]` entry declares what its functions take and return, and its calls whose results the program uses are typed even without that.
+
+*Jade packages as source dependencies are done* (2026-11-09), which completes decision 11. A dependency with `abi = "source"` is a directory, git repository or `.tar.gz` archive holding a project with a `[package]` section, and its files join the program's import graph like any module, so a package's generic functions are checked per call. The details, in `src/pkg/source.rs`:
+
+- *`use geo` names the package's entry module*, and `[package] exports`, when present, is the list of its top-level names another project may use. Anything else is a compile error naming the list.
+- *A package's own imports resolve from the package*: relative imports from its files, then its own `[lib]` entries, then the project's dependencies. A `jade.toml` with `[package]` and no `[project]` is therefore a project root too.
+- *Dependencies are flat*, as they were for prebuilt packages: adding a package adds what it declares to the project's manifest, and one copy of each package is compiled in. A path a package names is rewritten relative to the project when the package is itself a path; from a git or archive package it cannot be followed and is named for the user to add.
+- *The lock pins a hash of the source*, `jade.toml` and every `.jde` file by path and content, for all three kinds, plus the commit for git. Installing checks the unpacked tree against it, and a path package is re-pinned when it changes, as a path library always was.
+
+`jade build --lib` and the `jade_pkg_init` loader for packages built with it go away in phase 6.
 
 ## Open questions
 

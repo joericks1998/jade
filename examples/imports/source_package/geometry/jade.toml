@@ -1,0 +1,13 @@
+# A Jade package shared as source. `app/` depends on this directory by path, and
+# its files are compiled into the app's program, checked once per set of
+# argument types like any other module. That is what lets `largest` below take
+# an array of ints from one call and an array of floats from another: a
+# prebuilt library could only have held one copy.
+#
+# `exports` lists what other projects may use. `scale` is left out, so
+# `app/` cannot call it; `examples/imports/source_package/app/not_exported_error.jde`
+# pins that.
+[package]
+name = "geometry"
+version = "0.1.0"
+exports = ["Rect", "area", "largest", "describe"]
