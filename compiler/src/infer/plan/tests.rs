@@ -100,6 +100,9 @@ fn row_kernels_give_each_output_a_simd_group() {
     let r = read("m", &p).unwrap();
     let widths: Vec<i64> = r.ops.iter().map(|rec| rec[74]).collect();
     assert_eq!(widths, vec![threads::GROUP, threads::GROUP, 1]);
+    // A mul_mat over many tokens runs as tiles, through a kernel the step picks.
+    assert_eq!(r.ops[1][73], threads::MAT);
+    assert_eq!(KERNELS[MUL_MM as usize], "k_mul_mm");
 }
 
 #[test]

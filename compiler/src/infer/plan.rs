@@ -32,7 +32,12 @@ pub const KERNELS: &[&str] = &[
     "k_set_rows",
     "k_swiglu",
     "k_flash_attn",
+    "k_mul_mm",
 ];
+
+/// The kernel a `mul_mat` runs in a step of more than one token, by its place
+/// in [`KERNELS`]. No op record names it; the step picks it.
+pub const MUL_MM: i64 = 10;
 
 /// How many threads an op runs, by what it computes one of. The number is
 /// word 73 of its record.
@@ -45,6 +50,17 @@ pub mod threads {
     pub const SRC1: i64 = 2;
     /// One per query token and head, for attention.
     pub const ATTENTION: i64 = 3;
+    /// For `mul_mat`: one per value of the destination, as [`DST`], in a step
+    /// of one token. In a step of more, the step runs [`super::MUL_MM`]
+    /// instead, with one per tile of [`TILE`] rows by [`TILE`] tokens, and
+    /// [`TILE_THREADS`] threads each.
+    pub const MAT: i64 = 4;
+    /// The rows of weights and the tokens in one `k_mul_mm` tile. `TILE` in
+    /// `kernels.metal` is the same number.
+    pub const TILE: i64 = 32;
+    /// The threads that compute one `k_mul_mm` tile: two SIMD groups, one
+    /// threadgroup.
+    pub const TILE_THREADS: i64 = 64;
     /// The threads that share each of those in `mul_mat`, `rms_norm` and
     /// `flash_attn_ext`, which read a whole row for each: one SIMD group. Word
     /// 74 of a record is this or 1.
@@ -233,7 +249,7 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
             "rms_norm" => (1, threads::DST_ROWS, threads::GROUP),
             "mul" => (2, threads::DST, 1),
             "add" => (3, threads::DST, 1),
-            "mul_mat" => (4, threads::DST, threads::GROUP),
+            "mul_mat" => (4, threads::MAT, threads::GROUP),
             "rope" => (5, threads::DST, 1),
             "cpy" | "cont" => (6, threads::DST, 1),
             "set_rows" => (7, threads::SRC1, 1),
