@@ -18,7 +18,7 @@ dovata add https://huggingface.co/unsloth/Qwen3-0.6B-GGUF --quant Q4_K_M
 jade run app.jde
 ```
 
-It runs on Apple Silicon Macs for now. The kernels are deliberately plain, one thread per output value, because the tuning goes to the CUDA and Linux kernels first; these exist so a program on a Mac runs its prompts at all. Qwen3 0.6B makes a token in about a fifth of a second.
+It runs on Apple Silicon Macs for now. The kernels are simple on purpose, because the real tuning goes to the CUDA and Linux kernels first. The three that read a whole row for each output, matrix multiplication, RMS norm and attention, give each output one SIMD group of 32 threads; every other op runs one thread per value. Reading a prompt multiplies matrices on the GPU's matrix hardware instead. On an M4 with 24 GB, Qwen3 0.6B makes a token in 15 to 21 milliseconds, where llama.cpp takes about 6 on the same machine, and reads a 93-token prompt in about 0.1 seconds, where llama.cpp takes 0.04.
 
 ## How a prompt becomes a reply
 
@@ -36,6 +36,14 @@ It runs on Apple Silicon Macs for now. The kernels are deliberately plain, one t
 
 *A step may run fewer tokens than the plan's step size.* dovata plans a step of `n_tokens`, 512 by default, and every short-lived tensor is placed for that many. Each tensor that grows with the step keeps its tokens outermost in memory, so its first rows are that tensor for fewer tokens. The op table marks which dimension of each tensor counts tokens, and each step puts the real count there. Decoding one token at a time then costs one token's work, not 512's.
 
+*Attention reads only the cells that hold tokens.* The KV cache has `n_ctx` cells, 4096 by default, and the mask hides every cell a token may not see. Each step tells the kernels how many cells hold tokens once it writes its own, its first position plus its token count, and attention stops there. Without that, every token read the whole cache and cost more than the one before.
+
+*32 threads share each row.* A matrix multiplication's output is a dot product over a row of up to a few thousand weights, and one thread reading it alone leaves the GPU idle while it waits on memory. Each output of `mul_mat`, `rms_norm` and `flash_attn_ext` gets one SIMD group instead: its threads split the row, and `simd_sum` adds their parts. Word 74 of an op record says how many threads share each output, and the step launches that many.
+
+*A prompt is read as tiles.* A step of many tokens multiplies every row of weights by every token, and with a SIMD group per output each weight is decoded again for every token and multiplied one number at a time; that was nearly all of the 1.1 seconds a 93-token prompt took. When a `mul_mat` runs over more than one token, the step launches `k_mul_mm` in its place: each threadgroup decodes a tile of 32 rows of weights into threadgroup memory once, copies 32 tokens beside them, and multiplies the two as 8 by 8 matrices with `simdgroup_multiply_accumulate`. A step of one token keeps the SIMD group per output, which reads the weights once anyway.
+
+*Each chunk's values are read once.* The inner loops work on 32 values at a time, and they read the token side's 32 values into registers first, with one check of their type and layout, rather than checking the type and working out a 64-bit address for each value. Attention finds its head's cache and its token's mask row once, and steps one stride per cell. Loops of a fixed length are marked `#pragma unroll`. Together these took about a third off both a reply and a prompt. The two add up a sum in different orders, so a token's values can differ in their last bits between the two, as they do in llama.cpp.
+
 *One lock covers the model.* The KV cache holds one conversation at a time, so two tasks dereferencing prompts take turns.
 
 ## What each file does
@@ -45,7 +53,7 @@ It runs on Apple Silicon Macs for now. The kernels are deliberately plain, one t
 - *`prelude.jde`* is the tokenizer, the decoder and the functions dereferences become.
 - *`dovata.rs`* speaks dovata's protocol at build time: which models the process holds, and one model's plan. It is version 2 of the protocol, which dovata 3.1 and 3.2 answer; the plan carries the tokenizer from dovata 3.2.
 - *`plan.rs`* checks the plan describes a model the kernels can run and turns it into an `InferPlan`: one fixed-size record per op that launches a kernel, the addresses of the inputs each step fills, the logits, the stop tokens and the tokenizer's tables. Views, reshapes and permutes launch nothing, since the plan already placed their tensors. An op, a weight type, an input or a tokenizer it does not know is refused by name.
-- *`kernels.metal`* holds the kernels, one per op: `get_rows`, `rms_norm`, `mul`, `add`, `mul_mat`, `rope`, `cpy`, `set_rows`, `swiglu` and `flash_attn_ext`. They read f32, f16, bf16, q8_0, q4_0, q4_K, q5_K and q6_K weights, dequantizing each value as it is read.
+- *`kernels.metal`* holds the kernels, one per op: `get_rows`, `rms_norm`, `mul`, `add`, `mul_mat`, `rope`, `cpy`, `set_rows`, `swiglu` and `flash_attn_ext`. They read f32, f16, bf16, q8_0, q4_0, q4_K, q5_K and q6_K weights. `mul_mat` decodes 32 weights at a time, reading their scale once, and multiplies them by f32, f16 or bf16 values; `k_mul_mm`, its form for a step of many tokens, multiplies 32 by 32 tiles on the matrix hardware; the other kernels dequantize each value as they read it.
 - *`unicode.rs`* holds the letter, number and white space classes the pre-tokenizer splits by.
 - *`tests.rs`* compares a program's tokens and its greedy reply with llama.cpp's `llama-tokenize` and `llama-simple` on the same GGUF file. They skip, saying why, without a Mac, a running dovata process holding one model, or llama.cpp installed.
 
@@ -62,7 +70,7 @@ It runs on Apple Silicon Macs for now. The kernels are deliberately plain, one t
 - *Sampling.* Replies are greedy, so the same prompt gives the same reply.
 - *A quantized KV cache*, which takes Hadamard rotations as step inputs. Add the model to dovata with an f16 cache, the default.
 - *NFC normalization* of the prompt. Text that is already composed, as nearly all is, tokenizes the same either way.
-- *Speed.* Every value is dequantized where it is read, index math is 64-bit, and attention keeps its sums in thread memory.
+- *More speed.* `k_mul_mm` works in f32 where llama.cpp uses f16 for twice the throughput, and its tiles are small. Attention gives each head and token one SIMD group, however long the cache is, and reads no tiles. Index math is 64-bit.
 
 ## Building and testing
 

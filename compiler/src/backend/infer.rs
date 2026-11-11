@@ -33,7 +33,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 
 use super::layout::{ARR_DATA, LEN};
 use super::{Cx, F};
-use crate::infer::plan::{Addr, InferPlan, KERNELS, OP_WORDS, threads};
+use crate::infer::plan::{Addr, InferPlan, KERNELS, MUL_MM, OP_WORDS, threads};
 use crate::mir::{InferFn, Ty};
 
 /// The Metal kernels, compiled when the program first runs a prompt.
@@ -895,6 +895,8 @@ impl<'ctx> Cx<'ctx> {
                 for k in 0..8i64 {
                     f.store(f.at_c(args, 512 + k * 8), word(f, 65 + k));
                 }
+                // The cache cells that hold tokens once this step writes its own.
+                f.store(f.at_c(args, 512 + 6 * 8), f.add(pos, n));
                 let ne = |f: &F<'_, 'ctx>, slot: i64, d: i64| {
                     f.load_i64(f.at_c(args, slot * 96 + d * 8))
                 };
@@ -911,10 +913,20 @@ impl<'ctx> Cx<'ctx> {
                 f.if_(f.eq(rule, f.i64(threads::ATTENTION)), |f| {
                     f.store(count, f.mul(ne(f, 0, 1), ne(f, 0, 2)));
                 });
+                // A mul_mat over more than one token runs as tiles.
+                let tiled = f.and(f.eq(rule, f.i64(threads::MAT)), f.sgt(ne(f, 4, 1), f.i64(1)));
+                f.if_(tiled, |f| {
+                    let tile = f.i64(threads::TILE);
+                    let rows = f.sdiv(f.add(ne(f, 4, 0), f.i64(threads::TILE - 1)), tile);
+                    let cols = f.sdiv(f.add(ne(f, 4, 1), f.i64(threads::TILE - 1)), tile);
+                    f.store(count, f.mul(f.mul(rows, cols), f.mul(ne(f, 4, 2), ne(f, 4, 3))));
+                });
                 let count = f.load_i64(count);
                 f.store(f.at_c(args, 512 + 7 * 8), count);
+                let per_item = f.select_int(tiled, f.i64(threads::TILE_THREADS), word(f, 74));
+                let threads = f.mul(count, per_item);
 
-                let kernel = word(f, 0);
+                let kernel = f.select_int(tiled, f.i64(MUL_MM), word(f, 0));
                 let pipe = f.load_ptr(f.elem(cx.ptrt(), pipes, kernel));
                 cx.send(f, None, enc, "setComputePipelineState:", &[pipe.into()]);
                 for slot in 0..5i64 {
@@ -940,8 +952,8 @@ impl<'ctx> Cx<'ctx> {
                     "setBytes:length:atIndex:",
                     &[args.into(), f.i64(ARGS_BYTES).into(), f.i64(5).into()],
                 );
-                f.if_(f.sgt(count, f.i64(0)), |f| {
-                    f.store(groups, f.sdiv(f.add(count, f.i64(63)), f.i64(64)));
+                f.if_(f.sgt(threads, f.i64(0)), |f| {
+                    f.store(groups, f.sdiv(f.add(threads, f.i64(63)), f.i64(64)));
                     f.store(f.at_c(groups, 8), f.i64(1));
                     f.store(f.at_c(groups, 16), f.i64(1));
                     // MTLSize is 24 bytes, so Apple Silicon passes it by pointer.
