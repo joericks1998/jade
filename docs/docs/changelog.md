@@ -6,12 +6,13 @@ sidebar_label: Changelog
 
 ## v2.0.2
 
-*Prompts run about 16 times faster on a Mac.* On an M4, a 256-token reply from Qwen3 0.6B took 126 seconds and takes 7.8 now, and a 93-token prompt is read in about 0.15 seconds instead of 1.1. The tokens are the same as before, and the same as llama.cpp's.
+*Prompts run about 23 times faster on a Mac.* On an M4, a 256-token reply from Qwen3 0.6B took 126 seconds and takes 5.3 now, and a 93-token prompt is read in about 0.1 seconds instead of 1.1. The tokens are the same as before, and the same as llama.cpp's.
 
 - *Three kernels share each output across 32 threads.* Matrix multiplication, RMS norm and attention used one GPU thread per output, so one thread read a whole row of weights alone. Each output now gets one SIMD group of 32 threads, which split the row and add up their parts. Matrix multiplication also decodes 32 weights at a time and reads their scale once, where it read the scale again for every weight.
-- *Prompts are read about 6 times faster.* A step of many tokens, as when a prompt is read, now multiplies matrices on the GPU's matrix hardware, 32 rows by 32 tokens at a time, decoding each weight once per tile instead of once per token. A 93-token prompt took 1.1 seconds and takes about 0.15.
+- *Prompts are read on the GPU's matrix hardware.* A step of many tokens, as when a prompt is read, now multiplies matrices 32 rows by 32 tokens at a time, decoding each weight once per tile instead of once per token. That took a 93-token prompt from 1.1 seconds to 0.15.
+- *Inner loops read each chunk's values once.* The kernels checked a value's type and worked out its 64-bit address for every value they read; now they do it once per 32 values, and loops of a fixed length are unrolled. That took about a third off both a reply and a prompt.
 - *Attention reads only the cache cells that hold tokens.* It checked all 4096 cells of the KV cache at every step, so each token took longer than the one before; the 256th took about 0.75 seconds. It now stops at the last cell in use.
-- *A plan that multiplies weights by quantized values is refused by name.* The new matrix kernel reads the other side as f32, f16 or bf16 values only.
+- *Two plans the faster kernels cannot run are refused by name:* one that multiplies weights by quantized values, and one whose attention reads a quantized KV cache. Both kernels read those as f32, f16 or bf16 values only. dovata's default cache is f16.
 
 ## dovata v3.2.1
 

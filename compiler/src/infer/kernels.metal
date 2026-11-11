@@ -288,6 +288,31 @@ static inline float float_at(device const uchar * row, long nb0, int type, long 
     return *(device const float *)p;
 }
 
+// Purpose: This function reads 32 values of an f32, f16 or bf16 row into
+// registers, checking the row's type and layout once for all 32.
+//
+// Inputs:
+// - `x`: the row's first byte.
+// - `xnb`: the stride between its values, in bytes.
+// - `xt`: its element type.
+// - `k0`: the first of the 32 values.
+// - `len`: how many of the 32 the row has; the rest read as zero.
+// - `out`: where the 32 floats go.
+static inline void load32(device const uchar * x, long xnb, int xt, long k0, int len, thread float * out) {
+    if (len == 32 && xt == T_F32 && xnb == 4) {
+        device const float * f = (device const float *)x + k0;
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            out[l] = f[l];
+        }
+        return;
+    }
+    #pragma unroll
+    for (int l = 0; l < 32; l++) {
+        out[l] = l < len ? float_at(x, xnb, xt, k0 + l) : 0.0f;
+    }
+}
+
 // Purpose: This function returns the dot product of 32 values of a weight row
 // with the same 32 values of a float row, decoding the weights' scales once
 // for all 32.
@@ -304,27 +329,32 @@ static inline float float_at(device const uchar * row, long nb0, int type, long 
 //   or bf16 weight row whose length is not a multiple of 32.
 static float dot32(device const uchar * w, int wt, long wnb, device const uchar * x, long xnb, int xt,
                    long k0, int len) {
+    float xv[32];
+    load32(x, xnb, xt, k0, len, xv);
     float sum = 0.0f;
     if (wt == T_F32 || wt == T_F16 || wt == T_BF16) {
-        for (int l = 0; l < len; l++) {
-            sum += float_at(w, wnb, wt, k0 + l) * float_at(x, xnb, xt, k0 + l);
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            sum += (l < len ? float_at(w, wnb, wt, k0 + l) : 0.0f) * xv[l];
         }
         return sum;
     }
     if (wt == T_Q8_0) {
         device const uchar * b = w + (k0 / 32) * 34;
         device const char * q = (device const char *)(b + 2);
+        #pragma unroll
         for (int l = 0; l < 32; l++) {
-            sum += float(q[l]) * float_at(x, xnb, xt, k0 + l);
+            sum += float(q[l]) * xv[l];
         }
         return half_at(b) * sum;
     }
     if (wt == T_Q4_0) {
         device const uchar * b = w + (k0 / 32) * 18;
+        #pragma unroll
         for (int l = 0; l < 16; l++) {
             uchar q = b[2 + l];
-            sum += float(int(q & 0xF) - 8) * float_at(x, xnb, xt, k0 + l);
-            sum += float(int(q >> 4) - 8) * float_at(x, xnb, xt, k0 + l + 16);
+            sum += float(int(q & 0xF) - 8) * xv[l];
+            sum += float(int(q >> 4) - 8) * xv[l + 16];
         }
         return half_at(b) * sum;
     }
@@ -350,19 +380,19 @@ static float dot32(device const uchar * w, int wt, long wnb, device const uchar 
         float xs = 0.0f;
         if (wt == T_Q4_K) {
             device const uchar * qs = b + 16 + group * 32;
+            #pragma unroll
             for (int l = 0; l < 32; l++) {
-                float xv = float_at(x, xnb, xt, k0 + l);
-                qx += float((qs[l] >> shift) & 0xF) * xv;
-                xs += xv;
+                qx += float((qs[l] >> shift) & 0xF) * xv[l];
+                xs += xv[l];
             }
         } else {
             device const uchar * qs = b + 48 + group * 32;
             device const uchar * qh = b + 16;
+            #pragma unroll
             for (int l = 0; l < 32; l++) {
-                float xv = float_at(x, xnb, xt, k0 + l);
                 int q = ((qs[l] >> shift) & 0xF) | (((qh[l] >> is) & 1) << 4);
-                qx += float(q) * xv;
-                xs += xv;
+                qx += float(q) * xv[l];
+                xs += xv[l];
             }
         }
         return half_at(b) * float(s) * qx - half_at(b + 2) * float(m) * xs;
@@ -379,14 +409,15 @@ static float dot32(device const uchar * w, int wt, long wnb, device const uchar 
         // The first 16 values have one scale and the last 16 the next.
         float first = 0.0f;
         float second = 0.0f;
-        for (int l = 0; l < 32; l++) {
+        #pragma unroll
+        for (int l = 0; l < 16; l++) {
             int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
-            float v = float(q - 32) * float_at(x, xnb, xt, k0 + l);
-            if (l < 16) {
-                first += v;
-            } else {
-                second += v;
-            }
+            first += float(q - 32) * xv[l];
+        }
+        #pragma unroll
+        for (int l = 16; l < 32; l++) {
+            int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
+            second += float(q - 32) * xv[l];
         }
         return half_at(b + 208) * (float(scales[0]) * first + float(scales[1]) * second);
     }
@@ -406,6 +437,7 @@ static float dot32(device const uchar * w, int wt, long wnb, device const uchar 
 // - `out`: where the 32 floats go, zero past `len`.
 static void decode32(device const uchar * w, int wt, long wnb, long k0, int len, thread float * out) {
     if (wt == T_F32 || wt == T_F16 || wt == T_BF16) {
+        #pragma unroll
         for (int l = 0; l < 32; l++) {
             out[l] = l < len ? float_at(w, wnb, wt, k0 + l) : 0.0f;
         }
@@ -415,6 +447,7 @@ static void decode32(device const uchar * w, int wt, long wnb, long k0, int len,
         device const uchar * b = w + (k0 / 32) * 34;
         device const char * q = (device const char *)(b + 2);
         float d = half_at(b);
+        #pragma unroll
         for (int l = 0; l < 32; l++) {
             out[l] = d * float(q[l]);
         }
@@ -423,6 +456,7 @@ static void decode32(device const uchar * w, int wt, long wnb, long k0, int len,
     if (wt == T_Q4_0) {
         device const uchar * b = w + (k0 / 32) * 18;
         float d = half_at(b);
+        #pragma unroll
         for (int l = 0; l < 16; l++) {
             uchar q = b[2 + l];
             out[l] = d * float(int(q & 0xF) - 8);
@@ -452,13 +486,15 @@ static void decode32(device const uchar * w, int wt, long wnb, long k0, int len,
         int shift = (is % 2) * 4;
         if (wt == T_Q4_K) {
             device const uchar * qs = b + 16 + group * 32;
-            for (int l = 0; l < 32; l++) {
+            #pragma unroll
+        for (int l = 0; l < 32; l++) {
                 out[l] = scale * float((qs[l] >> shift) & 0xF) - low;
             }
         } else {
             device const uchar * qs = b + 48 + group * 32;
             device const uchar * qh = b + 16;
-            for (int l = 0; l < 32; l++) {
+            #pragma unroll
+        for (int l = 0; l < 32; l++) {
                 int q = ((qs[l] >> shift) & 0xF) | (((qh[l] >> is) & 1) << 4);
                 out[l] = scale * float(q) - low;
             }
@@ -478,12 +514,14 @@ static void decode32(device const uchar * w, int wt, long wnb, long k0, int len,
         float d = half_at(b + 208);
         float first = d * float(scales[0]);
         float second = d * float(scales[1]);
+        #pragma unroll
         for (int l = 0; l < 32; l++) {
             int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
             out[l] = (l < 16 ? first : second) * float(q - 32);
         }
         return;
     }
+    #pragma unroll
     for (int l = 0; l < 32; l++) {
         out[l] = 0.0f;
     }
@@ -573,22 +611,21 @@ kernel void k_mul_mm(device const uchar * s0 [[buffer(0)]], device const uchar *
     }
     for (long k0 = 0; k0 < k_n; k0 += TILE) {
         int len = k_n - k0 < TILE ? int(k_n - k0) : TILE;
-        if (sg == 0) {
-            float wv[32];
-            if (have) {
-                decode32(w, wt, wnb, k0, len, wv);
-            } else {
-                for (int l = 0; l < 32; l++) {
-                    wv[l] = 0.0f;
-                }
-            }
+        float v32[32];
+        if (!have) {
+            #pragma unroll
             for (int l = 0; l < 32; l++) {
-                sa[lane * TILE + l] = wv[l];
+                v32[l] = 0.0f;
             }
+        } else if (sg == 0) {
+            decode32(w, wt, wnb, k0, len, v32);
         } else {
-            for (int l = 0; l < 32; l++) {
-                sb[lane * TILE + l] = have && l < len ? float_at(x, xnb, xt, k0 + l) : 0.0f;
-            }
+            load32(x, xnb, xt, k0, len, v32);
+        }
+        threadgroup float * dst_row = (sg == 0 ? sa : sb) + lane * TILE;
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            dst_row[l] = v32[l];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int kk = 0; kk < TILE; kk += 8) {
@@ -723,21 +760,37 @@ kernel void k_flash_attn(device const uchar * q [[buffer(0)]], device const ucha
     float scale = a.f[0];
     float qv[8];
     float acc[8];
+    #pragma unroll
     for (int m = 0; m < 8; m++) {
         long e = long(lane) + m * GROUP;
         qv[m] = e < dk ? load(q, a.src[0], e, t, h, 0) : 0.0f;
         acc[m] = 0.0f;
     }
+    // This head's cache and this token's mask row, found once; each cell is
+    // then one stride further on.
+    device const uchar * k_head = k + hkv * a.src[1].nb[2];
+    device const uchar * v_head = v + hkv * a.src[2].nb[2];
+    device const uchar * m_row = mask + t * a.src[3].nb[1];
+    long k_nb0 = a.src[1].nb[0];
+    long k_nb1 = a.src[1].nb[1];
+    long v_nb0 = a.src[2].nb[0];
+    long v_nb1 = a.src[2].nb[1];
+    long m_nb0 = a.src[3].nb[0];
+    int kt = int(a.src[1].type);
+    int vt = int(a.src[2].type);
+    int mt = int(a.src[3].type);
     float running_max = -INFINITY;
     float denom = 0.0f;
     for (long j = 0; j < n_kv; j++) {
-        float mk = load(mask, a.src[3], j, t, 0, 0);
+        float mk = float_at(m_row, m_nb0, mt, j);
         if (mk == -INFINITY) continue;
+        device const uchar * k_cell = k_head + j * k_nb1;
         float s = 0.0f;
+        #pragma unroll
         for (int m = 0; m < 8; m++) {
             long e = long(lane) + m * GROUP;
             if (e < dk) {
-                s += qv[m] * load(k, a.src[1], e, j, hkv, 0);
+                s += qv[m] * float_at(k_cell, k_nb0, kt, e);
             }
         }
         s = simd_sum(s) * scale + mk;
@@ -745,15 +798,18 @@ kernel void k_flash_attn(device const uchar * q [[buffer(0)]], device const ucha
         float old_scale = exp(running_max - next_max);
         float w = exp(s - next_max);
         denom = denom * old_scale + w;
+        device const uchar * v_cell = v_head + j * v_nb1;
+        #pragma unroll
         for (int m = 0; m < 8; m++) {
             long e = long(lane) + m * GROUP;
             if (e < dv) {
-                acc[m] = acc[m] * old_scale + w * load(v, a.src[2], e, j, hkv, 0);
+                acc[m] = acc[m] * old_scale + w * float_at(v_cell, v_nb0, vt, e);
             }
         }
         running_max = next_max;
     }
     float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+    #pragma unroll
     for (int m = 0; m < 8; m++) {
         long e = long(lane) + m * GROUP;
         if (e < dv) {

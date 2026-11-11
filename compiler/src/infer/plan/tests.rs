@@ -116,3 +116,23 @@ fn a_mul_mat_by_quantized_values_is_refused() {
     let e = read("m", &p).unwrap_err();
     assert!(e.contains("mul_mat inpL") && e.contains("blk.0.q"), "{e}");
 }
+
+#[test]
+fn attention_over_a_quantized_cache_is_refused() {
+    let tensor = |name: &str, ty: i64, dims: serde_json::Value, offset: i64| {
+        json!({"tensor": name, "role": {"kind": "kv"}, "ggml_type": ty, "dims": dims,
+               "region": 1, "offset": offset})
+    };
+    let entries = vec![
+        tensor("q", 0, json!([64, 8, 2]), 8192),
+        tensor("k", 8, json!([64, 16, 2]), 16384),
+        tensor("v", 1, json!([64, 16, 2]), 24576),
+    ];
+    let p = plan(
+        json!([{"op": "flash_attn_ext", "inputs": ["q", "k", "v", "attn_inp_kq_mask"],
+                "outputs": ["inpL"], "params": {"scale": 0.125}}]),
+        entries,
+    );
+    let e = read("m", &p).unwrap_err();
+    assert!(e.contains("KV cache of ggml type 8") && e.contains("f16 cache"), "{e}");
+}

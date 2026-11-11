@@ -317,6 +317,16 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
                 if rec[1 + 2 * 12 + 2] > 256 {
                     return Err(fail("its attention heads are wider than 256".into()));
                 }
+                for slot in [1, 2] {
+                    let ty = rec[1 + slot * 12 + 10];
+                    if ![0, 1, 30].contains(&ty) {
+                        return Err(fail(format!(
+                            "its attention reads a KV cache of ggml type {ty}, and the Metal \
+                             kernels read f32, f16 or bf16 caches only; add the model to dovata \
+                             with an f16 cache, the default"
+                        )));
+                    }
+                }
                 f[0] = p("scale") as f32;
             }
             _ => {}
