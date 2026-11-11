@@ -2,10 +2,10 @@
 
 This capability turns a GGUF into a quantized copy, such as a BF16 model into Q4_K_M.
 It runs llama.cpp's `llama-quantize` program, so its output is exactly what that tool
-writes. llama.cpp is not part of this repo: the program must be installed on the
-machine and on `PATH`, from `brew install llama.cpp` on macOS or a release build from
-https://github.com/ggml-org/llama.cpp/releases on Linux. It is the only part of
-llama.cpp dovata uses.
+writes. llama.cpp is not part of this repo. dovata installs one pinned build of
+llama.cpp's own release, b12110, into `~/.dovata/llama.cpp`, and runs the
+`llama-quantize` in it; without that build, it runs one on `PATH`. It is the only part
+of llama.cpp dovata uses.
 
 It only runs when a caller asks. Fetching a model never quantizes it, and planning
 never quantizes it either. A caller who wants a smaller model calls
@@ -37,7 +37,31 @@ corrupting memory. dovata now has no C or C++ code and no `unsafe` block.
 rule are tested on any machine. Running the program needs the `quantize` cargo feature.
 With the feature off, `quantize()` still exists and returns `NotBuilt`, so a program
 compiled without it gets an error that names the feature. With the feature on and no
-`llama-quantize` on `PATH`, it returns `NotInstalled`, which says how to install it.
+`llama-quantize` installed, it installs llama.cpp's build first, as the next paragraphs
+say.
+
+*dovata installs llama.cpp itself.* A user who installs dovata should not have to find
+and install a second program before it can quantize. dovata takes llama.cpp's own
+release build, not a package manager's, because llama.cpp publishes one for every
+machine dovata releases programs for, the same files on each, with a SHA-256 per file.
+The build is pinned, so every dovata of one version runs the same `llama-quantize`, the
+one its type table was checked against; `install.rs` names it and its two archives'
+SHA-256s. A download that does not match is refused before anything is unpacked.
+
+The build goes in `~/.dovata/llama.cpp/<build>/`, whole: the program finds its
+libraries in its own directory, with an rpath of `@loader_path` on macOS and `$ORIGIN`
+on Linux, so it is never split up or put on `PATH`. It is unpacked in a private
+directory beside it and renamed into place, so two dovatas installing at once never see
+half a build, and installing a new build removes the old ones. dovata looks for its own
+build first and `PATH` second, since a newer llama.cpp on `PATH` may offer types the
+table does not know. With neither, `quantize` installs the build before it runs, and
+`dovata setup`, which the install script runs, installs it ahead of time. On a machine
+llama.cpp publishes no build for here, it returns `NotInstalled`, which says to build
+llama.cpp and put `llama-quantize` on `PATH`.
+
+The Linux build needs glibc 2.34 or newer and GCC's OpenMP library, `libgomp.so.1`.
+dovata does not install system packages; the install script says how when the library
+is missing.
 
 ## Files
 
@@ -49,9 +73,15 @@ compiled without it gets an error that names the feature. With the feature on an
   feature off, this file also holds the `quantize()` that returns `NotBuilt`.
 - `exec.rs` is the edge that runs the program, built only with the `quantize` feature.
   It opens the input, runs `prepare`, makes the output directory, finds
-  `llama-quantize` on `PATH`, builds its arguments and runs it, then opens the output
+  `llama-quantize`, installing llama.cpp when it has none, builds its arguments and runs it, then opens the output
   again and checks that its `general.file_type` is the type asked for. Its tests run the
   real program on the fixture, and they skip, with a message, when it is not installed.
+- `install.rs` installs llama.cpp's pinned build, also built only with the `quantize`
+  feature. It names the build and each archive's SHA-256, downloads the archive,
+  checks it, unpacks it with the system's `tar`, and moves the build into place. Its
+  download, checksum, unpacking and private-directory functions are public, because
+  `dovata upgrade` installs dovata's own releases with them. Its tests unpack archives
+  they make themselves, so they run anywhere without the network.
 - `fixture.rs` is test-only. It writes a tiny but complete `llama` model in F32 with
   `crate::gguf::write`: two layers, a 64-wide embedding, and a 32-token SentencePiece
   vocabulary, with every shape `load_arch_tensors` in llama.cpp expects. A test loaded
@@ -104,7 +134,8 @@ log is the only sign of progress. It also keeps the last 20 lines, and a failure
 | Error | When | Message, in short |
 |---|---|---|
 | `NotBuilt` | the `quantize` feature is off | this build cannot quantize; enable the `quantize` cargo feature |
-| `NotInstalled` | `llama-quantize` is not on `PATH` | install llama.cpp, with `brew install llama.cpp` on macOS or a release build on Linux |
+| `NotInstalled` | `llama-quantize` is not on `PATH`, and llama.cpp publishes no build dovata can install on this machine | build llama.cpp and put `llama-quantize` on `PATH` |
+| `Install` | installing llama.cpp's build failed: the download, its SHA-256, or unpacking it | the reason, and that `dovata setup` tries again |
 | `AlreadyAt` | the input already is the requested type | `x.gguf` is already Q8_0; use the file as it is |
 | `Requantize` | the input holds quantized tensors and `allow_requantize` is off | already quantized; quantizing again loses quality; start from the unquantized file or set `allow_requantize` |
 | `BadInput` | the input does not open, the output is an input file, the output is in the hub cache, the type is NVFP4, or the type needs an importance matrix | says which, and what to do instead |
@@ -237,7 +268,8 @@ newer llama.cpp that changes either shows up as a `QuantError::Llama` from the p
 
 ```sh
 # Everything. The tests that run llama-quantize skip, with a message, when it is not
-# on PATH, so install llama.cpp first for a full run.
+# installed, so install llama.cpp's build first for a full run.
+cargo run -p dovata --bin dovata -- setup
 cargo test -p dovata --lib quantize
 
 # The pure half alone, as a build without the quantize feature sees it

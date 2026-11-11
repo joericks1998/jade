@@ -1,6 +1,6 @@
 [package]
 name = "dovata"
-version = "3.2.0"
+version = "3.2.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -24,12 +24,13 @@ name = "gguf-inspect"
 path = "src/gguf/main.rs"
 
 # `dovata`, the command line: `dovata start`, `status` and `kill` run a model's process,
-# `dovata plan` plans a model, and `dovata machine` reports the current machine.
-# `doc = false` because the library has the same name.
+# `dovata plan` plans a model, `dovata machine` reports the current machine, and
+# `dovata setup` and `upgrade` install llama.cpp and new dovata releases, which takes
+# the download `quantize` brings. `doc = false` because the library has the same name.
 [[bin]]
 name = "dovata"
 path = "src/cli/main.rs"
-required-features = ["machine", "host"]
+required-features = ["machine", "host", "quantize"]
 doc = false
 
 # Starts the real `dovata` program on a tiny model, maps its memory from this process,
@@ -52,10 +53,11 @@ default = ["moe", "quantize", "hf-hub", "machine", "host", "tokenize"]
 # planner will use it to decide which experts stay resident in VRAM.
 moe = []
 
-# Quantizing a GGUF by running llama.cpp's `llama-quantize` program, which must be
-# installed on the machine and on PATH. Nothing of llama.cpp is compiled or linked.
-# Off, `quantize::quantize` returns an error naming this feature.
-quantize = []
+# Quantizing a GGUF by running llama.cpp's `llama-quantize` program. dovata installs
+# one pinned build of llama.cpp's own release into ~/.dovata/llama.cpp the first time it
+# needs it, checked against its SHA-256, or runs one on PATH. Nothing of llama.cpp is
+# compiled or linked. Off, `quantize::quantize` returns an error naming this feature.
+quantize = ["dep:ureq"]
 
 # Fetching a GGUF from the Hugging Face Hub into the shared hf-hub cache. Off, a Hub
 # source is refused with an error naming this feature; local paths still work.
@@ -93,6 +95,11 @@ sha2 = "0.10"
 # compiler's build does not pull in tokio. 1.x is async-first and its blocking
 # feature wraps a tokio runtime.
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"], optional = true }
+
+# Downloading llama.cpp's build for `quantize`, and dovata's own releases for `dovata
+# upgrade`. The blocking client hf-hub already uses, with its default features, so a
+# build with both has one copy.
+ureq = { version = "2", optional = true }
 
 # Hugging Face's tokenizer, which runs a tokenizer.json. Its default features compile C
 # and C++: the Oniguruma regex library and a suffix array used only for training. With

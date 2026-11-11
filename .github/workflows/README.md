@@ -43,10 +43,10 @@ Never re-cut an existing tag. A new version is a new tag.
 
 - `ci.yml` builds, tests and lints the compiler on Ubuntu, then runs the example checks, the golden outputs and the FFI gate. On `main` it also runs `tag-release` for the compiler.
 - `release.yml` builds `jade` for Linux x86_64 and Apple Silicon and publishes it.
-- `dovata-ci.yml` builds and tests dovata's three crates on Ubuntu and macOS: the tests with every capability compiled out, refback's Metal tests and the quantize tests through Homebrew's llama.cpp on macOS, `dovata machine info` on the runner, and clippy. On `main` it also runs `tag-release` for dovata.
+- `dovata-ci.yml` builds and tests dovata's three crates on Ubuntu and macOS: the tests with every capability compiled out, refback's Metal tests on macOS, the quantize tests on both through the llama.cpp build `dovata setup` installs, `dovata machine info` on the runner, and clippy. On `main` it also runs `tag-release` for dovata.
 - `dovata-release.yml` builds `dovata` and `gguf-inspect` for Linux x86_64 and Apple Silicon and publishes them. `refback` is the test-only reference backend and is never published.
-- `deploy-docs.yml` builds and publishes the docs site when `docs/` changes on `main`.
+- `deploy-docs.yml` builds and publishes the docs site when `docs/` or `dovata/install.sh` changes on `main`. It copies `dovata/install.sh` into the site, so both installers come from jadelang.org: `/install.sh` for the compiler and `/dovata/install.sh` for dovata.
 
 ## Who uses it
 
-`docs/static/install.sh` and `jade upgrade` download what `release.yml` publishes. `dovata/install.sh` downloads what `dovata-release.yml` publishes. A Rust project that takes dovata as a cargo dependency pins a `dovata-v*` tag.
+`docs/static/install.sh` and `jade upgrade` download what `release.yml` publishes. `dovata/install.sh` and `dovata upgrade` download what `dovata-release.yml` publishes. A Rust project that takes dovata as a cargo dependency pins a `dovata-v*` tag.

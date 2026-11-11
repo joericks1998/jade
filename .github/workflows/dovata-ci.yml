@@ -46,14 +46,14 @@ jobs:
         with:
           components: clippy
 
-      # The quantize tests run llama.cpp's llama-quantize and skip when it is not
-      # installed. Homebrew is how a Mac gets it, so the macOS run covers them.
-      - name: Install llama.cpp (macOS)
-        if: runner.os == 'macOS'
-        run: brew install llama.cpp
-
       - name: Build
         run: cargo build -p dovata -p dovata-chat-template -p refback --locked --verbose
+
+      # The quantize tests run llama.cpp's llama-quantize and skip when it is not
+      # installed. `dovata setup` installs the build users get, so both runners test
+      # the same llama.cpp the release installs.
+      - name: Install llama.cpp
+        run: target/debug/dovata setup
 
       - name: Test
         run: cargo test -p dovata -p dovata-chat-template -p refback --locked

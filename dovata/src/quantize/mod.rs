@@ -12,6 +12,8 @@ use crate::load::Model;
 mod exec;
 #[cfg(test)]
 pub(crate) mod fixture;
+#[cfg(feature = "quantize")]
+pub mod install;
 
 #[cfg(feature = "quantize")]
 pub use exec::quantize;
@@ -389,8 +391,11 @@ pub struct QuantReport {
 pub enum QuantError {
     /// This build of dovata has no quantizer: the `quantize` feature is off.
     NotBuilt,
-    /// llama.cpp's `llama-quantize` program is not on `PATH`.
+    /// llama.cpp's `llama-quantize` program is not on `PATH`, and llama.cpp publishes no
+    /// build dovata can install on this machine.
     NotInstalled,
+    /// dovata could not install llama.cpp's build, for the reason given.
+    Install(String),
     /// The input is already quantized and [`QuantSpec::allow_requantize`] is off.
     Requantize { input: PathBuf, from: Option<Ftype>, to: Ftype },
     /// The input already is the requested type.
@@ -428,9 +433,15 @@ impl fmt::Display for QuantError {
             ),
             QuantError::NotInstalled => write!(
                 f,
-                "dovata quantizes by running llama.cpp's llama-quantize program, and it is not on PATH. \
-                 Install llama.cpp: `brew install llama.cpp` on macOS, or a release build from \
-                 https://github.com/ggml-org/llama.cpp/releases on Linux"
+                "dovata quantizes by running llama.cpp's llama-quantize program. It is not on PATH, and \
+                 llama.cpp publishes no build dovata can install on this machine, which is not an Apple \
+                 Silicon Mac or x86_64 Linux. Build llama.cpp from https://github.com/ggml-org/llama.cpp \
+                 and put llama-quantize on PATH"
+            ),
+            QuantError::Install(why) => write!(
+                f,
+                "dovata could not install llama.cpp, which holds the llama-quantize program it quantizes \
+                 with: {why}. `dovata setup` tries again"
             ),
             QuantError::Requantize { input, from, to } => {
                 let from = from.map_or_else(|| "quantized tensors".to_owned(), |t| t.name().to_owned());

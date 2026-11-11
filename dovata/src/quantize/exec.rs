@@ -8,10 +8,11 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{cache_refusal, in_hub_cache, prepare, Ftype, Job, QuantError, QuantReport, QuantSpec};
+use super::{cache_refusal, in_hub_cache, install, prepare, Ftype, Job, QuantError, QuantReport, QuantSpec};
 use crate::load::Model;
 
-/// The program dovata runs to quantize, found on `PATH`.
+/// The program dovata runs to quantize, from the llama.cpp build it installs or from
+/// `PATH`.
 pub(crate) const PROGRAM: &str = "llama-quantize";
 
 /// How many lines of the program's log a failure message quotes.
@@ -35,7 +36,14 @@ pub fn quantize(
     let model = Model::open(input).map_err(|e| QuantError::BadInput(format!("cannot open the input: {e}")))?;
     let job = prepare(&model, output, spec)?;
     check_outputs_on_disk(&model, &job.outputs)?;
-    let program = find_program().ok_or(QuantError::NotInstalled)?;
+    let program = match find_program() {
+        Some(program) => program,
+        None => {
+            let root = install::default_root()
+                .ok_or_else(|| QuantError::Install("HOME is not set, so there is no ~/.dovata to install it in".into()))?;
+            install::install(&root)?
+        }
+    };
 
     let args = arguments(&model.paths[0], &job, spec)?;
     run(&program, &args).map_err(|tail| {
@@ -72,12 +80,25 @@ pub fn quantize(
     })
 }
 
+/// Purpose: This function finds the `llama-quantize` dovata runs: the one it installed
+/// into `~/.dovata/llama.cpp`, else one on `PATH`.
+///
+/// Inputs: none.
+///
+/// Outputs: the program's path, or `None` when neither is there.
+pub(crate) fn find_program() -> Option<PathBuf>
+{
+    // dovata's own build comes first, because it is the one the type table was checked
+    // against. A newer llama.cpp on PATH may offer types dovata does not know.
+    install::default_root().and_then(|root| install::installed(&root)).or_else(on_path)
+}
+
 /// Purpose: This function finds `llama-quantize` on `PATH`.
 ///
 /// Inputs: none.
 ///
-/// Outputs: the program's path, or `None` when it is not installed.
-pub(crate) fn find_program() -> Option<PathBuf>
+/// Outputs: the program's path, or `None` when it is not on `PATH`.
+fn on_path() -> Option<PathBuf>
 {
     let names: &[&str] = if cfg!(windows) { &["llama-quantize.exe"] } else { &[PROGRAM] };
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -251,7 +272,7 @@ mod tests {
     /// Inputs:
     /// - `test`: the test's name, for the message printed when it is skipped.
     ///
-    /// Outputs: `true` when the program is on `PATH`; otherwise it prints that the test is
+    /// Outputs: `true` when dovata has the program; otherwise it prints that the test is
     /// skipped and returns `false`.
     fn installed(
         test: &str,
@@ -260,7 +281,7 @@ mod tests {
         if find_program().is_some() {
             return true;
         }
-        eprintln!("skipping {test}: {PROGRAM} is not on PATH. Install llama.cpp to run it");
+        eprintln!("skipping {test}: {PROGRAM} is not installed. `dovata setup` installs it");
         false
     }
 

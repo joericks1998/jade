@@ -2,9 +2,11 @@
 //! File: src/cli/main.rs
 //! Description: The `dovata` command line: `dovata start`, `add`, `remove`, `status`
 //! and `kill` run the dovata process and the models in it, `dovata plan` places a
-//! model's tensors in memory, and `dovata machine` reports this machine.
+//! model's tensors in memory, `dovata machine` reports this machine, and `dovata setup`
+//! and `upgrade` install llama.cpp and the newest dovata.
 
 mod host;
+mod install;
 mod machine;
 mod plan;
 
@@ -23,6 +25,8 @@ commands:
   kill      stop the dovata process
   plan      place a model's tensors in memory for one machine; see `dovata plan --help`
   machine   report this machine's memory and GPUs; see `dovata machine help`
+  setup     install the llama.cpp build dovata quantizes with
+  upgrade   install the newest dovata release over this one
   version   print dovata's version, also as --version
 
 Each command takes --help.
@@ -63,6 +67,8 @@ fn main() -> ExitCode
         Some("host") => host::serve(&args[1..]),
         Some("machine") => machine::main(&args[1..]),
         Some("plan") => plan::main(&args[1..]),
+        Some("setup") => install::setup(&args[1..]),
+        Some("upgrade") => install::upgrade(&args[1..]),
         Some(other) => Err(Fail::Usage(format!("unknown command {other:?}\n\n{HELP}"))),
     };
     match result {

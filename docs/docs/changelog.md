@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## dovata v3.2.1
+
+*dovata installs what it needs, and upgrades itself.* This is a dovata release alone; the compiler stays at 2.0.1.
+
+- *`dovata upgrade`* installs the newest dovata release over the one you have. It checks the download against the release's `checksums.txt`, replaces `dovata` and `gguf-inspect` where they are, and asks for sudo only when it cannot write there itself. A dovata process that is running keeps the old version until `dovata kill` and `dovata start` restart it.
+- *dovata installs llama.cpp itself.* dovata quantizes by running llama.cpp's `llama-quantize`, which used to be a separate install, such as `brew install llama.cpp`. Now `dovata setup` installs llama.cpp's own release build b12110, v0.9.0, into `~/.dovata/llama.cpp`, checked against its SHA-256. The install script and `dovata upgrade` run it, and dovata runs it the first time it quantizes without one. A `llama-quantize` on `PATH` still works when dovata has none of its own.
+- *Both installers come from jadelang.org.* dovata installs with `curl -fsSL https://jadelang.org/dovata/install.sh | sh`, beside the compiler's `https://jadelang.org/install.sh`. The old GitHub address still works.
+
 ## v2.0.1
 
 *Jade 2.0: a pure ahead-of-time compiler, with no interpreter and no runtime library.* Model inference is compiled into the program, over memory the dovata process holds, rather than handed to a provider at run time. There is no v2.0.0 release: its changes and 2.0.1's ship together here, and the bullets marked 2.0.1 are the ones made on that branch.
