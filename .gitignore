@@ -15,6 +15,10 @@ __pycache__/
 # deref fails to coerce, and the parity gate fails in CI while passing locally.
 !examples/**/responses.txt
 
+# ...and dovata's test data and captured tool output are .txt files it reads in its
+# tests, such as dovata/src/machine/testdata/macos-vm_stat.txt.
+!dovata/**/*.txt
+
 */.DS_Store
 
 

@@ -1,0 +1,1296 @@
+//! The package manager: `[dependencies]` → `jade.lock` → `libs/`.
+//!
+//! Dependencies are prebuilt native shared libraries, sourced from a local path
+//! or a URL. There is deliberately **no package registry** — like Go, a
+//! dependency names where it lives rather than an entry in a central index.
+//!
+//! That choice used to mean no transitive resolution either, on the grounds
+//! that a `.so` carries no manifest of its own. A Jade package now carries one
+//! — see [`declared_dependencies`] — so adding a package brings what it needs
+//! with it, as long as that is a URL. A `path` names a file on the machine that
+//! built the package and cannot be followed from anywhere else.
+//!
+//! **There is still no version solving**, and that is a different thing.
+//! Solving searches a space of candidate versions to satisfy a set of ranges,
+//! which needs ranges and a registry to enumerate; Jade has neither, and
+//! [`crate::project`] rejects a range outright. What there is instead is a
+//! choice between the two versions already named: the higher one wins, which is
+//! Go's rule and the only one available when there is no third version to go
+//! and fetch. See [`compare_versions`].
+//!
+//! `jade.lock` stays a flat list of one artifact per name, and once written it
+//! is authoritative — [`ensure_ready`] reads it rather than resolving again, so
+//! the choice above happens when a dependency is *added* and never at build or
+//! run time.
+//!
+//! The integration surface with the rest of the compiler is one function,
+//! [`dependency_libraries`]: resolved dependencies are handed back as synthetic
+//! [`crate::project::LibraryEntry`] values and unioned into the manifest's
+//! `[lib]` map. Neither the VM ([`crate::vm`]) nor the AOT import
+//! resolver ([`crate::aot::imports`]) learns what a dependency is — they
+//! keep resolving `[lib]` entries exactly as before, so the two backends cannot
+//! drift.
+
+pub mod bindgen;
+pub mod cshim;
+pub mod fetch;
+pub mod lock;
+pub mod manifest;
+pub mod source;
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+use crate::project::{DependencyEntry, LibraryEntry, ProjectManifest};
+use fetch::Fetcher;
+use lock::{LockedArtifact, LockedPackage, Lockfile};
+
+/// Project-local directory holding materialized dependency artifacts. Committed
+/// to `.gitignore`, not to the repository — `jade.lock` is what travels.
+pub const LIBS_DIR: &str = "libs";
+
+/// Artifact key for a dependency whose URL carries no `{platform}` placeholder:
+/// one build serves every platform. Kept out of the platform namespace so it
+/// can never collide with a real tag.
+pub const ANY_PLATFORM: &str = "any";
+
+/// Version recorded for a local `path` dependency that declares none. The
+/// version is only ever a directory component and a label here — there is no
+/// registry to resolve it against.
+pub const LOCAL_VERSION: &str = "local";
+
+/// Order two versions, or `None` when they cannot be ordered.
+///
+/// Dotted numbers only: `1.2.0` against `1.10.0` compares component-wise, so
+/// `10` is greater than `2` rather than lexically smaller. A component that is
+/// not a plain number makes the pair incomparable — `2.0-beta` against `2.0`,
+/// or the `local` a path dependency carries.
+///
+/// Refusing to order what it cannot is the point. This is what decides which of
+/// two versions a program will actually load, and inventing an order for a
+/// spelling nobody defined would pick a winner on a coin toss. An incomparable
+/// pair falls back to the conflict error, which names both and asks.
+pub fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parse =
+        |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse::<u64>().ok()).collect() };
+    let (x, y) = (parse(a)?, parse(b)?);
+    // `1.2` and `1.2.0` are the same version written two ways, so compare over
+    // the longer of the two with the shorter zero-extended.
+    let n = x.len().max(y.len());
+    for i in 0..n {
+        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        if l != r {
+            return Some(l.cmp(&r));
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+// ── Resolution ────────────────────────────────────────────────────────────────
+
+/// Resolve `[dependencies]` into a [`Lockfile`], fetching each artifact once to
+/// record its digest.
+///
+/// A `{platform}` URL is expanded across [`fetch::SUPPORTED_PLATFORMS`] and
+/// every variant that exists is recorded, so a lock generated on one machine
+/// still describes the others. A platform whose artifact is missing is skipped
+/// rather than fatal — plenty of packages ship for a subset — but a dependency
+/// that resolves to *nothing* is an error, since it could never be installed.
+pub fn resolve(
+    root: &Path,
+    manifest: &ProjectManifest,
+    fetcher: &dyn Fetcher,
+) -> Result<Lockfile, String> {
+    let mut out = Lockfile::new();
+    let Some(deps) = &manifest.dependencies else {
+        return Ok(out);
+    };
+
+    // Sorted so resolution order — and therefore any error the user sees — does
+    // not depend on HashMap iteration order.
+    let mut names: Vec<&String> = deps.keys().collect();
+    names.sort();
+
+    for name in names {
+        let entry = &deps[name];
+        entry.validate(name)?;
+        out.packages.push(resolve_one(root, name, entry, fetcher)?);
+    }
+
+    Ok(out)
+}
+
+fn resolve_one(
+    root: &Path,
+    name: &str,
+    entry: &DependencyEntry,
+    fetcher: &dyn Fetcher,
+) -> Result<LockedPackage, String> {
+    if entry.abi == crate::project::Abi::Source {
+        return source::resolve(root, name, entry, fetcher);
+    }
+    let version = entry.version.clone().unwrap_or_else(|| LOCAL_VERSION.to_string());
+    let abi = entry.abi.as_str().to_string();
+
+    let (source, artifacts) = if let Some(path) = &entry.path {
+        (lock::source_path(path), resolve_local(root, name, path, &abi)?)
+    } else {
+        let url = entry.url.as_deref().expect("validate() guarantees a source");
+        (lock::source_url(url), resolve_remote(name, url, entry, &abi, fetcher)?)
+    };
+
+    Ok(LockedPackage { name: name.to_string(), version, source, abi, artifacts })
+}
+
+/// Hash a local artifact in place. It is copied into `libs/` by
+/// [`materialize`], not here — resolution never writes.
+fn resolve_local(
+    root: &Path,
+    name: &str,
+    rel: &str,
+    abi: &str,
+) -> Result<BTreeMap<String, LockedArtifact>, String> {
+    let src = root.join(rel);
+    let bytes = std::fs::read(&src)
+        .map_err(|e| format!("dependency '{name}': cannot read {} ({e})", src.display()))?;
+
+    let file = artifact_filename(name, rel, abi);
+
+    // A local artifact is one build of one thing; nothing about it is
+    // platform-general, but neither is it tied to a tag we could verify. Record
+    // it as `any` and let the user own the portability question.
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        ANY_PLATFORM.to_string(),
+        LockedArtifact { url: None, file, sha256: fetch::sha256_hex(&bytes) },
+    );
+    Ok(artifacts)
+}
+
+fn resolve_remote(
+    name: &str,
+    url: &str,
+    entry: &DependencyEntry,
+    abi: &str,
+    fetcher: &dyn Fetcher,
+) -> Result<BTreeMap<String, LockedArtifact>, String> {
+    let mut artifacts = BTreeMap::new();
+
+    if !entry.is_platform_template() {
+        let bytes = fetcher.fetch(url).map_err(|e| format!("dependency '{name}': {e}"))?;
+        artifacts.insert(
+            ANY_PLATFORM.to_string(),
+            LockedArtifact {
+                url: Some(url.to_string()),
+                file: artifact_filename(name, &filename_from_url(name, url)?, abi),
+                sha256: fetch::sha256_hex(&bytes),
+            },
+        );
+        return Ok(artifacts);
+    }
+
+    let mut failures = Vec::new();
+    for platform in fetch::SUPPORTED_PLATFORMS {
+        let expanded = fetch::expand_platform(url, platform);
+        match fetcher.fetch(&expanded) {
+            Ok(bytes) => {
+                artifacts.insert(
+                    (*platform).to_string(),
+                    LockedArtifact {
+                        url: Some(expanded.clone()),
+                        file: artifact_filename(name, &filename_from_url(name, &expanded)?, abi),
+                        sha256: fetch::sha256_hex(&bytes),
+                    },
+                );
+            }
+            // Not every package ships for every platform. Record what exists.
+            Err(e) => failures.push(format!("  {platform}: {e}")),
+        }
+    }
+
+    if artifacts.is_empty() {
+        return Err(format!(
+            "dependency '{name}': no artifact could be fetched for any supported platform\n{}",
+            failures.join("\n")
+        ));
+    }
+
+    Ok(artifacts)
+}
+
+/// The filename an artifact is installed as: the dependency's own name, keeping
+/// the source's extension.
+///
+/// Imports resolve by *stem* — `use fastmath` looks for `fastmath.<ext>` — so an
+/// artifact left under its upstream name (`libfastmath.dylib`, or a
+/// platform-tagged `tok-linux-x86_64.so`) would be unreachable under the name it
+/// was added as. Renaming on install makes the import predictable and keeps
+/// `libs/` readable.
+fn artifact_filename(name: &str, source_file: &str, abi: &str) -> String {
+    // A C dependency's importable module is the generated shim, which takes the
+    // plain `<name>.<ext>` slot. The raw library steps aside so the two can live
+    // in one directory without colliding.
+    let stem = if abi == crate::project::Abi::C.as_str() {
+        format!("{name}_native")
+    } else {
+        name.to_string()
+    };
+    match Path::new(source_file).extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Last path segment of a URL, used to recover the artifact's extension.
+fn filename_from_url(name: &str, url: &str) -> Result<String, String> {
+    let trimmed = url.split(['?', '#']).next().unwrap_or(url);
+    trimmed
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("dependency '{name}': cannot derive a filename from url '{url}'"))
+}
+
+// ── Materialization ───────────────────────────────────────────────────────────
+
+/// Ensure `libs/` matches `lock` for the current platform.
+///
+/// Verification runs on **every** call, not only after a download: a `.so` in
+/// `libs/` is `dlopen`ed, which is arbitrary code execution before any Jade code
+/// runs, so an artifact that is merely *present* is not thereby trustworthy.
+pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Result<(), String> {
+    let platform = fetch::platform_tag();
+
+    for pkg in &lock.packages {
+        let (_, artifact) = select_artifact(pkg, platform)?;
+        if is_source(pkg) {
+            source::materialize(root, pkg, artifact, fetcher)?;
+            continue;
+        }
+        let dir = root.join(LIBS_DIR).join(pkg.install_dir());
+        let dest = dir.join(&artifact.file);
+
+        // Present and matching → nothing to do. Present but wrong — a corrupted
+        // download, a partial write, a swapped file — falls through to a
+        // re-fetch, which is the only safe response.
+        let present = std::fs::read(&dest);
+        if present.as_ref().is_ok_and(|b| fetch::sha256_hex(b) == artifact.sha256) {
+            continue;
+        }
+
+        // Replacing a file that was there and did not match is worth a line.
+        // Without one the strongest check in the package manager is also the
+        // quietest: a swapped artifact is repaired, `installed N dependencies`
+        // is printed, and the only record that anything was wrong is a
+        // timestamp. Someone who did not swap it themselves needs to know.
+        if present.is_ok() {
+            eprintln!(
+                "note: {} in libs/ did not match jade.lock and is being reinstalled \
+                 (dependency '{}')",
+                artifact.file, pkg.name
+            );
+        }
+
+        let bytes = match &artifact.url {
+            Some(url) => {
+                fetcher.fetch(url).map_err(|e| format!("dependency '{}': {e}", pkg.name))?
+            }
+            None => {
+                let src = local_source_path(root, pkg)?;
+                std::fs::read(&src).map_err(|e| {
+                    format!("dependency '{}': cannot read {} ({e})", pkg.name, src.display())
+                })?
+            }
+        };
+
+        // A dependency is something the dynamic loader can open, and this is the
+        // one point every source passes through with the bytes in hand. Checking
+        // here rather than only in `jade pkg add` covers a hand-written manifest,
+        // a URL serving the wrong file, and an `install` on a fresh clone —
+        // none of which go through `add` at all. Without it the first complaint
+        // comes from `dlopen`, in a finished program, having built cleanly.
+        // A macOS SDK stub is not Mach-O and never will be, but it is a
+        // perfectly good thing to link against — and the library it names is
+        // resolved by dyld from the shared cache, which is where every macOS
+        // system library now lives. See `tbd_install_name`.
+        if !bindgen::bytes_are_loadable_object(&bytes)
+            && bindgen::tbd_install_name(&bytes).is_none()
+        {
+            return Err(format!(
+                "dependency '{}': {} is not a shared library\n  \
+                 It does not start with a Mach-O or ELF header, so nothing could load it. \
+                 A dependency is a prebuilt .dylib or .so, not source and not a header.",
+                pkg.name, artifact.file
+            ));
+        }
+
+        let actual = fetch::sha256_hex(&bytes);
+        if actual != artifact.sha256 {
+            return Err(format!(
+                "dependency '{}': checksum mismatch for {}\n  expected {}\n  actual   {}\n\
+                 The artifact does not match jade.lock — it may have been replaced upstream. \
+                 Re-run `jade pkg update {}` if the change is expected.",
+                pkg.name, artifact.file, artifact.sha256, actual, pkg.name
+            ));
+        }
+
+        write_artifact(&dir, &dest, &bytes)
+            .map_err(|e| format!("dependency '{}': {e}", pkg.name))?;
+    }
+
+    Ok(())
+}
+
+/// The artifact for `platform`, falling back to [`ANY_PLATFORM`].
+///
+/// Errors name the platforms that *are* available, since "this package has no
+/// build for your machine" is otherwise a dead end for the user.
+fn select_artifact<'a>(
+    pkg: &'a LockedPackage,
+    platform: Option<&str>,
+) -> Result<(String, &'a LockedArtifact), String> {
+    if let Some((tag, a)) = platform.and_then(|t| pkg.artifacts.get(t).map(|a| (t, a))) {
+        return Ok((tag.to_string(), a));
+    }
+    if let Some(a) = pkg.artifacts.get(ANY_PLATFORM) {
+        return Ok((ANY_PLATFORM.to_string(), a));
+    }
+
+    let available: Vec<&str> = pkg.artifacts.keys().map(String::as_str).collect();
+    Err(match platform {
+        Some(tag) => format!(
+            "dependency '{}' has no artifact for this platform ({tag}); \
+             jade.lock lists: {}",
+            pkg.name,
+            available.join(", ")
+        ),
+        None => format!(
+            "dependency '{}' cannot be installed: this platform ({}/{}) is not supported by jade",
+            pkg.name,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
+    })
+}
+
+/// Recover the original local path from a `path+…` lock source.
+fn local_source_path(root: &Path, pkg: &LockedPackage) -> Result<PathBuf, String> {
+    pkg.source.strip_prefix(lock::PATH_SOURCE).map(|rel| root.join(rel)).ok_or_else(|| {
+        format!(
+            "dependency '{}': lock entry has no url and source '{}' is not a local path",
+            pkg.name, pkg.source
+        )
+    })
+}
+
+// ── Local sources ─────────────────────────────────────────────────────────────
+//
+// A `path` dependency points at a file the user builds, and rebuilds. Every
+// other kind of dependency is immutable at its source — a URL either serves the
+// bytes the lock pins or it does not — so for those the pin written at `jade pkg
+// add` stays true forever. A local path is the one source that legitimately
+// changes under a lock that is otherwise still correct, and nothing below
+// `resolve` ever re-reads it. That is what let a rebuilt library keep running as
+// the copy it was on the day it was added.
+
+/// Whether a locked package came from a `path` dependency.
+fn is_local(pkg: &LockedPackage) -> bool {
+    pkg.source.starts_with(lock::PATH_SOURCE)
+}
+
+/// Whether a locked package is Jade source rather than a prebuilt library.
+fn is_source(pkg: &LockedPackage) -> bool {
+    pkg.abi == crate::project::Abi::Source.as_str()
+}
+
+/// Current SHA-256 of a local dependency's source file.
+///
+/// `None` when the file cannot be read. That is not treated as an error
+/// anywhere: a source that has moved away or been deleted leaves the existing
+/// pin standing, which keeps a project whose `libs/` is already populated
+/// working exactly as it did before.
+fn local_source_digest(root: &Path, pkg: &LockedPackage) -> Option<String> {
+    let src = local_source_path(root, pkg).ok()?;
+    if is_source(pkg) {
+        return source::tree_hash(&src).ok();
+    }
+    std::fs::read(&src).ok().map(|b| fetch::sha256_hex(&b))
+}
+
+/// Re-pin every local `path` dependency against its source on disk, returning
+/// the names whose digest moved.
+///
+/// The caller writes the lock back. Splitting it that way keeps the decision
+/// about *whether the lock may change* with the command: `jade pkg install`
+/// rewrites it, `--locked` refuses to (see [`verify_local_unchanged`]).
+pub fn refresh_local(root: &Path, lock: &mut Lockfile) -> Vec<String> {
+    let mut changed = Vec::new();
+
+    for pkg in &mut lock.packages {
+        if !is_local(pkg) {
+            continue;
+        }
+        let Some(digest) = local_source_digest(root, pkg) else {
+            continue;
+        };
+
+        // Only the artifacts actually copied from the local file. A path
+        // dependency carries no other kind, but keying off `url` rather than
+        // assuming a single entry keeps this honest if that ever changes.
+        let mut moved = false;
+        for artifact in pkg.artifacts.values_mut() {
+            if artifact.url.is_none() && artifact.sha256 != digest {
+                artifact.sha256 = digest.clone();
+                moved = true;
+            }
+        }
+
+        if moved {
+            changed.push(pkg.name.clone());
+        }
+    }
+
+    changed
+}
+
+/// Whether a local dependency's source has changed since it was pinned.
+///
+/// The read-only question behind [`refresh_local`], for reporting. Anything not
+/// local, and any source that cannot be read, answers `false` — there is no
+/// drift to report without a file to compare against.
+pub fn local_drift(root: &Path, pkg: &LockedPackage) -> bool {
+    if !is_local(pkg) {
+        return false;
+    }
+    let Some(digest) = local_source_digest(root, pkg) else {
+        return false;
+    };
+    pkg.artifacts.values().any(|a| a.url.is_none() && a.sha256 != digest)
+}
+
+/// Fail if a local `path` dependency no longer matches its pin.
+///
+/// The `--locked` half of [`refresh_local`]. In CI a moved source means the
+/// committed lock is stale, and installing the old digest anyway is precisely
+/// the silent-wrong-binary outcome that mode exists to prevent.
+pub fn verify_local_unchanged(root: &Path, lock: &Lockfile) -> Result<(), String> {
+    for pkg in &lock.packages {
+        if !is_local(pkg) {
+            continue;
+        }
+        let Some(digest) = local_source_digest(root, pkg) else {
+            continue;
+        };
+        let Some(artifact) = pkg.artifacts.values().find(|a| a.url.is_none()) else {
+            continue;
+        };
+        if artifact.sha256 != digest {
+            return Err(format!(
+                "dependency '{}': the local source has changed since jade.lock was written\n  \
+                 locked {}\n  on disk {}\n\
+                 --locked forbids rewriting the lock. Run `jade pkg install` and commit \
+                 jade.lock, or rebuild the source to match.",
+                pkg.name, artifact.sha256, digest
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Write via a temp file and rename, so an interrupted install never leaves a
+/// half-written `.so` that would pass an existence check and fail a `dlopen`.
+fn write_artifact(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {} ({e})", dir.display()))?;
+
+    let tmp = dir.join(format!(".jade-install-{}", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write {} ({e})", tmp.display()))?;
+
+    // Shared libraries are loaded, not executed directly, but some loaders and
+    // plenty of tooling still expect the execute bit.
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot set permissions on {} ({e})", tmp.display()));
+    }
+
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot install {} ({e})", dest.display())
+    })
+}
+
+/// Copy this project's installed dependencies into a `libs/` beside an artifact.
+///
+/// Returns the install directories written, for the message the CLI prints.
+///
+/// **Everything installed, not only what the artifact names.** A package can
+/// load a dependency of its own, and the artifact that uses that package never
+/// mentions it — the host cannot see through a package to what it will reach
+/// for. Copying only the direct ones produces a bundle that works until the
+/// first nested load, which is the failure this exists to prevent. The cost is
+/// carrying a dependency the program may not use; the alternative is shipping
+/// one that breaks.
+///
+/// **Whole directories, never single files.** A C dependency's install dir holds
+/// two artifacts — the generated shim and the library it wraps — and the shim
+/// finds the second through `@loader_path` on macOS and `$ORIGIN` on Linux (see
+/// [`compile_shim`]). Copying the shim alone leaves that reference pointing at
+/// nothing, and the failure lands as a dyld error on someone else's machine with
+/// no mention of bundling.
+///
+/// **One shared `libs/`, not one per artifact.** That is a requirement rather
+/// than a layout preference. `dlopen` keys a loaded image by the path it was
+/// asked for, so a per-artifact bundle would give two packages that share a
+/// dependency two copies of it — two sets of globals, two initializers. For a
+/// library that owns a device that is two devices.
+pub fn bundle_beside_artifact(artifact: &Path, libs_root: &Path) -> Result<Vec<String>, String> {
+    let dest_root = artifact.parent().unwrap_or_else(|| Path::new(".")).join(LIBS_DIR);
+    let mut written: Vec<String> = Vec::new();
+
+    let entries = std::fs::read_dir(libs_root)
+        .map_err(|e| format!("cannot read {} ({e})", libs_root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {} ({e})", libs_root.display()))?;
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let src_dir = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let dest_dir = dest_root.join(&name);
+
+        // Building in place — `jade build --lib` at the project root — already
+        // has the dependency exactly where it belongs. Copying a directory onto
+        // itself would truncate every file in it.
+        if same_dir(&src_dir, &dest_dir) {
+            continue;
+        }
+
+        for entry in std::fs::read_dir(&src_dir)
+            .map_err(|e| format!("cannot read {} ({e})", src_dir.display()))?
+        {
+            let entry = entry.map_err(|e| format!("cannot read {} ({e})", src_dir.display()))?;
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let from = entry.path();
+            if !is_runtime_file(&from) {
+                continue;
+            }
+            let to = dest_dir.join(entry.file_name());
+            let bytes = std::fs::read(&from)
+                .map_err(|e| format!("cannot read {} ({e})", from.display()))?;
+
+            // Two artifacts built into one directory share the bundle, which is
+            // the point. Two *different* builds of one dependency landing there
+            // is not — the second would silently replace the first for both.
+            if let Ok(existing) = std::fs::read(&to)
+                && crate::pkg::fetch::sha256_hex(&existing) != crate::pkg::fetch::sha256_hex(&bytes)
+            {
+                return Err(format!(
+                    "cannot bundle '{name}': {} already holds a different build of it.\n  \
+                     Two artifacts in one directory share one libs/, so they must agree on \
+                     every dependency. Build them into separate directories, or install one \
+                     version of it.",
+                    dest_dir.display()
+                ));
+            }
+            write_artifact(&dest_dir, &to, &bytes)?;
+        }
+        written.push(name);
+    }
+
+    written.sort();
+    written.dedup();
+    Ok(written)
+}
+
+/// What a Jade package says it needs installed beside it.
+///
+/// `None` when the artifact carries no such record: a plain C library, or any
+/// package built before `jade_pkg_deps` existed. That is a legal answer rather
+/// than a failure — the dependency model has always been "a package documents
+/// what it needs", and this only removes the need to read the documentation.
+///
+/// Opening the library is safe, and the reason is worth stating because it would
+/// not be obvious: a Jade package runs its module top level from `jade_mod_init`,
+/// which is called by `jade_pkg_init` and by nothing else — there is no
+/// constructor. So `dlopen` maps the image and runs none of its Jade code, which
+/// is what makes it acceptable for `jade pkg add` to open a library it is in the
+/// middle of deciding whether to trust. The `exported_symbols` check comes first
+/// so a plain C library is never opened at all.
+pub fn declared_dependencies(artifact: &Path) -> Option<Vec<LockedPackage>> {
+    let exports = bindgen::exported_symbols(artifact)?;
+    if !exports.contains("jade_pkg_deps") {
+        return None;
+    }
+
+    // SAFETY: loading a Jade package runs no Jade code (see above), and the
+    // symbol's whole body returns a pointer to a string constant in the image,
+    // which stays mapped for as long as the library is loaded.
+    let text = unsafe {
+        let lib = libloading::Library::new(artifact).ok()?;
+        let f: libloading::Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> =
+            lib.get(b"jade_pkg_deps\0").ok()?;
+        let p = f();
+        if p.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(p).to_str().ok()?.to_owned()
+    };
+
+    let lock: Lockfile = toml::from_str(&text).ok()?;
+    (!lock.packages.is_empty()).then_some(lock.packages)
+}
+
+/// Whether a file in `libs/` is something the finished artifact needs, as
+/// opposed to something the install left behind.
+///
+/// A bundle is what ships. `<name>_shim.c` is the C the binding was generated
+/// from — read by `cc` at install time and by nothing afterwards — and it was
+/// going into the release tarball that reaches a device. `.jade-shim.toml` is
+/// the same story, and `.jade-install-<pid>` is a half-written artifact a
+/// concurrent install is in the middle of renaming into place, which is worse
+/// than useless to copy.
+///
+/// The rule is stated as "what runs" rather than as a list of what to drop:
+/// `libs/` is the package manager's directory, so anything in it that is not a
+/// loadable module is by construction build residue.
+fn is_runtime_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name.starts_with('.') {
+        return false;
+    }
+    !matches!(path.extension().and_then(|e| e.to_str()), Some("c" | "h"))
+}
+
+/// Whether two directories are the same place, following symlinks.
+///
+/// A plain path comparison would miss a symlinked `libs/`, and copying a
+/// directory onto itself truncates every file in it.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+// ── C binding shims ───────────────────────────────────────────────────────────
+
+/// Filename of the generated shim for a C dependency, using the host's native
+/// shared-library extension — it is compiled here, not downloaded.
+pub fn shim_filename(name: &str) -> String {
+    // Named after the dependency, because this is the file `use <name>` must
+    // resolve to — imports match by stem.
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    format!("{name}.{ext}")
+}
+
+/// The file that actually gets `dlopen`ed for a package.
+///
+/// For a Jade-ABI package that is the artifact itself, which `jade.lock` pins
+/// and [`materialize`] verifies on every install. For a C library it is the
+/// generated shim — see [`ShimRecord`] for what stands in for a lock entry
+/// there, and why it cannot be one.
+fn module_file(pkg: &LockedPackage, artifact: &LockedArtifact) -> String {
+    if pkg.abi == crate::project::Abi::C.as_str() {
+        shim_filename(&pkg.name)
+    } else {
+        artifact.file.clone()
+    }
+}
+
+/// What the last successful build of a C dependency's shim produced.
+///
+/// **Why this is not in `jade.lock`.** The lock pins every byte that comes from
+/// outside the project, and it is committed, so every line in it has to mean the
+/// same thing on every machine. A binding shim is neither: it does not exist
+/// until the host compiles it, its filename is the host's (`v.dylib` here,
+/// `v.so` there), and its bytes are whatever the host's `cc` made of the same
+/// source. Pinning it would put a digest in a shared file that no second machine
+/// could ever reproduce.
+///
+/// What *is* the same everywhere are the two things the shim is derived from —
+/// the artifact, pinned in the lock, and the symbol table, committed in
+/// `jade.toml`. So this file records the derivation instead: the shim as built,
+/// beside the artifact digest it was built against. It lives in `libs/`, next to
+/// the thing it describes, and is regenerated rather than committed.
+///
+/// **What it is worth, stated plainly.** It catches a stale shim, a corrupted
+/// one, and a substituted one, which is what [`build_c_shims`] used to miss
+/// entirely — its freshness test was "the shim is newer than the library", which
+/// a swapped file passes trivially. It is not a defence against someone who can
+/// write to `libs/`, because they can write this too. Nothing built on the host
+/// can be, and saying otherwise would be the more dangerous mistake.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ShimRecord {
+    /// Format version, so a future field is additive rather than a misread.
+    /// A record this jade does not recognise is treated as absent, which costs
+    /// one rebuild.
+    version: u32,
+    /// The shim's filename, for a reader looking at the directory.
+    file: String,
+    /// SHA-256 of the shim as it was written.
+    sha256: String,
+    /// SHA-256 of the library it was linked against — the lock's own digest for
+    /// this platform's artifact. A rebuilt local dependency changes it, which is
+    /// what makes the shim rebuild.
+    target_sha256: String,
+}
+
+/// Current record format. [`SHIM_RECORD`] is rewritten on every build, so a bump
+/// costs one recompile of each shim and never a stale read.
+const SHIM_RECORD_VERSION: u32 = 1;
+
+/// Filename of the record, inside the dependency's `libs/` directory.
+///
+/// Leading dot so it is not mistaken for a module — imports resolve by stem
+/// over the directory, and it is also what keeps it out of a built bundle.
+const SHIM_RECORD: &str = ".jade-shim.toml";
+
+/// Read the record beside a shim, or `None` when there is nothing usable there.
+///
+/// Every failure answers `None`: absent, unreadable, malformed, or written by a
+/// jade that recorded a shape this one does not know. The cost of being wrong is
+/// a rebuild that was not needed, and the cost of trusting a record that cannot
+/// be read is loading a shim nothing checked.
+fn read_shim_record(dir: &Path) -> Option<ShimRecord> {
+    let text = std::fs::read_to_string(dir.join(SHIM_RECORD)).ok()?;
+    let record: ShimRecord = toml::from_str(&text).ok()?;
+    (record.version == SHIM_RECORD_VERSION).then_some(record)
+}
+
+/// Write the record for a shim that was just built.
+///
+/// A failure here is reported and not fatal: the shim itself is built and
+/// correct, and the only consequence is that the next install rebuilds it
+/// instead of confirming it.
+fn write_shim_record(dir: &Path, file: &str, shim: &Path, target_sha256: &str) {
+    let Ok(bytes) = std::fs::read(shim) else {
+        eprintln!("warning: cannot read {} to record what was built", shim.display());
+        return;
+    };
+    let record = ShimRecord {
+        version: SHIM_RECORD_VERSION,
+        file: file.to_string(),
+        sha256: fetch::sha256_hex(&bytes),
+        target_sha256: target_sha256.to_string(),
+    };
+    match toml::to_string_pretty(&record) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(dir.join(SHIM_RECORD), text) {
+                eprintln!("warning: cannot write {} ({e})", dir.join(SHIM_RECORD).display());
+            }
+        }
+        Err(e) => eprintln!("warning: cannot serialize the shim record ({e})"),
+    }
+}
+
+/// The error for a dependency still carrying `"?"` prototypes, or `None`.
+///
+/// One message, used from both the places that can reach a placeholder, so the
+/// answer reads the same whether it came from `jade run` or `jade check`.
+///
+/// It names the symbols because the fix is per-symbol, and it shows the shape
+/// to write because "fill in the prototype" is not an instruction anyone can
+/// act on without an example. Long tables are cut off — a two hundred symbol
+/// library would otherwise bury the two lines that say what to do.
+pub fn unresolved_report(name: &str, entry: &crate::project::DependencyEntry) -> Option<String> {
+    const SHOWN: usize = 8;
+
+    let missing = entry.unresolved_symbols();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let mut listed = missing.iter().take(SHOWN).copied().collect::<Vec<_>>().join(", ");
+    if missing.len() > SHOWN {
+        listed.push_str(&format!(", and {} more", missing.len() - SHOWN));
+    }
+    let example = missing[0];
+
+    // Without a header the shim writes its own declaration of each symbol, and
+    // `int` there is Jade's width rather than the library's — which `cshim`
+    // refuses, so an example writing it would send the reader to a second
+    // error. `scalar:<ctype>` is what that case takes, and it is legal with a
+    // header too; the plain spelling is shown only where it is the easier one.
+    let scalar = if entry.headers.is_none() { "scalar:<ctype>" } else { "int" };
+
+    Some(format!(
+        "dependency '{name}' has {n} symbol{s} with no signature yet: {listed}\n  \
+         A shared library says what it exports and nothing more — C keeps no argument or return \
+         types in\n  a compiled artifact — so these went into jade.toml as \"?\" for you to fill \
+         in.\n  Point at the library's header and they are generated for you, all at once:\n    \
+         jade pkg bind {name} --header <its header.h>\n  \
+         Or write each one out, naming the C type the library declares:\n    \
+         [dependencies.{name}.symbols.{example}]\n    \
+         args = [\"{scalar}\", \"{scalar}\"]\n    \
+         ret  = \"{scalar}\"",
+        n = missing.len(),
+        s = if missing.len() == 1 { "" } else { "s" },
+    ))
+}
+
+/// The same check across the whole manifest, for callers with no lock in hand.
+///
+/// `jade check` claims to be an honest predictor of whether `jade run` will
+/// accept a file, and a placeholder is something `jade run` refuses. Checking
+/// costs a manifest read that has already happened, so the claim holds without
+/// `check` doing any of the installing it deliberately avoids.
+pub fn check_symbols_resolved(manifest: &ProjectManifest) -> Result<(), String> {
+    let Some(deps) = &manifest.dependencies else { return Ok(()) };
+    for (name, entry) in deps {
+        if let Some(e) = unresolved_report(name, entry) {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Generate and compile a binding shim for every `abi = "c"` dependency.
+///
+/// Runs after [`materialize`], against the manifest rather than the lock: the
+/// symbol table is user-declared configuration, not a resolution result.
+pub fn build_c_shims(
+    root: &Path,
+    lock: &Lockfile,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
+    let Some(deps) = &manifest.dependencies else {
+        return Ok(());
+    };
+
+    for pkg in &lock.packages {
+        if pkg.abi != crate::project::Abi::C.as_str() {
+            continue;
+        }
+        let Some(entry) = deps.get(&pkg.name) else { continue };
+        // A C library with no symbol table has no binding, and a plain C library
+        // is exactly what the loader cannot take. Skipping used to install it
+        // raw, report success, and leave the program to fail at run time with
+        // "missing jade_pkg_init" — which names a symbol rather than the fact
+        // that the dependency was never bound.
+        let Some(symbols) = &entry.symbols else {
+            return Err(format!(
+                "dependency '{0}' is a C library with no symbols, so no binding was generated.\n  \
+                 Jade cannot load a plain C library directly — it needs a table of the functions \
+                 to bind, which is read from the library's header:\n    \
+                 jade pkg add {0} --path <the .dylib> --header <its header.h>\n  \
+                 Or write a [dependencies.{0}.symbols] table by hand.",
+                pkg.name
+            ));
+        };
+
+        // A `"?"` is a prototype nobody has written yet, and it cannot be
+        // guessed on the way past — see `project::UNRESOLVED`. Refusing here
+        // means the answer arrives at `jade run` naming the manifest, rather
+        // than as `cc` failing on `?` as a type name.
+        if let Some(e) = unresolved_report(&pkg.name, entry) {
+            return Err(e);
+        }
+
+        let (_, artifact) = select_artifact(pkg, fetch::platform_tag())?;
+        let dir = root.join(LIBS_DIR).join(pkg.install_dir());
+        let shim_c = dir.join(format!("{}_shim.c", pkg.name));
+        let shim_out = dir.join(shim_filename(&pkg.name));
+
+        let empty_structs = std::collections::HashMap::new();
+        let structs = entry.structs.as_ref().unwrap_or(&empty_structs);
+        let headers = entry.headers.as_deref().unwrap_or(&[]);
+        let source = cshim::generate(&pkg.name, symbols, structs, headers)?;
+
+        // Skip the compile when nothing changed — reinstalls are common and cc
+        // is not cheap. Three things have to still hold, and each one used to be
+        // checked more weakly or not at all:
+        //
+        //   the source we would generate is the source on disk — the declared
+        //   symbols and structs have not moved;
+        //
+        //   the shim on disk is the one this project built — byte for byte,
+        //   against the record beside it. The old test was "the shim is newer
+        //   than the library", which any substituted file passes: swapping in
+        //   another package's shim survived every install and ran its symbols
+        //   under this dependency's name;
+        //
+        //   it was linked against the library the lock now pins. That used to be
+        //   a timestamp comparison too, and a rebuilt local dependency whose
+        //   mtime went backwards kept the old shim.
+        let same_source = std::fs::read_to_string(&shim_c).is_ok_and(|s| s == source);
+        let record = read_shim_record(&dir);
+        let built_here = record.as_ref().is_some_and(|r| {
+            r.target_sha256 == artifact.sha256
+                && std::fs::read(&shim_out).is_ok_and(|b| fetch::sha256_hex(&b) == r.sha256)
+        });
+        if same_source && built_here {
+            continue;
+        }
+
+        // A shim that exists, was recorded, and no longer matches its record is
+        // not a stale build — it is a different file in the place the loader
+        // will open. Rebuilding fixes it either way; saying so is what tells
+        // someone their `libs/` was written to behind them.
+        if let Some(r) = &record
+            && shim_out.exists()
+            && std::fs::read(&shim_out).is_ok_and(|b| fetch::sha256_hex(&b) != r.sha256)
+        {
+            eprintln!(
+                "note: {} did not match what was built for dependency '{}' and is being rebuilt",
+                shim_filename(&pkg.name),
+                pkg.name
+            );
+        }
+
+        std::fs::write(&shim_c, &source).map_err(|e| {
+            format!("dependency '{}': cannot write {} ({e})", pkg.name, shim_c.display())
+        })?;
+
+        compile_shim(
+            &pkg.name,
+            &shim_c,
+            &shim_out,
+            &dir,
+            &artifact.file,
+            entry.include_dirs.as_deref().unwrap_or(&[]),
+            entry.defines.as_deref().unwrap_or(&[]),
+        )?;
+
+        write_shim_record(&dir, &shim_filename(&pkg.name), &shim_out, &artifact.sha256);
+    }
+
+    Ok(())
+}
+
+/// Link the shim against the target library.
+fn compile_shim(
+    name: &str,
+    shim_c: &Path,
+    out: &Path,
+    dir: &Path,
+    target_file: &str,
+    include_dirs: &[String],
+    defines: &[String],
+) -> Result<(), String> {
+    let mut cc = std::process::Command::new("cc");
+    if cfg!(target_os = "macos") {
+        cc.arg("-dynamiclib");
+    } else {
+        cc.arg("-shared");
+    }
+    // A header that is not on the default search path — Homebrew's, most often.
+    for inc in include_dirs {
+        cc.arg(format!("-I{inc}"));
+    }
+    // The same macros the header was *read* with. The shim includes it too, so
+    // one that raises `#error` without `PCRE2_CODE_UNIT_WIDTH` would bind
+    // cleanly and then fail to compile a stage later, which is a worse place to
+    // find out.
+    for d in defines {
+        cc.arg(format!("-D{d}"));
+    }
+    // C lets a function be called with no declaration in scope, assuming it
+    // returns `int` and taking the arguments at face value. For this shim that
+    // is never right and never survivable: a call that really returns a pointer
+    // comes back truncated to 32 bits, and the crash lands several calls later
+    // with nothing pointing at the cause. It means the manifest names a symbol
+    // whose header is missing from `headers`, so the error says that.
+    // The owned-string helper releases its per-thread buffer through a pthread
+    // key, which is the only thread-exit hook C has. Harmless where pthreads
+    // already live in libc — every macOS build, and glibc from 2.34 — and
+    // required where they do not.
+    cc.arg("-Werror=implicit-function-declaration")
+        .arg("-pthread")
+        .arg("-fPIC")
+        .arg(shim_c)
+        .arg("-o")
+        .arg(out)
+        // Link the target directly by path: it has no `lib<name>` naming
+        // convention to rely on after being renamed on install.
+        .arg(dir.join(target_file));
+
+    // Both loaders must find the target next to the shim at runtime, since
+    // `libs/` is not on any search path. On Linux $ORIGIN in an rpath does
+    // that; macOS needs a post-link fixup (below) because the target's baked-in
+    // install name is what gets recorded.
+    #[cfg(target_os = "linux")]
+    cc.arg("-Wl,-rpath,$ORIGIN");
+
+    let result = cc
+        .output()
+        .map_err(|e| format!("dependency '{name}': cannot run cc ({e}) — a C compiler is required to bind a C library"))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        // An undefined symbol here means the manifest declares something the
+        // target library does not export. Say so, rather than surfacing raw
+        // linker output the user has to decode.
+        let hint = if stderr.contains("implicit-function-declaration") {
+            format!(
+                "\n  A symbol in the manifest is declared by no header the shim includes, so C \
+                 would have\n  guessed its prototype. Add the header that declares it:\n    \
+                 jade pkg bind {name} --header <that header.h>"
+            )
+        } else if stderr.contains("undefined") {
+            format!(
+                "\n  A declared symbol is missing from the library. Check the \
+                 [dependencies.{name}.symbols] names against `nm -gU` on the artifact."
+            )
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "dependency '{name}': could not build the C binding shim{hint}\n{}",
+            stderr.trim()
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    retarget_macos_load_path(name, out, dir, target_file)?;
+
+    Ok(())
+}
+
+/// Point the shim's dependency at the target sitting beside it.
+///
+/// macOS records a dylib's own **install name** (`LC_ID_DYLIB`) in whatever
+/// links against it — here that is whatever the package author built with, e.g.
+/// `libplainc.dylib`. `libs/` is on no search path, so dyld fails at load with
+/// "Library not loaded". Rewriting the shim's reference to `@loader_path/...`
+/// makes it resolve relative to the shim itself.
+///
+/// The fixup is applied to the **shim**, never the artifact: the artifact's
+/// SHA-256 is pinned in `jade.lock`, and editing it in place would make the
+/// next install see a checksum mismatch and re-download.
+#[cfg(target_os = "macos")]
+fn retarget_macos_load_path(
+    name: &str,
+    shim: &Path,
+    dir: &Path,
+    target_file: &str,
+) -> Result<(), String> {
+    // A stub is left alone. The install name it carries — `/usr/lib/libz.1.dylib`
+    // — is exactly what the shim should keep asking for, because dyld resolves
+    // it from the shared cache. Rewriting it to `@loader_path/libz.tbd` would
+    // point the shim at a text file that is not loadable by anything.
+    if std::fs::read(dir.join(target_file))
+        .ok()
+        .and_then(|b| crate::pkg::bindgen::tbd_install_name(&b))
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    // `otool -D` prints the target's install name — exactly the string the
+    // linker recorded, so the -change below matches precisely.
+    let out = std::process::Command::new("otool")
+        .arg("-D")
+        .arg(dir.join(target_file))
+        .output()
+        .map_err(|e| format!("dependency '{name}': cannot run otool ({e})"))?;
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(install_name) = text.lines().nth(1).map(str::trim).filter(|s| !s.is_empty()) else {
+        // No install name recorded (a bundle, or an object built without one) —
+        // nothing was written into the shim to rewrite.
+        return Ok(());
+    };
+
+    let status = std::process::Command::new("install_name_tool")
+        .arg("-change")
+        .arg(install_name)
+        .arg(format!("@loader_path/{target_file}"))
+        .arg(shim)
+        .output()
+        .map_err(|e| format!("dependency '{name}': cannot run install_name_tool ({e})"))?;
+
+    if !status.status.success() {
+        return Err(format!(
+            "dependency '{name}': could not point the binding shim at its library\n{}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
+// ── Manifest / lock agreement ─────────────────────────────────────────────────
+
+/// Check `jade.lock` still describes `[dependencies]`.
+///
+/// Reports every discrepancy at once rather than the first, so editing a
+/// manifest by hand does not turn into a sequence of one-error runs.
+pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(), String> {
+    let empty = Default::default();
+    let deps = manifest.dependencies.as_ref().unwrap_or(&empty);
+
+    let mut missing: Vec<&str> =
+        deps.keys().filter(|n| lock.get(n).is_none()).map(String::as_str).collect();
+    let mut stale: Vec<&str> = lock
+        .packages
+        .iter()
+        .filter(|p| !deps.contains_key(&p.name))
+        .map(|p| p.name.as_str())
+        .collect();
+    // The two can also name the same dependency and disagree about what it is.
+    // Comparing only names let a lock saying `abi = "jade"` outlive a manifest
+    // corrected to `abi = "c"`: the build read the lock, skipped the shim, and
+    // loaded a plain C library as though it were a Jade package. Which of the
+    // two is right is not for this function to decide — they simply must agree.
+    let mut disagreed: Vec<String> = deps
+        .iter()
+        .filter_map(|(name, entry)| {
+            let locked = lock.get(name)?;
+            (locked.abi != entry.abi.as_str()).then(|| {
+                format!(
+                    "{name} (jade.toml says {}, jade.lock says {})",
+                    entry.abi.as_str(),
+                    locked.abi
+                )
+            })
+        })
+        .collect();
+    missing.sort();
+    stale.sort();
+    disagreed.sort();
+
+    if missing.is_empty() && stale.is_empty() && disagreed.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from("jade.lock is out of sync with jade.toml");
+    if !missing.is_empty() {
+        msg.push_str(&format!("\n  in jade.toml but not locked: {}", missing.join(", ")));
+    }
+    if !stale.is_empty() {
+        msg.push_str(&format!("\n  locked but not in jade.toml: {}", stale.join(", ")));
+    }
+    if !disagreed.is_empty() {
+        msg.push_str(&format!("\n  locked with a different ABI: {}", disagreed.join(", ")));
+    }
+    msg.push_str("\nRun `jade pkg install` to update the lock.");
+    Err(msg)
+}
+
+// ── Integration with import resolution ────────────────────────────────────────
+
+/// Present locked dependencies as `[lib]` entries.
+///
+/// This is the whole integration surface. Each dependency becomes a library
+/// whose directory is its `libs/` install dir and whose single importable file
+/// is this platform's artifact — so `use fastmath` resolves through exactly the
+/// same code path as a hand-written `[lib.fastmath]`, in both backends.
+///
+/// A dependency with no artifact for this platform is skipped rather than
+/// failing here: this runs on the import path, where the useful error is
+/// "unknown module", and the actionable one comes from [`materialize`].
+pub fn dependency_libraries(
+    root: &Path,
+    lock: &Lockfile,
+) -> std::collections::HashMap<String, LibraryEntry> {
+    let platform = fetch::platform_tag();
+    let mut out = std::collections::HashMap::new();
+
+    for pkg in &lock.packages {
+        if let Ok((_, artifact)) = select_artifact(pkg, platform) {
+            let entry = if is_source(pkg) {
+                source::library(root, pkg, artifact)
+            } else {
+                LibraryEntry {
+                    path: format!("{LIBS_DIR}/{}", pkg.install_dir()),
+                    files: Some(vec![module_file(pkg, artifact)]),
+                    ..Default::default()
+                }
+            };
+            out.insert(pkg.name.clone(), entry);
+        }
+    }
+
+    out
+}
+
+/// Make a project's dependencies usable: check the lock agrees with the
+/// manifest, then materialize this platform's artifacts.
+///
+/// Called before the VM starts, so `jade run` in a fresh clone fetches what
+/// `jade.lock` pins rather than failing with an unhelpful import error — the
+/// same implicit-fetch behavior as `cargo run`. A project with no dependencies
+/// does no work and touches no network.
+pub fn ensure_ready(root: &Path, manifest: &ProjectManifest) -> Result<(), String> {
+    let has_deps = manifest.dependencies.as_ref().is_some_and(|d| !d.is_empty());
+    if !has_deps {
+        return Ok(());
+    }
+
+    // Before the lock, because an unfilled prototype is not something
+    // installing can fix. Sending the user to `jade pkg install` first would
+    // cost them a step to arrive at this same message.
+    check_symbols_resolved(manifest)?;
+
+    let mut lock = lock::read(root)?.ok_or_else(|| {
+        "jade.toml declares [dependencies] but there is no jade.lock — \
+         run `jade pkg install` to resolve and pin them"
+            .to_string()
+    })?;
+
+    verify_in_sync(manifest, &lock)?;
+
+    // Pick up a rebuilt local dependency before installing, so `jade run` uses
+    // the library as it is now rather than as it was when it was added.
+    let changed = refresh_local(root, &mut lock);
+    if !changed.is_empty() {
+        eprintln!("note: re-pinned {} (local source changed)", changed.join(", "));
+        // A read-only checkout is not a reason to refuse to run: the refreshed
+        // digest lives in memory and the correct bytes still get installed. The
+        // lock is just left for the next writable run to update.
+        if let Err(e) = lock::write(root, &lock) {
+            eprintln!("warning: could not update jade.lock ({e})");
+        }
+    }
+
+    materialize(root, &lock, &fetch::HttpFetcher::new())?;
+    build_c_shims(root, &lock, manifest)
+}
+
+/// Every library visible to imports: the manifest's `[lib]` entries plus the
+/// locked dependencies.
+///
+/// This is what the CLI and the AOT resolver hand to import resolution in place
+/// of a bare `manifest.lib`. A missing or unreadable `jade.lock` degrades to
+/// just the manifest's entries rather than failing — this runs on the import
+/// path, and the actionable diagnostics belong to `jade pkg install`.
+///
+/// **A manifest `[lib]` wins over a dependency of the same name**, so a project
+/// can always shadow something it depends on. The shadow is reported, because
+/// silently ignoring a declared dependency is the kind of thing that costs an
+/// afternoon.
+pub fn resolved_libraries(
+    root: &Path,
+    manifest: &ProjectManifest,
+) -> std::collections::HashMap<String, LibraryEntry> {
+    let mut out = match lock::read(root) {
+        Ok(Some(l)) => dependency_libraries(root, &l),
+        Ok(None) => std::collections::HashMap::new(),
+        Err(e) => {
+            eprintln!("warning: {e}");
+            std::collections::HashMap::new()
+        }
+    };
+
+    if let Some(libs) = &manifest.lib {
+        for (name, entry) in libs {
+            if out.insert(name.clone(), entry.clone()).is_some() {
+                eprintln!(
+                    "warning: [lib.{name}] in jade.toml shadows the dependency of the same \
+                     name; the local library is being used"
+                );
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests;

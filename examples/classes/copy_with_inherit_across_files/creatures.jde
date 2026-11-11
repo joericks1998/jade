@@ -1,0 +1,6 @@
+// The module the fixture beside this one inherits from.
+
+class Animal {
+    @public name,
+    @public let legs = 4
+}

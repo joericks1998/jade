@@ -1,0 +1,13 @@
+// A parent call runs on the object whose method makes it.
+//
+// `Animal::speak()` passes on the current `self`, so it needs one: it works only
+// inside a method of Animal or of a class that inherits from it.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Animal {
+    @public name
+    @public fn speak() { return "..." }
+}
+
+print(Animal::speak())

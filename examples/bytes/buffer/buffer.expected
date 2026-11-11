@@ -1,0 +1,14 @@
+b"\xff\x00\x00\x01"
+255
+1
+b"\x07\x07\x07"
+b"\x02\x02\x02"
+b"\x02\t\x02"
+b"\x01\xc8\x03"
+jade
+Ja
+jade
+refused an index past the end
+refused a negative index
+refused a value above 255
+refused a negative value

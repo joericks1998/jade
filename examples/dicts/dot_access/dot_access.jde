@@ -1,29 +1,34 @@
-// Reading a dict entry with a dot: `d.key` is `d["key"]`.
+// A dot reads a class field, and the same field reads by name in brackets.
 //
-// This worked interpreted and raised "value has no fields" compiled, because
-// the compiled runtime's field read handled structs and nothing else. It took
-// out anything that hands back a dict — `sh.output(cmd).code` was the way it
-// was found — and the failure was at run time, in the built binary only.
-//
-// Method calls were never affected: codegen rewrites `d.keys()` into a direct
-// call rather than a field read, so the gap only ever showed on data keys,
-// which is what kept it hidden.
+// v1 also let `d.key` read a dict entry. It once raised "value has no fields" in
+// compiled programs only, and was found through `sh.output(cmd).code`. In v2 a
+// dot reads a class field and nothing else, and a dict reads with brackets;
+// dot_access_error.jde pins the refusal. A std result that used to be a dict,
+// such as sh.output's, is a class now, so both spellings still read it.
+use std::sh
 
-let d = {"code": 0, "stdout": "hi", "nested": {"deep": 7}}
+let r = sh.output("printf hi")
+print(r.code)
+print(r.stdout)
 
-print(d.code)
-print(d.stdout)
+// Bracket and dot are the same read on a class.
+print(r["code"] == r.code)
+
+// Nested classes read through one dot each.
+class Inner {
+    @public deep
+}
+class Outer {
+    @public code
+    @public nested
+}
+let d = Outer { code: 0, nested: Inner { deep: 7 } }
 print(d.nested.deep)
 
-// Bracket and dot are the same read.
-print(d["code"] == d.code)
-
-// Methods still work, and are not entries.
-print(d.keys().len())
-
-// A key that is not there is an error either way, not a nil.
+// A dict key that is not there is an error, not a nil.
+let m = {"k": 1}
 try {
-    print(d.missing)
+    print(m["missing"])
 } catch e {
     print("missing key raises")
 }

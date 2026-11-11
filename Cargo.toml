@@ -1,77 +1,32 @@
-[package]
-name = "jade"
-version = "1.4.8"
-edition = "2024"
-description = "A language for LLMs"
-build = "src/runtime_aot/build.rs"
-license = "MIT"
-
-
-# `jade-runtime` is a workspace member, not merely a path dependency, and
-# `default-members` names it explicitly. Both halves matter:
+# The repo's workspace. It holds two programs, each a directory with its own
+# Cargo.toml, README.md and src/, and each with its own version and releases:
 #
-#  * Cargo only *uplifts* a build artifact to `target/<profile>/` when the crate
-#    is built as a requested top-level target. As a plain dependency, the
-#    staticlib was produced but left in `target/<profile>/deps/` under a hashed
-#    name, so the `-L target/<profile> -ljade_runtime` that `codegen/mod.rs`
-#    passes to the linker could not find it and every `jade build` failed with
-#    "cannot find -ljade_runtime". It only appeared to work on developer
-#    machines, where a stray `cargo build -p jade-runtime` had left an unhashed
-#    copy behind — a clean checkout on any platform was broken.
+# - compiler/: `jade`, the compiler and the rest of the toolchain. Needs LLVM 18.
+# - dovata/: the process that holds a model's memory and plans it for the
+#   compiler. Needs no LLVM.
 #
-#  * Without a `[workspace]`, `cargo test` never built or ran `jade-runtime`'s
-#    own test suite, so its ~70 tests were invisible to CI.
-#
-# `libjade_runtime.a` is a shipped artifact of this toolchain, not an
-# implementation detail — `jade build` links it into every binary it emits — so
-# it belongs at a stable, predictable path.
+# A bare cargo command here means the compiler, through default-members, so
+# `cargo build` and `cargo test` work as they always have. Name dovata's
+# packages with -p: `cargo build -p dovata`.
 [workspace]
-members = ["src/runtime"]
-default-members = [".", "src/runtime"]
-# `src/protocol` is the ovata-infer-protocol submodule. This repo uses only its
-# `jade/infer.jde`, never its Rust crate — that dependency went with the daemon in
-# v1.1.30 — so it stays out of the workspace. Excluded rather than ignored, so
-# running cargo inside the submodule does not pick up this workspace.
-exclude = ["src/protocol"]
+members = [
+    "compiler",
+    "dovata",
+    # `dovata-chat-template`: the optional chat-template package for Jade users. Its
+    # own crate because templates are the programmer's to choose; dovata's plan carries
+    # the tokenizer, and this package uses dovata's vocabulary check. See its README.
+    "dovata/src/chat_template",
+    # `refback`: dovata's test-only reference backend. It sets up a plan's memory for
+    # real and checks every tensor against the model file, so it needs unsafe code and
+    # Apple's Metal framework, neither of which belongs in dovata. Never published.
+    "dovata/src/refback",
+]
+default-members = ["compiler"]
+# The resolver the compiler's edition, 2024, picked when it was the root package.
+resolver = "3"
 
-[dependencies]
-jade-runtime = { path = "src/runtime" }
-clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-async-trait = "0.1"
-async-recursion = "1"
-parking_lot = "0.12"
-# Fast, non-cryptographic hasher for the VM's hot maps (globals, method/struct
-# tables). Variable names are short internal keys, not attacker-controlled hash
-# inputs, so the default SipHash's DoS resistance buys nothing and costs ~10% of
-# interpreter time in call-heavy code — FxHash is several times faster on them.
-rustc-hash = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-# Format-preserving TOML, used by `jade add`/`jade remove` to edit a user's
-# jade.toml without discarding their comments and layout the way a
-# parse-and-reserialize round-trip would. Already in the tree as a dependency
-# of `toml`, so declaring it costs no extra build.
-toml_edit = "0.22"
-bincode = "1"
-sha2 = "0.10"
-libloading = "0.8"
-# LLVM 18 backend for the AOT codegen module (src/aot/). `jade build`
-# compiles in-process — there is no build daemon — so this is a hard dependency
-# and LLVM 18 must be present to build the toolchain. Locate it with
-# LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
-inkwell = { version = "0.8", features = ["llvm18-1"] }
-
-[features]
-default = []
-# Phase-0 allocation profiler: replaces the `jade` binary's global allocator with
-# a size-class-histogram wrapper (src/alloc/profile.rs). Measurement only, never
-# a release build. Declared in the binary, never in jade-runtime, so it cannot
-# reach a dlopen'd package.
-alloc-profile = []
-
-[build-dependencies]
-# Compiles the C runtime (runtime_aot/) that emitted AOT binaries link against.
-cc = "1"
+# What dovata's crates inherit. The compiler sets its own edition, 2024.
+[workspace.package]
+edition = "2021"
+authors = ["JADE OS Contributors"]
+license = "MIT"

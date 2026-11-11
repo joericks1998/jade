@@ -1,0 +1,54 @@
+// Members are private unless marked @public.
+//
+// A private field or method can be used by the class's own methods, and by the
+// methods of every class that inherits from it, and nowhere else. Marking one
+// @public makes it visible to the rest of the program. private_field_error.jde
+// pins the refusal.
+//
+// A literal written outside a class may set only its public fields, so a class
+// whose private fields need values from outside builds itself in a
+// constructor, `fn new(…)`. The constructor is the one member with no `self`,
+// because there is no value yet, and it is called as `Account::new(…)`.
+// constructor_required_error.jde shows what happens without one.
+
+class Account {
+    @public owner
+    balance
+    let history = []
+
+    @public fn new(owner, opening)
+    @public fn deposit(n) {
+        self.balance = self.balance + n
+        self.record(n)
+    }
+    @public fn balance_text() { return f"{self.owner}: {self.balance}" }
+
+    // Private: only Account and its children may call it.
+    fn record(n) { self.history.push(n) }
+}
+
+fn Account::new(owner, opening) {
+    return Account { owner: owner, balance: opening }
+}
+
+// A child sees its parent's private members.
+class Savings(Account) {
+    @public rate
+
+    @public fn add_interest() {
+        let interest = self.balance * self.rate / 100
+        self.balance = self.balance + interest
+        self.record(interest)
+    }
+}
+
+let a = Account::new("ann", 10)
+a.deposit(5)
+print(a.balance_text())
+print(a.owner)
+
+// A child's literal outside the class may set only public fields too, so it
+// copies the private ones from a parent built by the constructor.
+let s = Savings { ...Account::new("bob", 100), rate: 5 }
+s.add_interest()
+print(s.balance_text())

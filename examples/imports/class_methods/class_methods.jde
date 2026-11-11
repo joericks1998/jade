@@ -1,0 +1,13 @@
+// A class imported from another file keeps everything the defining file gave
+// it: field defaults and methods. The type is written qualified at the
+// literal (`shapes.Point`) but is the same type the module's own code sees.
+
+use shapes
+
+let p = shapes.Point { x: 3, y: 4 }
+print(p.to_str())
+
+// `y` is omitted, so the default declared in shapes_lib applies.
+let q = shapes.Point { x: 1 }
+print(q.y)
+print(q.to_str())

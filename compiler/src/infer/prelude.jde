@@ -1,0 +1,501 @@
+// The inference prelude: Jade source compiled into every program that
+// dereferences a prompt.
+//
+// Before such a program is checked, `src/infer/rewrite.rs` turns each `?p`
+// into a call to `reply` here, and each `?p |> int` and its kin into a call to
+// one of the `reply_*` functions. This file turns text into the token ids the
+// model takes and its answer back into text. The model itself runs on the GPU,
+// behind `__infer.generate`, which the backend writes from the model's plan.
+//
+// The tokenizer is byte-level BPE, the kind Qwen, Llama 3 and GPT-2 use. Its
+// tables come from the model's plan through `__infer.data`, and are built once,
+// when the program starts, so a task that dereferences a prompt only ever
+// reads them.
+
+use std::__infer
+use std::json
+use std::bytes
+
+// ── the byte alphabet ───────────────────────────────────────────────────────
+
+// Purpose: This function lists the char byte-level BPE writes each byte as:
+// the printable bytes as themselves, the rest moved past 255 in order, so
+// every byte has a visible char.
+fn byte_alphabet() {
+    let out = []
+    let extra = 256
+    let b = 0
+    while b < 256 {
+        let printable = (b >= 33 and b <= 126) or (b >= 161 and b <= 172) or (b >= 174 and b <= 255)
+        if printable {
+            out.push(char(b))
+        } else {
+            out.push(char(extra))
+            extra = extra + 1
+        }
+        b = b + 1
+    }
+    return out
+}
+
+// Purpose: This function maps each char of the byte alphabet back to its
+// byte, by the char's text.
+fn byte_values(alphabet) {
+    let out = {}
+    let b = 0
+    while b < 256 {
+        out[str(alphabet[b])] = b
+        b = b + 1
+    }
+    return out
+}
+
+// ── the tables ──────────────────────────────────────────────────────────────
+
+// Purpose: This function reads the token pieces, one per line in id order.
+fn read_pieces() {
+    return __infer.data(0).split("\n")
+}
+
+// Purpose: This function maps each piece to its id.
+fn read_vocab(pieces) {
+    let out = {}
+    let id = 0
+    for p in pieces {
+        if len(p) > 0 and not out.has(p) {
+            out[p] = id
+        }
+        id = id + 1
+    }
+    return out
+}
+
+// Purpose: This function maps each merge, written `a b`, to its rank.
+fn read_ranks() {
+    let out = {}
+    let rank = 0
+    for m in __infer.data(1).split("\n") {
+        if len(m) > 0 {
+            out[m] = rank
+        }
+        rank = rank + 1
+    }
+    return out
+}
+
+// Purpose: This function reads the added tokens, which are matched in the
+// text before anything else, as `id` then the token's text, one per line.
+fn read_added() {
+    let out = {}
+    for line in __infer.data(2).split("\n") {
+        let space = line.index_of(" ")
+        if space > 0 {
+            out[line.slice(space + 1, len(line))] = int(line.slice(0, space))
+        }
+    }
+    return out
+}
+
+let ALPHABET = byte_alphabet()
+let BYTE_OF = byte_values(ALPHABET)
+let PIECES = read_pieces()
+let VOCAB = read_vocab(PIECES)
+let RANKS = read_ranks()
+let ADDED = read_added()
+let ADDED_TEXT = ADDED.keys()
+// Which pre-tokenizer splits the text: 1 for Qwen 2's, 2 for Llama 3's, 3 for
+// GPT-2's. They differ in how they group digits and spaces.
+let SPLIT = __infer.config(0)
+
+// ── splitting text into words ───────────────────────────────────────────────
+
+// Purpose: This function says whether a char is a letter.
+fn is_letter(c) {
+    return __infer.char_class(c) == 1
+}
+
+// Purpose: This function says whether a char is a number.
+fn is_number(c) {
+    return __infer.char_class(c) == 2
+}
+
+// Purpose: This function says whether a char is white space.
+fn is_space(c) {
+    return __infer.char_class(c) == 3
+}
+
+// Purpose: This function says whether a char ends a line.
+fn is_newline(c) {
+    return c == "\n" or c == "\r"
+}
+
+// Purpose: This function finds where a contraction such as `'s` or `'ll`
+// starting at `i` ends, or returns `i` when there is none.
+fn contraction(cs, i, fold) {
+    let n = len(cs)
+    if cs[i] != "'" or i + 1 >= n {
+        return i
+    }
+    let a = str(cs[i + 1])
+    if fold {
+        a = a.lower()
+    }
+    if a == "s" or a == "t" or a == "m" or a == "d" {
+        return i + 2
+    }
+    if i + 2 < n {
+        let b = str(cs[i + 2])
+        if fold {
+            b = b.lower()
+        }
+        let pair = a + b
+        if pair == "re" or pair == "ve" or pair == "ll" {
+            return i + 3
+        }
+    }
+    return i
+}
+
+// Purpose: This function finds where the word starting at `i` ends, by the
+// model's pre-tokenizer pattern.
+//
+// Inputs:
+// - `cs`: the text's chars.
+// - `i`: where the word starts.
+//
+// Outputs: the index one past the word's last char.
+fn word_end(cs, i) {
+    let n = len(cs)
+    let c = cs[i]
+    let gpt2 = SPLIT == 3
+    let end = contraction(cs, i, not gpt2)
+    if end > i {
+        return end
+    }
+    if gpt2 {
+        // ` ?\p{L}+`, ` ?\p{N}+`, ` ?[^\s\p{L}\p{N}]+`
+        let j = i
+        if c == " " and i + 1 < n {
+            j = i + 1
+        }
+        let d = cs[j]
+        if is_letter(d) {
+            while j < n and is_letter(cs[j]) {
+                j = j + 1
+            }
+            return j
+        }
+        if is_number(d) {
+            while j < n and is_number(cs[j]) {
+                j = j + 1
+            }
+            return j
+        }
+        if not is_space(d) {
+            while j < n and not is_space(cs[j]) and not is_letter(cs[j]) and not is_number(cs[j]) {
+                j = j + 1
+            }
+            return j
+        }
+    } else {
+        // `[^\r\n\p{L}\p{N}]?\p{L}+`
+        let j = i
+        if not is_letter(c) and not is_number(c) and not is_newline(c) and i + 1 < n and is_letter(cs[i + 1]) {
+            j = i + 1
+        }
+        if is_letter(cs[j]) {
+            while j < n and is_letter(cs[j]) {
+                j = j + 1
+            }
+            return j
+        }
+        // `\p{N}` for Qwen 2, `\p{N}{1,3}` for Llama 3
+        if is_number(c) {
+            let most = 1
+            if SPLIT == 2 {
+                most = 3
+            }
+            let k = i
+            while k < n and k - i < most and is_number(cs[k]) {
+                k = k + 1
+            }
+            return k
+        }
+        // ` ?[^\s\p{L}\p{N}]+[\r\n]*`
+        let k = i
+        if c == " " and i + 1 < n {
+            k = i + 1
+        }
+        let d = cs[k]
+        if not is_space(d) and not is_letter(d) and not is_number(d) {
+            while k < n and not is_space(cs[k]) and not is_letter(cs[k]) and not is_number(cs[k]) {
+                k = k + 1
+            }
+            while k < n and is_newline(cs[k]) {
+                k = k + 1
+            }
+            return k
+        }
+        // `\s*[\r\n]+`: the longest run of space that ends a line.
+        let r = i
+        let last_newline = -1
+        while r < n and is_space(cs[r]) {
+            if is_newline(cs[r]) {
+                last_newline = r
+            }
+            r = r + 1
+        }
+        if last_newline >= 0 {
+            return last_newline + 1
+        }
+    }
+    // `\s+(?!\S)`, then `\s+`: a run of space, leaving its last char to the
+    // word that follows it.
+    let r = i
+    while r < n and is_space(cs[r]) {
+        r = r + 1
+    }
+    if r < n and r - i > 1 {
+        return r - 1
+    }
+    if r > i {
+        return r
+    }
+    return i + 1
+}
+
+// ── byte pair encoding ──────────────────────────────────────────────────────
+
+// Purpose: This function encodes one word: its bytes as the byte alphabet,
+// then merged pair by pair, lowest rank first, until no pair merges.
+fn encode_word(word, out) {
+    let symbols = []
+    let raw = word.encode()
+    let k = 0
+    while k < len(raw) {
+        symbols.push(str(ALPHABET[raw[k]]))
+        k = k + 1
+    }
+    while len(symbols) > 1 {
+        let best = -1
+        let at = -1
+        let i = 0
+        while i + 1 < len(symbols) {
+            let pair = symbols[i] + " " + symbols[i + 1]
+            if RANKS.has(pair) {
+                let r = RANKS[pair]
+                if best < 0 or r < best {
+                    best = r
+                    at = i
+                }
+            }
+            i = i + 1
+        }
+        if at < 0 {
+            break
+        }
+        // Merge every occurrence of the best pair, left to right.
+        let left = symbols[at]
+        let right = symbols[at + 1]
+        let merged = []
+        let j = 0
+        while j < len(symbols) {
+            if j + 1 < len(symbols) and symbols[j] == left and symbols[j + 1] == right {
+                merged.push(left + right)
+                j = j + 2
+            } else {
+                merged.push(symbols[j])
+                j = j + 1
+            }
+        }
+        symbols = merged
+    }
+    for s in symbols {
+        if VOCAB.has(s) {
+            out.push(VOCAB[s])
+        }
+    }
+}
+
+// Purpose: This function encodes plain text, with no added tokens in it.
+fn encode_plain(text, out) {
+    let cs = []
+    for c in text {
+        cs.push(c)
+    }
+    let i = 0
+    while i < len(cs) {
+        let end = word_end(cs, i)
+        let word = ""
+        let k = i
+        while k < end {
+            word = word + cs[k]
+            k = k + 1
+        }
+        encode_word(word, out)
+        i = end
+    }
+}
+
+// Purpose: This function turns text into the model's token ids, matching each
+// added token, such as `<|im_start|>`, as its own id first.
+fn encode(text) {
+    let out = []
+    let plain = ""
+    let i = 0
+    let n = len(text)
+    while i < n {
+        let found = ""
+        if text[i] == "<" {
+            for t in ADDED_TEXT {
+                if len(t) > len(found) and text.slice(i, i + len(t)) == t {
+                    found = t
+                }
+            }
+        }
+        if len(found) > 0 {
+            encode_plain(plain, out)
+            plain = ""
+            out.push(ADDED[found])
+            i = i + len(found)
+        } else {
+            plain = plain + text[i]
+            i = i + 1
+        }
+    }
+    encode_plain(plain, out)
+    return out
+}
+
+// Purpose: This function turns token ids back into text. A reply cut off in
+// the middle of a character loses only that character.
+fn decode(ids) {
+    let raw = []
+    for id in ids {
+        let piece = PIECES[id]
+        if ADDED.has(piece) {
+            let utf8 = piece.encode()
+            let k = 0
+            while k < len(utf8) {
+                raw.push(utf8[k])
+                k = k + 1
+            }
+        } else {
+            for c in piece {
+                let key = str(c)
+                if BYTE_OF.has(key) {
+                    raw.push(BYTE_OF[key])
+                }
+            }
+        }
+    }
+    let cut = 0
+    while cut < 4 and cut <= len(raw) {
+        let kept = []
+        let k = 0
+        while k < len(raw) - cut {
+            kept.push(raw[k])
+            k = k + 1
+        }
+        try {
+            return bytes.from_ints(kept).decode()
+        } catch e {
+            cut = cut + 1
+        }
+    }
+    return ""
+}
+
+// ── what a prompt dereference becomes ───────────────────────────────────────
+
+// Purpose: This function maps the model's memory from the dovata process and
+// builds its kernels, the first time a prompt runs. The backend keeps the
+// first mapping when two tasks get here at once.
+fn ensure_model() {
+    if __infer.ready() {
+        return nil
+    }
+    let text = __infer.dovata_map()
+    let r = json.parse(text)
+    if text.starts_with("{\"error\"") {
+        raise f"dovata would not hand out the model: {str(r["error"])}"
+    }
+    for region in r["map"]["regions"] {
+        __infer.map_region(int(region["id"]), int(region["object"]), int(region["offset"]), int(region["bytes"]), bool(region["writable"]))
+    }
+    __infer.setup()
+}
+
+// Purpose: This function sends a prompt's text to the model and returns its
+// reply, tainted, since the program did not write it.
+fn reply(text) {
+    ensure_model()
+    let ids = __infer.generate(encode(text), max_tokens())
+    return __infer.taint(decode(ids))
+}
+
+// Purpose: This function returns the first number a reply holds, as text.
+fn first_number(text) {
+    let out = ""
+    let seen_digit = false
+    for c in text {
+        let digit = c >= char("0") and c <= char("9")
+        if digit {
+            out = out + c
+            seen_digit = true
+        } elif not seen_digit and c == "-" and len(out) == 0 {
+            out = "-"
+        } elif seen_digit and c == "." and not out.contains(".") {
+            out = out + c
+        } elif seen_digit {
+            break
+        } else {
+            out = ""
+        }
+    }
+    if not seen_digit {
+        raise f"the model's reply holds no number: {text}"
+    }
+    return out
+}
+
+// Purpose: This function asks for an int: the first number in the reply.
+fn reply_int(text) {
+    let n = first_number(reply(text))
+    let dot = n.index_of(".")
+    if dot >= 0 {
+        n = n.slice(0, dot)
+    }
+    return int(n)
+}
+
+// Purpose: This function asks for a float: the first number in the reply.
+fn reply_float(text) {
+    return float(first_number(reply(text)))
+}
+
+// Purpose: This function asks for a bool: the first yes, no, true or false.
+fn reply_bool(text) {
+    let r = reply(text).lower()
+    for word in r.split(" ") {
+        let w = word.trim()
+        if w.starts_with("true") or w.starts_with("yes") {
+            return true
+        }
+        if w.starts_with("false") or w.starts_with("no") {
+            return false
+        }
+    }
+    raise f"the model's reply is not yes or no: {r}"
+}
+
+// Purpose: This function asks for a char: the reply's first one that is not
+// space.
+fn reply_char(text) {
+    for c in reply(text) {
+        if not is_space(c) {
+            return c
+        }
+    }
+    raise "the model's reply is empty"
+}

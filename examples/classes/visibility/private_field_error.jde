@@ -1,0 +1,14 @@
+// A private field is not visible outside its class.
+//
+// `balance` has no @public, so only Account's own methods, and those of classes
+// that inherit from it, can read or set it. The message names the fix.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Account {
+    @public owner
+    let balance = 0
+}
+
+let a = Account { owner: "ann" }
+print(a.balance)

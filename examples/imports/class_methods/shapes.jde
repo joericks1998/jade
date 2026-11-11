@@ -1,0 +1,8 @@
+class Point {
+    @public x,
+    @public let y = 10
+
+    @public fn to_str() {
+        return f"({self.x}, {self.y})"
+    }
+}

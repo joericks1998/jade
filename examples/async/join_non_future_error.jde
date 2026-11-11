@@ -1,0 +1,7 @@
+// join awaits futures, so an argument that is not one is refused when the
+// program is checked, settle or not.
+async fn fetch(n) {
+    return n * 10
+}
+
+print(join(fetch(1), 5, settle = true))

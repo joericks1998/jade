@@ -1,0 +1,4 @@
+// `contains` is a str and array method. A dict answers key membership with
+// `has`, and the error says so.
+let d = {"k": 1}
+print(d.contains("k"))

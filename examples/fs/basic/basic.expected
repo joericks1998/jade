@@ -1,0 +1,7 @@
+jade fs eval
+true
+false
+jade fs eval appended
+true
+true
+false

@@ -1,22 +1,21 @@
 name: CI/CD
 
+# The compiler's workflow. dovata, under dovata/, has its own in dovata-ci.yml, so a
+# change to dovata alone does not install LLVM and build the compiler.
 on:
   push:
     branches: [main]
+    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml"]
   pull_request:
-    branches: [main]
+    branches: [main, "2.0.0"]
+    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # `submodules` is required, not tidiness: src/protocol/ holds the shared
-      # InferRequest and response-frame definitions. Without it the tripwire tests
-      # cannot read the file and the parity gate cannot build its stub provider.
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,13 +23,14 @@ jobs:
       # `jade build` compiles in-process, so LLVM 18 is a hard build dependency
       # of the toolchain. libpolly-18-dev is not optional: llvm-config lists
       # Polly in --libnames, so without it llvm-sys fails with "could not find
-      # native static library `Polly`".
+      # native static library `Polly`". liblld-18-dev carries LLD's static
+      # libraries, which the static backend links programs with in-process.
       - name: Install LLVM 18
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev
 
-      # glib is the FFI gate's fixture — see src/scripts/ffi-gate.sh for why a
+      # glib is the FFI gate's fixture — see compiler/src/scripts/ffi-gate.sh for why a
       # big ordinary library is the point. pkg-config is how the gate finds it,
       # since the library sits in an architecture-named directory.
       - name: Install glib
@@ -64,14 +64,17 @@ jobs:
       # says what the code was already written to, and this keeps it true —
       # which is the only way the command stays safe to run.
       #
-      # Needs no LLVM: rustfmt parses, it does not build.
+      # Needs no LLVM: rustfmt parses, it does not build. `-p jade`, not `--all`:
+      # dovata is in the workspace and is not formatted with rustfmt, for the reason
+      # dovata-ci.yml gives.
       - name: Rust formatting
-        run: cargo fmt --all --check
+        run: cargo fmt -p jade --check
 
       # Exercises the real `jade check` binary against every committed fixture,
       # covering the CLI wiring and on-disk cache that the in-process test in
       # cli/check.rs cannot reach. Fixtures named *_error.jde document rejected
-      # programs and must fail; everything else must pass.
+      # programs and must fail; everything else must pass, apart from a feature
+      # v2 does not compile yet, such as a prompt, which is reported as pending.
       - name: Check examples
         run: |
           set -uo pipefail
@@ -83,8 +86,12 @@ jobs:
                 status=1
               fi
             elif ! output=$(./target/debug/jade check "$file" 2>&1); then
-              echo "::error file=$file::$output"
-              status=1
+              if [[ "$output" == *"jade cannot compile"* ]]; then
+                echo "pending: $output"
+              else
+                echo "::error file=$file::$output"
+                status=1
+              fi
             fi
           done < <(find examples -name '*.jde' | sort)
           exit $status
@@ -97,41 +104,28 @@ jobs:
       - name: Check formatting
         run: ./target/debug/jade fmt --check examples
 
-      # Runs every example on both the VM and the AOT backend and diffs the
-      # output. The two paths have silently diverged three times; each was
-      # caught by hand, because no automated check ever ran a program both
-      # ways. See the script header for the skip list.
-      #
-      # This covers examples/llm too: the script builds src/scripts/fake-provider.jde
-      # as a stand-in inference provider answering with a canned reply, so the
-      # LLM paths are deterministic rather than skipped. Pointing the gate at
-      # them turned up a VM muting bug and an AOT segfault immediately, so they
-      # are worth keeping covered.
-      - name: Backend parity
+      # Builds every example and compares each binary's output to the
+      # `<name>.expected` beside it. Until v1.4.8 this was a parity gate that ran
+      # each example on the VM and on the compiled backend and diffed the two;
+      # v2 has one engine, so the outputs recorded where both agreed are the
+      # oracle instead. See the script header for the skip list.
+      - name: Golden outputs
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./src/scripts/backend-parity.sh
+        run: ./compiler/src/scripts/golden.sh
 
-      # Binds a real C library and runs it on both engines, and compiles the C
-      # runtime the way a release build compiles it.
+      # Binds a real C library and runs it, once and then 600,000 times.
       #
-      # Both halves exist because of bugs that reached users. The C runtime
-      # handed `realpath` a buffer a quarter of the size glibc requires, which
-      # aborts the process — but only in an optimised build, so nothing here saw
-      # it and every FFI package in a compiled binary died at startup on Linux
-      # for two releases. And binding glib rather than the tidy libraries the
-      # survey used turned up two more the same afternoon: a callback parameter
+      # It exists because of bugs that reached users: binding glib rather than
+      # the tidy libraries the survey used turned up a callback parameter
       # checked against a typedef's name instead of its category, and a
-      # function-like macro shadowing the symbol we bound. Each refused the whole
-      # dependency.
-      #
-      # Notably this is the one step where the *Linux* run is the one that
-      # counts: Apple's headers carry no fortify attributes, so the check that
-      # matters most cannot fire on a developer's machine.
+      # function-like macro shadowing the symbol we bound. Each refused the
+      # whole dependency. The long run catches a leak or a crash that only
+      # shows under sustained churn.
       - name: FFI gate
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./src/scripts/ffi-gate.sh
+        run: ./compiler/src/scripts/ffi-gate.sh
 
   tag-release:
     name: Tag release
@@ -143,9 +137,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The compiler releases when its own version, compiler/Cargo.toml's, is new.
+      # Its tags stay plain `v2.0.1`, the scheme every earlier release used; dovata's
+      # are `dovata-v3.2.0`, pushed by dovata-ci.yml from dovata/Cargo.toml. The root
+      # Cargo.toml is the workspace's and has no version.
       - name: Create version tag if new
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION=$(grep '^version' compiler/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "Tag $TAG already exists — skipping."

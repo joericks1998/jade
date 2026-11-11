@@ -1,0 +1,39 @@
+// A class can stand in for any of its parents, not only the first.
+//
+// A child's fields start with its first parent's, so it reads as its first
+// parent at no cost. A Duck's `fins` come from Finned, its second parent, and
+// sit after its Winged fields. When a Duck is used as a Finned, the compiled
+// code finds `fins` by the value's class, so reading and writing it through a
+// Finned reaches the Duck's own field.
+
+class Winged {
+    @public span
+    @public fn wings() { return f"wings of {self.span}" }
+}
+
+class Finned {
+    @public fins
+    @public fn swim() { return f"swims with {self.fins} fins" }
+}
+
+class Duck(Winged, Finned) {
+    @public name
+}
+
+class Fish(Finned) {
+    @public scales
+}
+
+// `f` is a Finned: a Fish, or a Duck read through its second parent.
+fn grow(f) {
+    f.fins = f.fins + 1
+    return f.swim()
+}
+
+let d = Duck { span: 2, fins: 0, name: "dot" }
+let swimmers = [Fish { fins: 4, scales: true }, Finned(d)]
+for s in swimmers {
+    print(grow(s))
+}
+print(d.fins)
+print(d.wings())

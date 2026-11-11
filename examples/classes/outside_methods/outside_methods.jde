@@ -1,0 +1,28 @@
+// A method can be defined outside its class, even in another file.
+//
+// `geometry.jde` declares `area` and `scale` in the body of `Rect`, with no
+// body, the way a C++ header declares a method. This file imports the class and
+// defines both as `fn geometry.Rect::area()`, naming the class the way the rest
+// of this file does. Inside, `self` is the receiver, as it is in any method.
+//
+// The class body still lists every method a `Rect` has, which is what makes an
+// outside definition safe: a method the body does not declare cannot be added
+// from here. undeclared_method_error.jde pins that refusal.
+
+use geometry
+
+fn geometry.Rect::area() {
+    return self.width * self.height
+}
+
+fn geometry.Rect::scale(by) {
+    self.width = self.width * by
+    self.height = self.height * by
+}
+
+let r = geometry.Rect { width: 3, height: 4 }
+print(r.describe())
+print(r.area())
+r.scale(2)
+print(r.describe())
+print(r.area())

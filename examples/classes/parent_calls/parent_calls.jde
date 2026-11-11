@@ -1,0 +1,25 @@
+// `Parent::method()` calls a parent's version of a method on the same object.
+//
+// A method that overrides its parent's often wants to run the parent's version
+// too. Inside a method, `Dog::speak()` runs Dog's `speak` with the same `self`,
+// as C++'s `Base::method()` does. It is the same `Class::member` form that
+// defines a method outside its class. parent_call_outside_error.jde shows it
+// refused outside a method.
+
+class Animal {
+    @public name
+    @public fn speak() { return "..." }
+    @public fn intro() { return f"{self.name} says {self.speak()}" }
+}
+
+class Dog(Animal) {
+    @public fn speak() { return "woof" }
+    @public fn both() { return Animal::speak() + " then " + self.speak() }
+}
+
+class Puppy(Dog) {
+    @public fn speak() { return Dog::speak() + "!" }
+}
+
+print(Dog { name: "rex" }.both())
+print(Puppy { name: "bit" }.intro())

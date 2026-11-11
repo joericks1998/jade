@@ -1,18 +1,16 @@
 // A user method is held to the same rule as a built-in one.
 //
 // `arr.push(x)` was rejected and `box.grow()` was not, because a method reaches
-// its receiver as `self` rather than as an argument — so an `extend` method
+// its receiver as `self` rather than as an argument — so a method
 // mutating the receiver had an empty argument list and looked harmless. The
 // receiver counts now.
 //
 // This file is a fixture: `jade check` must REJECT it.
 
-struct Batch {
-    items
-}
+class Batch {
+    @public items
 
-extend Batch {
-    fn grow(self) {
+    @public fn grow() {
         self.items.push(3)
     }
 }

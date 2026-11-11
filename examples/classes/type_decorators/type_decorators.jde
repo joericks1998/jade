@@ -1,0 +1,56 @@
+// Types are decorators.
+//
+// Jade infers types, so a program names one only when it means to convert a
+// value or to declare what a variable or field holds. It does that with a
+// decorator, which sits above the declaration and changes what it binds.
+//
+// - On a built-in type, the decorator converts: `@int let n = "42"` is
+//   `let n = int("42")`.
+// - On a class, it declares the variable's class, which may be a parent of the
+//   value's own: `@Animal let pet = Dog { … }`. That is `Animal(Dog { … })`,
+//   a class view, which class_view_error.jde shows refused for a class the value
+//   does not descend from.
+// - On a field, it gives the field a type in place of a default.
+
+@int
+let n = "42"
+print(n + 1)
+
+@float
+let ratio = 1
+print(ratio)
+
+@str
+let label = 7
+print(label + "!")
+
+class Animal {
+    @public name
+    @public fn speak() { return "..." }
+}
+
+class Dog(Animal) {
+    @public fn speak() { return "woof" }
+}
+
+class Cat(Animal) {
+    @public fn speak() { return "meow" }
+}
+
+// Declared as an Animal, so it may later hold a Cat.
+@Animal
+let pet = Dog { name: "rex" }
+print(pet.speak())
+pet = Cat { name: "tom" }
+print(pet.speak())
+
+// A field with a type and no default. A literal must give it a value of that
+// type, and code that reads it knows what it is.
+class Kennel {
+    @public @int capacity
+    @public @Animal resident
+}
+
+let k = Kennel { capacity: 2, resident: Dog { name: "ace" } }
+print(k.capacity * 10)
+print(k.resident.speak())

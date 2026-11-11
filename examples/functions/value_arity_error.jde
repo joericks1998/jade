@@ -1,0 +1,12 @@
+// Calling a function through a value with the wrong number of arguments is
+// refused when the program is checked. `apply_two` calls its parameter with two
+// arguments, and `exactly_one` takes one.
+fn exactly_one(a) {
+    return a
+}
+
+fn apply_two(f) {
+    return f(3, 2)
+}
+
+print(apply_two(exactly_one))

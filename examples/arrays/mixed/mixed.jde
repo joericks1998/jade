@@ -1,61 +1,47 @@
-// An array literal may hold values of different types.
+// An array holds one kind of value.
 //
-// The element type is whatever every element agrees on, and `Unknown` when they
-// do not — the same rule dicts have always used for their values. Nothing about
-// the array changes at runtime; arrays were never typed there, which is why
-// building one with `push` worked long before the literal was allowed.
+// Until v2, a literal could mix kinds, as in [1, 2.0, true, "hello", nil]. Every
+// value now has one type the compiler knows, so a mixed literal is a type error;
+// mixed_error.jde pins that.
 //
-// This file is a parity fixture as much as a demonstration. Making mixed
-// literals writable made a set of dynamic operations reachable that no example
-// had exercised, and the first one checked turned out to disagree between the
-// engines: `contains` answered in the VM and raised in a compiled binary.
+// Mixed arrays were added for one case: a reply that is several Token frames
+// followed by a Done. That is several kinds of record in one list, which is what
+// a shared parent class says. The array's element type is the parent, and a
+// method each kind defines answers for the value an element actually holds.
 
-let mixed = [1, 2.0, true, "hello", nil]
+class Frame {}
+class Token(Frame) {
+    @public let text = ""
 
-print(len(mixed))
-print(mixed)
-print(mixed[0])
-print(mixed[3])
+    fn describe()
+}
+class Done(Frame) {
+    @public let count = 0
 
-for v in mixed {
-    print(v)
+    fn describe()
 }
 
-// Membership walks past elements of other kinds rather than raising on them. It
-// is a different question from `==`, which is strict across kinds by design.
-print(mixed.contains("hello"))
-print(mixed.contains(true))
-print(mixed.contains("absent"))
+fn Token::describe() {
+    return f"token '{self.text}'"
+}
 
-// Kind-strict even here: 1 and 1.0 are not the same value, matching `1 == 1.0`
-// being a type error rather than true.
-print(mixed.contains(1))
-print(mixed.contains(1.0))
-
-// Mutating operations do not care about element types either.
-mixed.push([1, 2])
-print(len(mixed))
-print(mixed.pop())
-mixed.reverse()
-print(mixed)
-
-// Sorting a mixed array compares any cross-kind pair equal, so comparable runs
-// order and the rest keep their positions. Both engines share that rule.
-let nums = [3, 1.5, 2]
-nums.sort()
-print(nums)
-
-// Nesting, and a homogeneous array inside a mixed one.
-let nested = [[1, 2], "between", [3]]
-print(nested)
-print(nested[0][1])
-
-// An array of structs of different types — the case the inference protocol
-// wanted, where a reply is Token* followed by Done.
-struct Token { let text = "" }
-struct Done  { let count = 0 }
+fn Done::describe() {
+    return f"done after {self.count}"
+}
 
 let frames = [Token { text: "hi" }, Token { text: " there" }, Done { count: 2 }]
 print(len(frames))
-print(frames[0].text)
-print(frames[2].count)
+for fr in frames {
+    print(fr.describe())
+}
+
+// Numbers of one kind sort as numbers. Writing 3.0 rather than 3 keeps every
+// element a float.
+let nums = [3.0, 1.5, 2.0]
+nums.sort()
+print(nums)
+
+// An array of arrays is one kind too.
+let nested = [[1, 2], [3]]
+print(nested)
+print(nested[0][1])

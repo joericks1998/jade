@@ -74,7 +74,9 @@ print(await fb)
 // Exceptions raised inside an async fn propagate through await and are
 // catchable with the normal try/catch mechanism.
 
-struct TaskError { message }
+class TaskError {
+    @public message
+}
 
 async fn risky(n) {
     if n < 0 {

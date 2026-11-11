@@ -1,14 +1,14 @@
-// Struct-typed dereference: the LLM reply is coerced into a declared struct.
+// Class-typed dereference: the LLM reply is coerced into a declared class.
 //
-// The rule matches a struct literal: a field the reply omits takes its declared
+// The rule matches a class literal: a field the reply omits takes its declared
 // default, and fields are set in declaration order. A *required* field the reply
 // omits is the model getting it wrong, so the deref re-prompts rather than
 // filling it with nil.
 
-struct City {
-    name,
-    let population = 7,
-    let country = "unknown"
+class City {
+    @public name,
+    @public let population = 7,
+    @public let country = "unknown"
 }
 
 prompt p = "Describe a city as JSON."

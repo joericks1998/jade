@@ -1,0 +1,8 @@
+// A module inside the package, reached only through its entry module.
+class Shape {
+    @public let label = "shape"
+}
+
+fn kind(s) {
+    return s.label
+}

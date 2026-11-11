@@ -1,0 +1,9 @@
+// A class may not inherit itself, however long the way round.
+
+class A(B) {
+    x
+}
+
+class B(A) {
+    y
+}

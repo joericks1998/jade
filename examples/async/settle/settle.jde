@@ -4,13 +4,13 @@
 // away the ones that worked. For a fan-out that is the wrong answer: eight
 // requests with one failure should still hand back the seven that succeeded.
 //
-// `settle` gives one dict per task instead — `{ok: true, value: v}` or
-// `{ok: false, error: e}` — so nothing is lost and nothing raises. The shape
-// needs no new type, and `error` holds the value the task raised rather than
-// its text, so a struct arrives as a struct.
+// `settle` gives one result per task instead, with three fields: `ok`, `value`
+// and `error`. A task that worked has `ok` true and its `value`; one that raised
+// has `ok` false and the `error` it raised. Each of `value` and `error` may be
+// nil, so a program checks the one it reads, the way it checks any optional.
 
-struct Failed {
-    message
+class Failed {
+    @public message
 }
 
 async fn fetch(n) {
@@ -27,7 +27,10 @@ for r in results {
     if r["ok"] {
         print("got " + str(r["value"]))
     } else {
-        print("lost " + r["error"].message)
+        let err = r["error"]
+        if err != nil {
+            print("lost " + err.message)
+        }
     }
 }
 // → got 10
@@ -51,10 +54,5 @@ print(join(fetch(5), fetch(6), settle = false))
 
 
 // It is a mode, not data: `settle` covers what the tasks did, and does not turn
-// calling `join` wrongly into an outcome.
-try {
-    join(fetch(1), 5, settle = true)
-} catch e {
-    print(e.message.contains("non-Future"))
-}
-// → true
+// calling `join` wrongly into an outcome. Passing it something that is not a
+// future is a compile error; join_non_future_error.jde pins that.

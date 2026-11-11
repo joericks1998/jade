@@ -1,36 +1,28 @@
-// The ends of the integer range are both writable, and both engines agree.
+// The ends of the integer range, and what happens just past them.
 //
-// A Jade integer is 63-bit and the range is asymmetric: INT_MAX is 2^62 - 1 and
-// INT_MIN is -(2^62). A literal is lexed without its sign — `-` is a separate
-// token the parser applies — so bounding the bare magnitude at INT_MAX meant
-// the magnitude of INT_MIN, which is one larger, was rejected. The smallest
-// representable integer could not be written down at all.
+// A Jade 2.0 int is a full signed 64-bit integer, so the range runs from
+// -9223372036854775808 to 9223372036854775807. A result past either end raises
+// `integer overflow` rather than wrapping.
+//
+// The bounds are built by arithmetic here, because a literal is still limited to
+// 2^62 until the tagged backend, whose ints are 63-bit, is removed. For the same
+// reason this example runs only on the static backend.
 
-let lo = -4611686018427387904
-let hi = 4611686018427387903
+let hi = 4611686018427387903 * 2 + 1
+let lo = -hi - 1
 
 print(lo)
 print(hi)
-// → -4611686018427387904
-// → 4611686018427387903
-
-// They are ordinary integers.
 print(lo + 1)
 print(hi - 1)
 print(lo < hi)
-// → -4611686018427387903
-// → 4611686018427387902
-// → true
 
-// And the ends are still ends: stepping past either one overflows rather than
-// wrapping.
 try {
     let x = lo - 1
     print(x)
 } catch e {
     print("underflow caught")
 }
-// → underflow caught
 
 try {
     let x = hi + 1
@@ -38,4 +30,3 @@ try {
 } catch e {
     print("overflow caught")
 }
-// → overflow caught

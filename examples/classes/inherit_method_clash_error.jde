@@ -1,0 +1,29 @@
+// Two parents may not supply the same method.
+//
+// A child's own method wins over an inherited one, because the child is nearer.
+// Two parents are the same distance away, so there is no nearer, and the
+// program has to say which it meant.
+
+class Swimmer {
+    depth
+
+    fn go()
+}
+
+class Runner {
+    pace
+
+    fn go()
+}
+
+fn Swimmer::go() {
+    return "swim"
+}
+
+fn Runner::go() {
+    return "run"
+}
+
+class Triathlete(Swimmer, Runner) {
+    name
+}

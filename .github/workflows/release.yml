@@ -1,5 +1,7 @@
 name: Release
 
+# The compiler's release, from a `v*` tag such as v2.0.1. dovata's tags start with
+# `dovata-v`, which this pattern does not match; dovata-release.yml publishes those.
 on:
   push:
     tags:
@@ -34,7 +36,6 @@ jobs:
             # Provider `.so`s on `providers-latest` are named `<name>-<platform>.so`,
             # where <platform> is the pkg-fetcher tag (fetch::platform_tag), NOT the
             # archive's `linux-x86_64` label — they happen to match here but not on macOS.
-            provider_platform: linux-x86_64
 
           # macOS ships arm64 only. Intel (x86_64) was dropped: the release
           # binary links LLVM 18 in-process, and cross-compiling x86_64 on the
@@ -46,13 +47,11 @@ jobs:
             target: aarch64-apple-darwin
             archive: jade-macos-arm64.tar.gz
             binary: jade
-            provider_platform: darwin-aarch64
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.client_payload.tag || github.ref }}
-          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +65,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev
           echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> "$GITHUB_ENV"
 
       - name: Install LLVM 18 (macOS)
@@ -78,45 +77,14 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      # The tarball ships the toolchain, not just the binary: `jade build` links
-      # libJadeRuntime.a (C) and libjade_runtime.a (Rust) into every executable
-      # it emits. Shipping only `jade` left installed users with a working
-      # `jade run` and a `jade build` that failed with "cannot find
-      # -lJadeRuntime", because the paths baked in at compile time point into
-      # this runner's target/ directory. Layout is `jade` + `lib/*.a`, which
-      # install.sh unpacks to <prefix>/bin and <prefix>/lib/jade.
-      # Bundle the provider packages so a fresh install ships them and `jade
-      # register` finds them under <prefix>/lib/jade/providers/. The `.so`s are
-      # built by the dovata repo and staged on this repo's `providers-latest`
-      # release; we pull this platform's set and strip the `-<platform>` suffix
-      # so the file stem is the provider name. Idempotent — skips cleanly until
-      # the first publish creates the release (same guard as deploy-docs.yml).
-      - name: Bundle provider packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p dist/lib/providers
-          if gh release view providers-latest >/dev/null 2>&1; then
-            tmp="$(mktemp -d)"
-            gh release download providers-latest --dir "$tmp" \
-              --pattern "*-${{ matrix.provider_platform }}.so" || true
-            for f in "$tmp"/*-${{ matrix.provider_platform }}.so; do
-              [ -e "$f" ] || continue
-              base="$(basename "$f")"
-              name="${base%-${{ matrix.provider_platform }}.so}"
-              cp "$f" "dist/lib/providers/$name.so"
-            done
-            echo "Bundled providers:"; ls -l dist/lib/providers/ || true
-          else
-            echo "::notice::no providers-latest release yet — shipping without bundled providers"
-          fi
-
+      # The tarball holds the one binary. Until Jade 2.0 it also shipped the two
+      # runtime archives every program linked against; a program now links the
+      # C library alone, through the LLD inside `jade`, so there is nothing else
+      # to install.
       - name: Package
         run: |
-          mkdir -p dist/lib
+          mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/jade
-          cp target/${{ matrix.target }}/release/libJadeRuntime.a dist/lib/
-          cp target/${{ matrix.target }}/release/libjade_runtime.a dist/lib/
           tar -czf ${{ matrix.archive }} -C dist .
 
       - name: Upload artifact
@@ -164,6 +132,10 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
+          # The repo's latest release is the compiler's: `jade upgrade` and
+          # install.sh ask GitHub for it and read its tag as jade's version.
+          # dovata's releases are published with make_latest false for that reason.
+          make_latest: true
           files: |
             jade-linux-x86_64.tar.gz
             jade-macos-arm64.tar.gz

@@ -1,4 +1,4 @@
-// Struct coercion tolerates the replies models actually give.
+// Class coercion tolerates the replies models actually give.
 //
 // A model rarely returns bare JSON. It wraps it in prose, fences it in
 // markdown, or forgets to quote its keys. Coercion extracts the JSON from
@@ -9,9 +9,9 @@
 // of retries — while the same program worked under `jade run`. The extraction
 // is now written once and shared.
 
-struct City {
-    name,
-    let population = 7
+class City {
+    @public name,
+    @public let population = 7
 }
 
 prompt p = "Describe a city as JSON."

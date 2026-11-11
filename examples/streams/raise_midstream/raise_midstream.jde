@@ -7,7 +7,9 @@
 // the caller handed back the wrong buffer entirely. The catch now unwinds the
 // generator stack the same way it unwinds the handler stack.
 
-struct Stop { message }
+class Stop {
+    @public message
+}
 
 fn counts_then_fails() {
     yield 10

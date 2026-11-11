@@ -1,0 +1,9 @@
+// Closures were removed in 2.0.1.
+//
+// `|x| …` is refused with a message that names what to write instead: a named
+// function, passed by name, or a pipe into one. closures.jde shows both.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let double = |x| x * 2
+print(double(5))

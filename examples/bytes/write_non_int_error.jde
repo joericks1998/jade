@@ -1,0 +1,6 @@
+// An octet written into a blob must be an int, and that is settled when the
+// program is checked: a string can never reach `buf[i] = …`.
+use std::bytes
+
+let buf = bytes.zeros(3)
+buf[0] = "x"

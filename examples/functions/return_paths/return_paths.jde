@@ -1,5 +1,6 @@
 // A function's return type is the join of every path, and a trailing
-// expression is one of them.
+// expression is one of them. Paths that return different kinds do not join,
+// except a value and nil, which make the value optional.
 //
 // The checker used to take the type of the *first* `return` it found and stop.
 // So a function returning a str on one path and an int on another was typed
@@ -12,20 +13,11 @@
 // at, so `fn double(x) { x * 2 }` was typed nil and `double(5) + 1` was
 // rejected with "got nil + int" for a program that runs correctly.
 
-// Different types on different paths.
-fn pick(c) {
-    if c {
-        return "s"
-    }
-    return 1
-}
+// Different kinds on different paths are a compile error now: a str and an
+// int have no one type to share. return_paths_error.jde pins that.
 
-print(pick(true))
-print(pick(false))
-// → s
-// → 1
-
-// Returning on only some paths: the others answer nil.
+// Returning on only some paths: the others answer nil, so the result is an
+// optional int.
 fn maybe(c) {
     if c {
         return 1
@@ -64,7 +56,7 @@ fn caught(c) {
         if c {
             raise "x"
         }
-        return 1
+        return "1"
     } catch e {
         return "recovered"
     }

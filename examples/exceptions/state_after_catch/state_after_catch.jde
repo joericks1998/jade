@@ -49,8 +49,8 @@ print(heap_writes_then_raises())
 // A raise caught in the frame that made it. The raiser's own slot still holds
 // the value, so the handler has to take its own reference rather than sharing
 // that one — otherwise both release it and the second release frees twice.
-struct Payload {
-    items
+class Payload {
+    @public items
 }
 
 let round = 0

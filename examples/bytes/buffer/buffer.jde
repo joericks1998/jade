@@ -92,9 +92,5 @@ try {
     print("refused a negative value")
 }
 
-try {
-    buf[0] = "x"
-    print("NOT RAISED: a value that is not an int")
-} catch e {
-    print("refused a value that is not an int")
-}
+// Writing a value that is not an int is a compile error rather than a raise;
+// write_non_int_error.jde pins that.

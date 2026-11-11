@@ -1,0 +1,21 @@
+// The module the fixture beside this one inherits from.
+
+class Animal {
+    @public name,
+    @public let legs = 4
+
+    @public fn describe()
+    fn speak()
+}
+
+class Trainable {
+    @public let tricks = []
+}
+
+fn Animal::describe() {
+    return f"{self.name} has {self.legs} legs"
+}
+
+fn Animal::speak() {
+    return "..."
+}

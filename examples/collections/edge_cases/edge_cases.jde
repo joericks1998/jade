@@ -55,9 +55,9 @@ print(len(over))
 over["z"] = 3
 print(over)
 
-// nested and heterogeneous values
-let deep = {"list": [1, 2], "map": {"inner": "v"}, "n": 1.5, "flag": false}
-print(deep["list"][1])
+// nested values: a dict of dicts is one kind. A dict holds one kind of value,
+// so a record whose fields differ in kind is a class instead.
+let deep = {"map": {"inner": "v"}, "other": {"k": "w"}}
 print(deep["map"]["inner"])
 print(deep)
 
@@ -74,8 +74,11 @@ print(odd[""])
 print(odd["é"])
 print(odd)
 
-// ── structs render opaquely on both engines ──────────────────────────────────
-struct P { x, y }
+// ── classes render opaquely on both engines ──────────────────────────────────
+class P {
+    @public x
+    @public y
+}
 let p = P { x: 1, y: 2 }
 print(p)
 print(p.x)

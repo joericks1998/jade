@@ -4,7 +4,7 @@ use std::fs
 
 // HTTP over a Unix domain socket. The target is a single pseudo-URL of the form
 // unix://<socket-path>:<request-path> — here the Docker Engine API.
-// Every function returns a Dict { "status": int, "body": str }, mirroring std/http.
+// Every function returns an HttpResponse { status, body }, mirroring std/http.
 
 // GET — list running containers
 let r = uhttp.get("unix:///var/run/docker.sock:/v1.43/containers/json")
@@ -13,7 +13,9 @@ let containers = json.parse(r["body"])
 print(containers.len())
 
 // POST with body — create a container (JSON payload + Content-Type header)
-let spec = json.stringify({"Image": "alpine", "Cmd": ["echo", "hi"]})
+// The payload is written out as JSON text: a dict holds one kind of value, and
+// this object mixes a string with an array.
+let spec = "{\"Image\": \"alpine\", \"Cmd\": [\"echo\", \"hi\"]}"
 let c = uhttp.post(
     "unix:///var/run/docker.sock:/v1.43/containers/create",
     spec,

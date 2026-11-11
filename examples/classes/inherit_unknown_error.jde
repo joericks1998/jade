@@ -1,0 +1,5 @@
+// A parent has to be a class that exists.
+
+class Dog(Animal) {
+    breed
+}

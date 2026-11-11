@@ -26,27 +26,9 @@ print(scale(3, 2))
 print(apply_one(scale))
 print(apply_two(scale))
 
-// Too few or too many is an error, and the message names the parameter count
-// the function declares, defaults included.
-fn exactly_one(a) {
-    return a
-}
-
-try {
-    apply_two(exactly_one)
-} catch e {
-    print(e.message.contains("wrong number of arguments: expected 1, got 2"))
-}
-
-fn apply_none(f) {
-    return f()
-}
-
-try {
-    apply_none(exactly_one)
-} catch e {
-    print(e.message.contains("wrong number of arguments: expected 1, got 0"))
-}
+// Too few or too many arguments through a value is a compile error: a function
+// is checked at the arguments each call gives it, wherever the call is written.
+// value_arity_error.jde pins that.
 
 // A built-in is a value too. There was no value for one at all before: the name
 // read as nil, so printing it said `nil` and calling it crashed.
@@ -56,25 +38,7 @@ print(count([1, 2, 3]))
 // its values unquoted, and `[1, 22]` would look the same either way.
 print([1, 22, 333].map(str).map(len))
 
-// A method bound to its receiver goes through the same entry, so it can be
-// passed anywhere a function can.
-struct Doubler {
-    factor
-}
-
-extend Doubler {
-    fn of(self, n) {
-        return n * self.factor
-    }
-}
-
-let d = Doubler { factor: 2 }
-let of = d.of
-print(of(4))
-print([1, 2, 3].map(d.of))
-
 // Each kind of callable names itself the way the interpreter does.
 print(len)
 print(str)
 print(scale)
-print(d.of)

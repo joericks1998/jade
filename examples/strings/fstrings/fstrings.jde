@@ -15,7 +15,10 @@ let y = 20
 let point = f"({x}, {y})"                 // "(10, 20)"
 
 // Field access inside a slot
-struct Coord { x, y }
+class Coord {
+    @public x
+    @public y
+}
 let c = Coord { x: 3, y: 4 }
 let desc = f"coord: ({c.x}, {c.y})"      // "coord: (3, 4)"
 

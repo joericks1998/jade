@@ -78,14 +78,6 @@ esac
 tar -xzf "$TMP_DIR/$ARCHIVE" -C "$TMP_DIR"
 chmod +x "$TMP_DIR/$BINARY"
 
-# `jade build` links two runtime archives into every executable it emits, so
-# they are part of the toolchain, not optional extras. jade resolves them
-# relative to its own location — <prefix>/bin/jade looks in <prefix>/lib/jade —
-# so the two must be installed together. (Tarballs from before this layout
-# carry only the binary; the `-d` check keeps this script working with them,
-# in which case `jade build` needs JADE_RT_LIB/JADE_RUST_RT set by hand.)
-LIB_DIR="$(dirname "$INSTALL_DIR")/lib/jade"
-
 install_file() {
   src="$1"; dest="$2"; dest_dir="$(dirname "$dest")"
   if [ -w "$dest_dir" ] 2>/dev/null || [ ! -e "$dest_dir" ] && mkdir -p "$dest_dir" 2>/dev/null; then
@@ -98,25 +90,8 @@ install_file() {
 
 install_file "$TMP_DIR/$BINARY" "$INSTALL_DIR/$BINARY"
 
-if [ -d "$TMP_DIR/lib" ]; then
-  for archive in "$TMP_DIR"/lib/*.a; do
-    [ -e "$archive" ] || continue
-    install_file "$archive" "$LIB_DIR/$(basename "$archive")"
-  done
-fi
-
-# Bundled inference providers (anthropic/openai .so's). They live under
-# <prefix>/lib/jade/providers/ where `jade register` discovers them.
-if [ -d "$TMP_DIR/lib/providers" ]; then
-  for so in "$TMP_DIR"/lib/providers/*; do
-    [ -e "$so" ] || continue
-    install_file "$so" "$LIB_DIR/providers/$(basename "$so")"
-  done
-fi
-
 echo ""
 echo "jade $TAG installed to $INSTALL_DIR/$BINARY"
-[ -d "$LIB_DIR" ] && echo "runtime archives installed to $LIB_DIR"
 
 # Warn if a *different* jade is earlier in PATH — it would shadow the one we just
 # installed, so `jade` keeps running the old binary and the install looks like it
@@ -131,16 +106,7 @@ if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_DIR/$BINARY" ]; then
 fi
 echo ""
 
-# First-run setup: choose an inference provider and set your API key. This is part
-# of install so it isn't a separate step — `jade register` is interactive (lists
-# the bundled providers, prompts for a key, and lets you skip). curl | sh makes
-# stdin the pipe, so read from /dev/tty; a non-interactive install just prints how
-# to run it later. Never fail the install on a skipped/cancelled registration.
-if [ -e /dev/tty ]; then
-  "$INSTALL_DIR/$BINARY" register < /dev/tty || true
-else
-  echo "Run 'jade register' to choose an inference provider and set your API key."
-fi
-
+# A program that dereferences a prompt runs a model the dovata process holds;
+# dovata/install.sh in this repo installs it.
 echo ""
 echo "Run 'jade --help' to get started."

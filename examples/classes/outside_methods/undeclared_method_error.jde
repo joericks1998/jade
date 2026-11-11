@@ -1,0 +1,18 @@
+// A method defined outside its class must be declared in the class body.
+//
+// The body is the one place that lists what a class has. Without a declaration
+// for `area`, this definition would add a method from outside, and a method
+// sees the class's private fields.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Rect {
+    @public width
+    @public height
+}
+
+fn Rect::area() {
+    return self.width * self.height
+}
+
+print(Rect { width: 2, height: 3 }.area())
