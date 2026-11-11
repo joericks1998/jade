@@ -167,6 +167,24 @@ fn a_pointer_to_pointer_of_an_opaque_type_is_an_out_handle() {
 }
 
 #[test]
+fn a_pointer_to_a_const_pointer_is_an_array_in_not_an_out_parameter() {
+    // `T * const *` cannot be written through, so neither of these hands
+    // anything back. Read as out-parameters, the shim passed `&one_null_pointer`
+    // where the library wanted an array, which GCC 14 refuses to compile: glib's
+    // `g_variant_type_new_tuple` stopped all of glib from binding on Linux.
+    let b = bind(
+        "typedef struct VT VT;\n\
+         VT* new_tuple(const VT* const* items, int length);\n\
+         int strv_contains(const char* const* strv, const char* s);\n\
+         int open_one(const char* path, VT** out);\n",
+    );
+    assert!(why_skipped(&b, "new_tuple").contains("only reads"), "{:?}", b.skipped);
+    assert!(why_skipped(&b, "strv_contains").contains("only reads"), "{:?}", b.skipped);
+    // A plain `T **` is still the out-handle it always was.
+    assert_eq!(args(&b, "open_one"), ["str", "out_handle:VT"]);
+}
+
+#[test]
 fn two_opaque_types_stay_distinct() {
     let b = bind(
         "typedef struct sqlite3 sqlite3;\n\

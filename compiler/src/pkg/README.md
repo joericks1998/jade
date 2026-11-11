@@ -329,6 +329,8 @@ The first points into data the caller already had, so nothing was allocated and 
 
 The second was allocated with malloc for you. That is `out_alloc_str`. It needs a `frees_with` naming the library's own free function, and it is refused with the spelling named. Guessing one way leaks on every call, and guessing the other frees memory that was never allocated.
 
+A third spelling is neither, and the header does say so: `const char * const *strv`. The pointer it would be written through is `const`, so nothing comes back through it; it is an array the function reads, such as glib's `g_strv_contains`. Any `T * const *` is refused for that reason, since the FFI cannot pass an array of pointers. Before 2.0.1 the `const` was dropped before matching, so these read as out-parameters, and the shim passed the address of one null pointer where the library wanted an array. Clang only warns about that call, but GCC 14 and later refuse it, which stopped all of glib from binding on Linux over `g_variant_type_new_tuple`.
+
 The *return value* raises the same question, and it is by far the bigger case. 125 of glib's symbols come back as a `gchar *`, which is more than any other refusal in that library.
 
 `g_basename` points into its argument and `g_strdup` allocates, and both are spelled the same way, so `const` cannot decide between them. glib is disciplined about that qualifier, and plenty of libraries are not.

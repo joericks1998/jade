@@ -803,6 +803,22 @@ fn map_param(
 
     // `sqlite3**` — a handle written through a pointer.
     if let Some(inner) = pointee2(&t) {
+        // Unless the pointer it would be written through is itself `const`.
+        // `T * const *` cannot be written through at all, so it is never an
+        // out-parameter, whatever `T` is: it is an array the function reads.
+        // glib has both kinds, `g_variant_type_new_tuple(const GVariantType *
+        // const *items, gint length)` and `g_strv_contains(const gchar * const
+        // *strv, …)`. `normalize` drops the `const`, so both used to read as
+        // out-parameters: the shim passed the address of one null pointer, the
+        // array was never passed, and GCC 14 refuses the call outright, where
+        // clang only warns. That took the whole of glib down on Linux.
+        if squash(raw).contains("*const*") {
+            return Mapped::Reject(
+                "takes an array of pointers it only reads, written `* const *`. The FFI cannot \
+                 pass an array of pointers"
+                    .to_string(),
+            );
+        }
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Mapped::Out(format!("out_handle:{}", env.c_name(inner)), None);
         }

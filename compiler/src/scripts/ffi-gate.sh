@@ -114,7 +114,10 @@ TOML
   )
   if [ "$(cat "$proj/add.status")" != 0 ]; then
     echo "  FAIL  glib does not install:"
-    head -5 "$proj/add.err" | sed 's/^/        /'
+    # The first line says what failed, and the C compiler's errors say why. A
+    # shim this size draws hundreds of warnings before its first error, so the
+    # first lines of stderr alone are warnings and never the cause.
+    { head -1 "$proj/add.err"; grep -m 10 ' error: ' "$proj/add.err"; } | sed 's/^/        /'
     fail=$((fail + 1))
     loop_skip="glib does not install"
   else
