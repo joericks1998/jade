@@ -49,7 +49,7 @@ The runtime has been removed. dovata now has these parts:
 | [`src/load/`](src/load/README.md) | preflight, which refuses a file that cannot be planned; `Model`, which treats a split GGUF as one model; the model's shape and KV cost |
 | [`src/layout/`](src/layout/README.md) | layouts: each architecture's compute graph as data in ggml's op names, and the binder that resolves one against a model. A built-in layout is one supported architecture. |
 | [`src/hf_hub/`](src/hf_hub/README.md) | getting a model: a local path, or one GGUF from the Hugging Face Hub, all parts of a split one. Never quantizes; the code default is the unquantized file. |
-| [`src/quantize/`](src/quantize/README.md) | quantizing by running llama.cpp's `llama-quantize` program, only when a program such as the Jade compiler asks |
+| [`src/quantize/`](src/quantize/README.md) | quantizing by running llama.cpp's `llama-quantize` program, only when a program such as the Jade compiler asks, and installing the llama.cpp build that holds it |
 | [`src/target/`](src/target/README.md) | the machine a plan is for: its memory, largest GPU buffer and page size, as Apple, CPU or CUDA, and the kinds of memory a region can be |
 | [`src/window/`](src/window/README.md) | splits a mapped model file into page-aligned windows no larger than one GPU buffer, so every weight fits in one |
 | [`src/arena/`](src/arena/README.md) | packs one step's short-lived tensors into shared memory, reusing bytes between tensors that are never alive together |
@@ -86,8 +86,9 @@ invites one question about each directory: why is it here, and not inside a neig
 - `quantize/` is never called implicitly. Fetching and planning never quantize, so a
   program that wants a smaller model, such as the Jade compiler, calls it directly. The
   quant-type table always builds; running `llama-quantize` is behind the `quantize`
-  feature. llama.cpp is not in this repo: `llama-quantize` must be installed on the
-  machine, and it is the only part of llama.cpp dovata uses.
+  feature. llama.cpp is not in this repo: dovata installs one pinned build of llama.cpp's
+  own release into `~/.dovata/llama.cpp`, and `llama-quantize` is the only part of it
+  dovata uses.
 - `layout/` is separate from the planner because a layout is the contract with the Jade
   compiler's kernels, and the planner only decides where its tensors live. Each built-in
   layout is one architecture dovata supports.
@@ -138,7 +139,8 @@ because a bare `cargo build` there builds the compiler, which needs LLVM 18. Ins
 
 ```sh
 # The library. Runs anywhere; no model and no GPU. The quantize tests also run
-# llama.cpp's llama-quantize, and skip when it is not installed: brew install llama.cpp
+# llama.cpp's llama-quantize, and skip when it is not installed:
+# cargo run -p dovata --bin dovata -- setup
 cargo test -p dovata
 
 # With every capability compiled out, the check that the boundaries are real
@@ -168,21 +170,28 @@ cargo test -p refback
 cargo test -p refback --features metal
 ```
 
-dovata is pure Rust. One dependency, `ring`, which the Hugging Face downloads use for
-HTTPS, compiles a little C, so a build needs a C compiler too. Xcode's command line tools
+dovata is pure Rust. One dependency, `ring`, which every download uses for HTTPS,
+compiles a little C, so a build needs a C compiler too. Xcode's command line tools
 and every Linux distribution's build tools have one.
 
 ## Installing
 
 The programs `dovata` and `gguf-inspect` are released for Apple Silicon Macs and for
-x86_64 Linux. This installs the newest dovata release into `/usr/local/bin`:
+x86_64 Linux. This installs the newest dovata release into `/usr/local/bin`, from the
+same site as the compiler's installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh | sh
+curl -fsSL https://jadelang.org/dovata/install.sh | sh
 ```
 
 `DOVATA_INSTALL_DIR` picks another directory. The script checks the download against
-the release's `checksums.txt` before installing anything.
+the release's `checksums.txt` before installing anything, then runs `dovata setup`,
+which installs the llama.cpp build dovata quantizes with into `~/.dovata/llama.cpp`.
+Run it as yourself; it asks for sudo only to write to the install directory. The file
+lives here, as `dovata/install.sh`, and `deploy-docs.yml` copies it to the site.
+
+`dovata upgrade` installs a newer release over the one you have, checked the same way,
+and then its llama.cpp build.
 
 Another Rust project can take the library as a cargo dependency on a release tag.
 Cargo finds the `dovata` package inside the repo by its name:

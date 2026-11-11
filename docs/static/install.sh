@@ -106,7 +106,8 @@ if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_DIR/$BINARY" ]; then
 fi
 echo ""
 
-# A program that dereferences a prompt runs a model the dovata process holds;
-# dovata/install.sh in this repo installs it.
+# A program that dereferences a prompt runs a model the dovata process holds, which is
+# its own program with its own installer, dovata/install.sh, served beside this one.
 echo ""
-echo "Run 'jade --help' to get started."
+echo "Run 'jade --help' to get started. A program that runs a model also needs dovata:"
+echo "  curl -fsSL https://jadelang.org/dovata/install.sh | sh"

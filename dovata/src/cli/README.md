@@ -1,10 +1,12 @@
 # cli: the `dovata` command line
 
-`dovata` is the package's command-line program. It has three groups of commands:
+`dovata` is the package's command-line program. It has four groups of commands:
 `dovata start`, `add`, `remove`, `status` and `kill` run the dovata process and the
 models in it through [`src/host/`](../host/README.md), `dovata machine` reports the current machine's memory
-and GPUs through [`src/machine/`](../machine/README.md), and `dovata plan` places a
-model's tensors in memory through [`src/memplan/`](../memplan/README.md). `dovata version`, or
+and GPUs through [`src/machine/`](../machine/README.md), `dovata plan` places a
+model's tensors in memory through [`src/memplan/`](../memplan/README.md), and
+`dovata setup` and `upgrade` install dovata's own files: the llama.cpp build it
+quantizes with, through [`src/quantize/`](../quantize/README.md), and newer releases. `dovata version`, or
 `dovata --version`, prints a line such as `dovata 3.0.0`; the release workflow checks it
 against the tag it builds. `gguf-inspect` can join it later as
 `dovata inspect`, so dovata has one program with subcommands instead of one program per
@@ -209,6 +211,51 @@ dovata: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF offers 7 model
 
 The unquantized model of a 30B repo is 60 GB, so dovata asks instead of guessing.
 
+## `dovata setup` and `upgrade`
+
+```text
+dovata setup
+dovata upgrade
+```
+
+`dovata setup` installs the llama.cpp build dovata quantizes with into
+`~/.dovata/llama.cpp`. dovata pins one build of llama.cpp's own release, b12110, which
+is llama.cpp v0.9.0, and checks the download against the SHA-256 it was released with
+before unpacking it. The install script runs `setup`, so a new install has llama.cpp
+already, and dovata runs it itself the first time it quantizes with no llama.cpp at
+all. A second `setup` finds the build there and downloads nothing:
+
+```text
+$ dovata setup
+dovata: downloading llama.cpp b12110 for macOS on Apple Silicon, which holds the llama-quantize program
+llama.cpp b12110 is installed; dovata quantizes with /Users/joericks/.dovata/llama.cpp/b12110/llama-quantize
+```
+
+`dovata upgrade` installs the newest dovata release over the one running. It reads the
+repo's releases from GitHub and takes the newest `dovata-v*` one, skipping the
+compiler's, drafts and prereleases. It checks the archive against the release's
+`checksums.txt`, unpacks it in a private directory, and replaces `dovata` and
+`gguf-inspect` in the running program's directory. Each program is copied beside the old
+one and renamed over it, so a program starting at the same moment runs the old file or
+the new one, never half of one. When that directory is not yours to write, as with
+`/usr/local/bin`, the copy and the rename run under sudo, which asks for your password.
+Then the new program runs its own `setup`, since a new release can pin a new llama.cpp
+build; the old build is removed.
+
+```text
+$ dovata upgrade
+dovata: upgrading dovata 3.2.1 to 3.2.2
+dovata 3.2.2 is installed in /usr/local/bin
+llama.cpp b12110 is installed; dovata quantizes with /Users/joericks/.dovata/llama.cpp/b12110/llama-quantize
+
+The dovata process, pid 88464, still runs 3.2.1. `dovata kill` and `dovata start` restart it on 3.2.2; then add its models again.
+```
+
+Neither runs under sudo. llama.cpp goes in your own home, and under sudo it would land
+in root's, or in yours owned by root. `upgrade` refuses a cargo build, one in a
+`target/debug` or `target/release` directory, since replacing it would only hide the
+source it came from.
+
 ## Exit codes
 
 A bad or incomplete command line, including a repo that needs `--quant`, exits with 2.
@@ -217,7 +264,7 @@ read, exits with 1.
 
 ## Files
 
-- `main.rs` dispatches to the three groups, prints the version, and holds what they share: the `Fail` type
+- `main.rs` dispatches to the four groups, prints the version, and holds what they share: the `Fail` type
   that picks the exit code, `out`, which writes to standard output and stops quietly
   when the output is closed, and the size formatting and parsing.
 - `machine.rs` is `dovata machine`: argument parsing, the four commands, and their text.
@@ -227,12 +274,17 @@ read, exits with 1.
 - `host.rs` is `dovata start`, `add`, `remove`, `status`, `kill` and `host`: their
   parsing, the status text, and the lines `machine usage` and `watch` show for the
   process.
+- `install.rs` is `dovata setup` and `upgrade`: finding the newest release and its
+  checksum, replacing the programs, with sudo when it must, and asking the new program
+  to install its llama.cpp. The download, the checksum and the unpacking are
+  `dovata::quantize::install`'s, shared with installing llama.cpp.
 
 Each file's tests cover its parser and its text.
 
 ## Building
 
-The binary needs the `machine` and `host` features, which are on by default:
+The binary needs the `machine`, `host` and `quantize` features, which are on by default.
+`quantize` brings the HTTPS client `setup` and `upgrade` download with:
 
 ```sh
 cargo run -p dovata --bin dovata -- machine info

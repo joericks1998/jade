@@ -2,12 +2,15 @@
 # Author: Joe Ricks
 # File: install.sh
 # Description: Installs the prebuilt dovata and gguf-inspect programs for this machine
-# from the newest dovata release in the Jade repo.
+# from the newest dovata release in the Jade repo, then the llama.cpp build dovata
+# quantizes with.
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh | sh
+# Usage: curl -fsSL https://jadelang.org/dovata/install.sh | sh
 #
-# DOVATA_INSTALL_DIR picks the directory, /usr/local/bin by default. The script uses
-# sudo only when it cannot write there itself.
+# The docs site serves this file from the repo; .github/workflows/deploy-docs.yml copies
+# it there. DOVATA_INSTALL_DIR picks the directory, /usr/local/bin by default. The script
+# uses sudo only when it cannot write there itself. Run it as yourself, not under sudo:
+# llama.cpp goes in your own ~/.dovata.
 
 set -e
 
@@ -129,8 +132,23 @@ for bin in $BINARIES; do
   fi
 done
 
+# dovata quantizes by running llama.cpp's llama-quantize. `dovata setup` installs the
+# llama.cpp build this dovata was released with into ~/.dovata/llama.cpp, checked
+# against its SHA-256. The programs are installed either way, and dovata tries again
+# the first time it quantizes, so a failure here is a warning.
 echo ""
-echo "dovata plan --quant runs llama.cpp's llama-quantize, which is a separate install;"
-echo "on a Mac: brew install llama.cpp"
+if ! "$INSTALL_DIR/dovata" setup; then
+  echo "Warning: llama.cpp is not installed yet; dovata installs it the first time it quantizes,"
+  echo "         or run 'dovata setup' to try again."
+fi
+
+# llama.cpp's Linux build also needs GCC's OpenMP library, which nearly every system
+# has. dovata does not install system packages, so it only says how.
+if [ "$OS" = "Linux" ] && ! { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null; } | grep -q 'libgomp\.so\.1'; then
+  echo ""
+  echo "Warning: llama.cpp needs GCC's OpenMP library, libgomp.so.1, and this machine has none."
+  echo "         On Debian or Ubuntu: sudo apt-get install libgomp1"
+fi
+
 echo ""
-echo "Run 'dovata --help' to get started."
+echo "Run 'dovata --help' to get started. 'dovata upgrade' installs newer releases."
