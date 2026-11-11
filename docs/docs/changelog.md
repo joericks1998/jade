@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.2
+
+*Prompts run about 16 times faster on a Mac.* On an M4, a 256-token reply from Qwen3 0.6B took 126 seconds and takes 7.8 now. The tokens are the same as before, and the same as llama.cpp's.
+
+- *Three kernels share each output across 32 threads.* Matrix multiplication, RMS norm and attention used one GPU thread per output, so one thread read a whole row of weights alone. Each output now gets one SIMD group of 32 threads, which split the row and add up their parts. Matrix multiplication also decodes 32 weights at a time and reads their scale once, where it read the scale again for every weight.
+- *Attention reads only the cache cells that hold tokens.* It checked all 4096 cells of the KV cache at every step, so each token took longer than the one before; the 256th took about 0.75 seconds. It now stops at the last cell in use.
+- *A plan that multiplies weights by quantized values is refused by name.* The new matrix kernel reads the other side as f32, f16 or bf16 values only.
+
 ## dovata v3.2.1
 
 *dovata installs what it needs, and upgrades itself.* This is a dovata release alone; the compiler stays at 2.0.1.

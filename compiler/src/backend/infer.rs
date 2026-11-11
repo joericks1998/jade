@@ -895,6 +895,8 @@ impl<'ctx> Cx<'ctx> {
                 for k in 0..8i64 {
                     f.store(f.at_c(args, 512 + k * 8), word(f, 65 + k));
                 }
+                // The cache cells that hold tokens once this step writes its own.
+                f.store(f.at_c(args, 512 + 6 * 8), f.add(pos, n));
                 let ne = |f: &F<'_, 'ctx>, slot: i64, d: i64| {
                     f.load_i64(f.at_c(args, slot * 96 + d * 8))
                 };
@@ -913,6 +915,7 @@ impl<'ctx> Cx<'ctx> {
                 });
                 let count = f.load_i64(count);
                 f.store(f.at_c(args, 512 + 7 * 8), count);
+                let threads = f.mul(count, word(f, 74));
 
                 let kernel = word(f, 0);
                 let pipe = f.load_ptr(f.elem(cx.ptrt(), pipes, kernel));
@@ -940,8 +943,8 @@ impl<'ctx> Cx<'ctx> {
                     "setBytes:length:atIndex:",
                     &[args.into(), f.i64(ARGS_BYTES).into(), f.i64(5).into()],
                 );
-                f.if_(f.sgt(count, f.i64(0)), |f| {
-                    f.store(groups, f.sdiv(f.add(count, f.i64(63)), f.i64(64)));
+                f.if_(f.sgt(threads, f.i64(0)), |f| {
+                    f.store(groups, f.sdiv(f.add(threads, f.i64(63)), f.i64(64)));
                     f.store(f.at_c(groups, 8), f.i64(1));
                     f.store(f.at_c(groups, 16), f.i64(1));
                     // MTLSize is 24 bytes, so Apple Silicon passes it by pointer.

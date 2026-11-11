@@ -88,3 +88,28 @@ fn rope_parameters_ride_in_the_record() {
     assert_eq!(rec[65], 4);
     assert_eq!(rec[66], 2);
 }
+
+#[test]
+fn row_kernels_give_each_output_a_simd_group() {
+    let p = plan(
+        json!([{"op": "rms_norm", "inputs": ["inpL"], "outputs": ["inpL"], "params": {"eps": 1e-6}},
+               {"op": "mul_mat", "inputs": ["token_embd.weight", "inpL"], "outputs": ["inpL"], "params": {}},
+               {"op": "add", "inputs": ["inpL", "inpL"], "outputs": ["inpL"], "params": {}}]),
+        Vec::new(),
+    );
+    let r = read("m", &p).unwrap();
+    let widths: Vec<i64> = r.ops.iter().map(|rec| rec[74]).collect();
+    assert_eq!(widths, vec![threads::GROUP, threads::GROUP, 1]);
+}
+
+#[test]
+fn a_mul_mat_by_quantized_values_is_refused() {
+    let q = json!({"tensor": "blk.0.q", "role": {"kind": "weight"}, "ggml_type": 8,
+                   "dims": [32, 4], "region": 0, "offset": 64});
+    let p = plan(
+        json!([{"op": "mul_mat", "inputs": ["token_embd.weight", "blk.0.q"], "outputs": ["inpL"], "params": {}}]),
+        vec![q],
+    );
+    let e = read("m", &p).unwrap_err();
+    assert!(e.contains("mul_mat inpL") && e.contains("blk.0.q"), "{e}");
+}
