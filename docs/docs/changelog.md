@@ -4,6 +4,13 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## vscode v1.1.3
+
+*The VS Code extension lives in the Jade repo.* This is an extension release alone; the compiler and dovata do not change.
+
+- *The extension's source moved here* from `joericks1998/jadelang-extension` at 1.1.2, under `vscode/`, with its history. It keeps its own version and releases, tagged `vscode-v1.1.3`, and publishes to the Visual Studio Marketplace from this repo's CI.
+- *The Marketplace page links to the right repo.* It pointed at `joericks/jadelang-vscode-extension`, which does not exist; it now points at `vscode/` in `joericks1998/jade`. Highlighting is the same as 1.1.2.
+
 ## dovata v3.2.1
 
 *dovata installs what it needs, and upgrades itself.* This is a dovata release alone; the compiler stays at 2.0.1.
