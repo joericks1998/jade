@@ -1,9 +1,13 @@
 // The GPU kernels a program runs a model's forward step with, on Metal.
 //
-// One kernel per ggml op the step uses, written plainly: one thread computes one
-// output value, or one row where a row has to be read whole. Nothing here is
-// tuned. The CUDA and Linux kernels get the tuning first; these exist so a
-// program on a Mac runs its prompts at all. `src/infer/README.md` says why.
+// One kernel per ggml op the step uses, and a second for `mul_mat`. The ops
+// that read a whole row for each output, `mul_mat`, `rms_norm` and
+// `flash_attn_ext`, give each output one SIMD group of 32 threads, which split
+// the row and add up their sums; every other op runs one thread per output
+// value. A `mul_mat` over more than one token, as when a prompt is read, runs
+// `k_mul_mm` instead, which multiplies tiles on the GPU's matrix hardware.
+// Beyond that nothing is tuned: the CUDA and Linux kernels get the tuning
+// first. `src/infer/README.md` says why.
 //
 // Every kernel takes the same arguments: up to four source tensors and the
 // destination as buffers 0 to 4, each bound at its tensor's byte offset in its
@@ -12,8 +16,14 @@
 // counts elements per dimension, fastest first, and `nb` gives each
 // dimension's stride in bytes. A quantized tensor's `nb[0]` is its block size in
 // bytes, and its rows are whole blocks.
+//
+// `i[7]` is how many outputs the op computes, and `i[6]` how many KV cache
+// cells hold tokens, both set by the step. A kernel that gives each output a
+// SIMD group runs 32 threads per output; the threadgroups are 64 wide, so the
+// 32 threads of one output are always one SIMD group.
 
 #include <metal_stdlib>
+#include <metal_simdgroup_matrix>
 using namespace metal;
 
 // ggml's element types, by the numbers GGUF files use.
@@ -40,9 +50,14 @@ struct Args {
     Tensor dst;
     // Floats the op takes: eps, a scale, rope's frequencies.
     float f[8];
-    // Ints the op takes: rope's dimensions and mode, the number of threads.
+    // Ints the op takes: rope's dimensions and mode; the cache cells in use;
+    // the number of outputs.
     long i[8];
 };
+
+// The threads that share one output in the kernels that read a whole row: one
+// SIMD group on Apple GPUs.
+constant uint GROUP = 32;
 
 // ── reading one element ─────────────────────────────────────────────────────
 
@@ -202,23 +217,27 @@ kernel void k_get_rows(device const uchar * s0 [[buffer(0)]], device const uchar
     store(d, a.dst, i0, i1, i2, i3, load(s0, a.src[0], i0, r, i2, i3));
 }
 
-// rms_norm(src0, eps) → dst, one thread per row.
+// rms_norm(src0, eps) → dst, one SIMD group per row: each thread takes every
+// 32nd value.
 kernel void k_rms_norm(device const uchar * s0 [[buffer(0)]], device uchar * d [[buffer(4)]],
-                       constant Args & a [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
-    if (long(gid) >= a.i[7]) return;
+                       constant Args & a [[buffer(5)]], uint gid [[thread_position_in_grid]],
+                       uint lane [[thread_index_in_simdgroup]]) {
+    long row = gid / GROUP;
+    if (row >= a.i[7]) return;
     long rows = a.dst.ne[1];
-    long i1 = gid % rows;
-    long rest = gid / rows;
+    long i1 = row % rows;
+    long rest = row / rows;
     long i2 = rest % a.dst.ne[2];
     long i3 = rest / a.dst.ne[2];
     long n = a.src[0].ne[0];
     float sum = 0.0f;
-    for (long k = 0; k < n; k++) {
+    for (long k = lane; k < n; k += GROUP) {
         float x = load(s0, a.src[0], k, i1, i2, i3);
         sum += x * x;
     }
+    sum = simd_sum(sum);
     float scale = 1.0f / sqrt(sum / float(n) + a.f[0]);
-    for (long k = 0; k < n; k++) {
+    for (long k = lane; k < n; k += GROUP) {
         store(d, a.dst, k, i1, i2, i3, load(s0, a.src[0], k, i1, i2, i3) * scale);
     }
 }
@@ -251,23 +270,396 @@ kernel void k_add(device const uchar * s0 [[buffer(0)]], device const uchar * s1
     store(d, a.dst, i0, i1, i2, i3, x);
 }
 
+// Purpose: This function reads value `k` of an f32, f16 or bf16 row.
+//
+// Inputs:
+// - `row`: the row's first byte.
+// - `nb0`: the stride between values, in bytes.
+// - `type`: the element type.
+// - `k`: the value's index in the row.
+static inline float float_at(device const uchar * row, long nb0, int type, long k) {
+    device const uchar * p = row + k * nb0;
+    if (type == T_F16) {
+        return half_at(p);
+    }
+    if (type == T_BF16) {
+        return as_type<float>(uint(*(device const ushort *)p) << 16);
+    }
+    return *(device const float *)p;
+}
+
+// Purpose: This function reads 32 values of an f32, f16 or bf16 row into
+// registers, checking the row's type and layout once for all 32.
+//
+// Inputs:
+// - `x`: the row's first byte.
+// - `xnb`: the stride between its values, in bytes.
+// - `xt`: its element type.
+// - `k0`: the first of the 32 values.
+// - `len`: how many of the 32 the row has; the rest read as zero.
+// - `out`: where the 32 floats go.
+static inline void load32(device const uchar * x, long xnb, int xt, long k0, int len, thread float * out) {
+    if (len == 32 && xt == T_F32 && xnb == 4) {
+        device const float * f = (device const float *)x + k0;
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            out[l] = f[l];
+        }
+        return;
+    }
+    #pragma unroll
+    for (int l = 0; l < 32; l++) {
+        out[l] = l < len ? float_at(x, xnb, xt, k0 + l) : 0.0f;
+    }
+}
+
+// Purpose: This function returns the dot product of 32 values of a weight row
+// with the same 32 values of a float row, decoding the weights' scales once
+// for all 32.
+//
+// Inputs:
+// - `w`: the weight row's first byte.
+// - `wt`: the weights' element type.
+// - `wnb`: the stride between the weights, in bytes, for f32, f16 and bf16.
+// - `x`: the float row's first byte.
+// - `xnb`: the stride between the float row's values, in bytes.
+// - `xt`: the float row's element type: f32, f16 or bf16.
+// - `k0`: the first of the 32 values, a multiple of 32.
+// - `len`: how many of the 32 to take; fewer only at the end of an f32, f16
+//   or bf16 weight row whose length is not a multiple of 32.
+static float dot32(device const uchar * w, int wt, long wnb, device const uchar * x, long xnb, int xt,
+                   long k0, int len) {
+    float xv[32];
+    load32(x, xnb, xt, k0, len, xv);
+    float sum = 0.0f;
+    if (wt == T_F32 || wt == T_F16 || wt == T_BF16) {
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            sum += (l < len ? float_at(w, wnb, wt, k0 + l) : 0.0f) * xv[l];
+        }
+        return sum;
+    }
+    if (wt == T_Q8_0) {
+        device const uchar * b = w + (k0 / 32) * 34;
+        device const char * q = (device const char *)(b + 2);
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            sum += float(q[l]) * xv[l];
+        }
+        return half_at(b) * sum;
+    }
+    if (wt == T_Q4_0) {
+        device const uchar * b = w + (k0 / 32) * 18;
+        #pragma unroll
+        for (int l = 0; l < 16; l++) {
+            uchar q = b[2 + l];
+            sum += float(int(q & 0xF) - 8) * xv[l];
+            sum += float(int(q >> 4) - 8) * xv[l + 16];
+        }
+        return half_at(b) * sum;
+    }
+    // The K types: 256 values a block, and 32 values share a scale.
+    long blk = k0 / 256;
+    int is = int((k0 % 256) / 32);
+    if (wt == T_Q4_K || wt == T_Q5_K) {
+        int size = wt == T_Q4_K ? 144 : 176;
+        device const uchar * b = w + blk * size;
+        device const uchar * sc = b + 4;
+        int s, m;
+        if (is < 4) {
+            s = sc[is] & 63;
+            m = sc[is + 4] & 63;
+        } else {
+            s = (sc[is + 4] & 0xF) | ((sc[is - 4] >> 6) << 4);
+            m = (sc[is + 4] >> 4) | ((sc[is] >> 6) << 4);
+        }
+        // Each value is d * s * q - dmin * m, so the 32 share both terms.
+        int group = is / 2;
+        int shift = (is % 2) * 4;
+        float qx = 0.0f;
+        float xs = 0.0f;
+        if (wt == T_Q4_K) {
+            device const uchar * qs = b + 16 + group * 32;
+            #pragma unroll
+            for (int l = 0; l < 32; l++) {
+                qx += float((qs[l] >> shift) & 0xF) * xv[l];
+                xs += xv[l];
+            }
+        } else {
+            device const uchar * qs = b + 48 + group * 32;
+            device const uchar * qh = b + 16;
+            #pragma unroll
+            for (int l = 0; l < 32; l++) {
+                int q = ((qs[l] >> shift) & 0xF) | (((qh[l] >> is) & 1) << 4);
+                qx += float(q) * xv[l];
+                xs += xv[l];
+            }
+        }
+        return half_at(b) * float(s) * qx - half_at(b + 2) * float(m) * xs;
+    }
+    if (wt == T_Q6_K) {
+        device const uchar * b = w + blk * 210;
+        int half_n = is / 4;
+        int quarter = is % 4;
+        device const uchar * ql = b + half_n * 64 + (quarter % 2) * 32;
+        device const uchar * qh = b + 128 + half_n * 32;
+        device const char * scales = (device const char *)(b + 192) + half_n * 8 + quarter * 2;
+        int lo_shift = (quarter / 2) * 4;
+        int hi_shift = quarter * 2;
+        // The first 16 values have one scale and the last 16 the next.
+        float first = 0.0f;
+        float second = 0.0f;
+        #pragma unroll
+        for (int l = 0; l < 16; l++) {
+            int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
+            first += float(q - 32) * xv[l];
+        }
+        #pragma unroll
+        for (int l = 16; l < 32; l++) {
+            int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
+            second += float(q - 32) * xv[l];
+        }
+        return half_at(b + 208) * (float(scales[0]) * first + float(scales[1]) * second);
+    }
+    return 0.0f;
+}
+
+// Purpose: This function decodes 32 values of a weight row into floats,
+// reading their scale once for all 32.
+//
+// Inputs:
+// - `w`: the weight row's first byte.
+// - `wt`: the weights' element type.
+// - `wnb`: the stride between the weights, in bytes, for f32, f16 and bf16.
+// - `k0`: the first of the 32 values, a multiple of 32.
+// - `len`: how many of the 32 the row has; fewer only at the end of an f32,
+//   f16 or bf16 row whose length is not a multiple of 32.
+// - `out`: where the 32 floats go, zero past `len`.
+static void decode32(device const uchar * w, int wt, long wnb, long k0, int len, thread float * out) {
+    if (wt == T_F32 || wt == T_F16 || wt == T_BF16) {
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            out[l] = l < len ? float_at(w, wnb, wt, k0 + l) : 0.0f;
+        }
+        return;
+    }
+    if (wt == T_Q8_0) {
+        device const uchar * b = w + (k0 / 32) * 34;
+        device const char * q = (device const char *)(b + 2);
+        float d = half_at(b);
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            out[l] = d * float(q[l]);
+        }
+        return;
+    }
+    if (wt == T_Q4_0) {
+        device const uchar * b = w + (k0 / 32) * 18;
+        float d = half_at(b);
+        #pragma unroll
+        for (int l = 0; l < 16; l++) {
+            uchar q = b[2 + l];
+            out[l] = d * float(int(q & 0xF) - 8);
+            out[l + 16] = d * float(int(q >> 4) - 8);
+        }
+        return;
+    }
+    // The K types: 256 values a block, and 32 values share a scale.
+    long blk = k0 / 256;
+    int is = int((k0 % 256) / 32);
+    if (wt == T_Q4_K || wt == T_Q5_K) {
+        int size = wt == T_Q4_K ? 144 : 176;
+        device const uchar * b = w + blk * size;
+        device const uchar * sc = b + 4;
+        int s, m;
+        if (is < 4) {
+            s = sc[is] & 63;
+            m = sc[is + 4] & 63;
+        } else {
+            s = (sc[is + 4] & 0xF) | ((sc[is - 4] >> 6) << 4);
+            m = (sc[is + 4] >> 4) | ((sc[is] >> 6) << 4);
+        }
+        // Each value is d * s * q - dmin * m.
+        float scale = half_at(b) * float(s);
+        float low = half_at(b + 2) * float(m);
+        int group = is / 2;
+        int shift = (is % 2) * 4;
+        if (wt == T_Q4_K) {
+            device const uchar * qs = b + 16 + group * 32;
+            #pragma unroll
+        for (int l = 0; l < 32; l++) {
+                out[l] = scale * float((qs[l] >> shift) & 0xF) - low;
+            }
+        } else {
+            device const uchar * qs = b + 48 + group * 32;
+            device const uchar * qh = b + 16;
+            #pragma unroll
+        for (int l = 0; l < 32; l++) {
+                int q = ((qs[l] >> shift) & 0xF) | (((qh[l] >> is) & 1) << 4);
+                out[l] = scale * float(q) - low;
+            }
+        }
+        return;
+    }
+    if (wt == T_Q6_K) {
+        device const uchar * b = w + blk * 210;
+        int half_n = is / 4;
+        int quarter = is % 4;
+        device const uchar * ql = b + half_n * 64 + (quarter % 2) * 32;
+        device const uchar * qh = b + 128 + half_n * 32;
+        device const char * scales = (device const char *)(b + 192) + half_n * 8 + quarter * 2;
+        int lo_shift = (quarter / 2) * 4;
+        int hi_shift = quarter * 2;
+        // The first 16 values have one scale and the last 16 the next.
+        float d = half_at(b + 208);
+        float first = d * float(scales[0]);
+        float second = d * float(scales[1]);
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            int q = ((ql[l] >> lo_shift) & 0xF) | (((qh[l] >> hi_shift) & 3) << 4);
+            out[l] = (l < 16 ? first : second) * float(q - 32);
+        }
+        return;
+    }
+    #pragma unroll
+    for (int l = 0; l < 32; l++) {
+        out[l] = 0.0f;
+    }
+}
+
 // mul_mat(src0 [K, M], src1 [K, N, ...]) → dst [M, N, ...]: each output is
 // the dot product of a row of src0 and a column of src1. src0's batch
-// dimensions broadcast over src1's.
+// dimensions broadcast over src1's. One SIMD group per output: thread `lane`
+// takes the row's 32-value chunks `lane`, `lane + 32` and so on, so the group
+// reads the row front to back together.
 kernel void k_mul_mat(device const uchar * s0 [[buffer(0)]], device const uchar * s1 [[buffer(1)]],
                       device uchar * d [[buffer(4)]], constant Args & a [[buffer(5)]],
-                      uint gid [[thread_position_in_grid]]) {
-    if (long(gid) >= a.i[7]) return;
+                      uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    long out = gid / GROUP;
+    if (out >= a.i[7]) return;
     long i0, i1, i2, i3;
-    unflatten(gid, a.dst.ne, i0, i1, i2, i3);
+    unflatten(out, a.dst.ne, i0, i1, i2, i3);
     long k_n = a.src[0].ne[0];
     long b2 = i2 / (a.dst.ne[2] / a.src[0].ne[2]);
     long b3 = i3 / (a.dst.ne[3] / a.src[0].ne[3]);
+    device const uchar * w = s0 + i0 * a.src[0].nb[1] + b2 * a.src[0].nb[2] + b3 * a.src[0].nb[3];
+    device const uchar * x = s1 + i1 * a.src[1].nb[1] + i2 * a.src[1].nb[2] + i3 * a.src[1].nb[3];
+    int wt = int(a.src[0].type);
+    int xt = int(a.src[1].type);
+    long wnb = a.src[0].nb[0];
+    long xnb = a.src[1].nb[0];
     float sum = 0.0f;
-    for (long k = 0; k < k_n; k++) {
-        sum += load(s0, a.src[0], k, i0, b2, b3) * load(s1, a.src[1], k, i1, i2, i3);
+    for (long k0 = long(lane) * 32; k0 < k_n; k0 += GROUP * 32) {
+        int len = k_n - k0 < 32 ? int(k_n - k0) : 32;
+        sum += dot32(w, wt, wnb, x, xnb, xt, k0, len);
     }
-    store(d, a.dst, i0, i1, i2, i3, sum);
+    sum = simd_sum(sum);
+    if (lane == 0) {
+        store(d, a.dst, i0, i1, i2, i3, sum);
+    }
+}
+
+// The rows of weights and the tokens one threadgroup of `k_mul_mm` computes,
+// and the values of K it takes at a time.
+constant int TILE = 32;
+
+// mul_mat for a step of more than one token: the same product as `k_mul_mat`,
+// for a whole prompt at once. One threadgroup of 64 threads computes a tile of
+// 32 rows of src0 by 32 columns of src1. For every 32 values of K, SIMD group
+// 0 decodes the tile's weights into threadgroup memory, a row per thread, and
+// SIMD group 1 copies the tile's columns there, a column per thread; then
+// each SIMD group multiplies them as 8 by 8 matrices, on the GPU's matrix
+// hardware: group 0 the tile's first 16 columns, group 1 its last 16. It adds
+// a sum in a different order than `k_mul_mat`, so a token's values can differ
+// in their last bits between a step of one token and a step of many, as they
+// do in llama.cpp.
+kernel void k_mul_mm(device const uchar * s0 [[buffer(0)]], device const uchar * s1 [[buffer(1)]],
+                     device uchar * d [[buffer(4)]], constant Args & a [[buffer(5)]],
+                     uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    // The tile's weights as [row][k], then its columns as [column][k]. After
+    // the last product, `sa` holds the tile's results as [row][column].
+    threadgroup float sa[TILE * TILE];
+    threadgroup float sb[TILE * TILE];
+    long item = tg;
+    if (item >= a.i[7]) return;
+    long rows = a.dst.ne[0];
+    long n = a.dst.ne[1];
+    long row_tiles = (rows + TILE - 1) / TILE;
+    long col_tiles = (n + TILE - 1) / TILE;
+    long r0 = (item % row_tiles) * TILE;
+    long rest = item / row_tiles;
+    long c0 = (rest % col_tiles) * TILE;
+    rest /= col_tiles;
+    long i2 = rest % a.dst.ne[2];
+    long i3 = rest / a.dst.ne[2];
+    long b2 = i2 / (a.dst.ne[2] / a.src[0].ne[2]);
+    long b3 = i3 / (a.dst.ne[3] / a.src[0].ne[3]);
+    long k_n = a.src[0].ne[0];
+    int wt = int(a.src[0].type);
+    int xt = int(a.src[1].type);
+    long wnb = a.src[0].nb[0];
+    long xnb = a.src[1].nb[0];
+    // This thread's row of weights, or its column, when the tile has it.
+    long mine = (sg == 0 ? r0 : c0) + lane;
+    bool have = mine < (sg == 0 ? rows : n);
+    device const uchar * w = s0 + mine * a.src[0].nb[1] + b2 * a.src[0].nb[2] + b3 * a.src[0].nb[3];
+    device const uchar * x = s1 + mine * a.src[1].nb[1] + i2 * a.src[1].nb[2] + i3 * a.src[1].nb[3];
+    simdgroup_float8x8 acc[8];
+    for (int i = 0; i < 8; i++) {
+        acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+    for (long k0 = 0; k0 < k_n; k0 += TILE) {
+        int len = k_n - k0 < TILE ? int(k_n - k0) : TILE;
+        float v32[32];
+        if (!have) {
+            #pragma unroll
+            for (int l = 0; l < 32; l++) {
+                v32[l] = 0.0f;
+            }
+        } else if (sg == 0) {
+            decode32(w, wt, wnb, k0, len, v32);
+        } else {
+            load32(x, xnb, xt, k0, len, v32);
+        }
+        threadgroup float * dst_row = (sg == 0 ? sa : sb) + lane * TILE;
+        #pragma unroll
+        for (int l = 0; l < 32; l++) {
+            dst_row[l] = v32[l];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int kk = 0; kk < TILE; kk += 8) {
+            simdgroup_float8x8 ma[4];
+            simdgroup_float8x8 mb[2];
+            for (int i = 0; i < 4; i++) {
+                simdgroup_load(ma[i], sa + i * 8 * TILE + kk, TILE);
+            }
+            // sb holds a column's values in a row, so it is read transposed.
+            for (int j = 0; j < 2; j++) {
+                simdgroup_load(mb[j], sb + (sg * 16 + j * 8) * TILE + kk, TILE, ulong2(0, 0), true);
+            }
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 2; j++) {
+                    simdgroup_multiply_accumulate(acc[i * 2 + j], ma[i], mb[j], acc[i * 2 + j]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 2; j++) {
+            simdgroup_store(acc[i * 2 + j], sa + i * 8 * TILE + sg * 16 + j * 8, TILE);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Neighboring threads write neighboring rows, which sit side by side in dst.
+    for (uint at = tid; at < uint(TILE * TILE); at += 64) {
+        long r = at % TILE;
+        long c = at / TILE;
+        if (r0 + r < rows && c0 + c < n) {
+            store(d, a.dst, r0 + r, c0 + c, i2, i3, sa[r * TILE + c]);
+        }
+    }
 }
 
 // rope(src0, pos) → dst. f[0] freq_base, f[1] freq_scale, f[2] attn_factor;
@@ -347,45 +739,82 @@ kernel void k_swiglu(device const uchar * s0 [[buffer(0)]], device const uchar *
 }
 
 // flash_attn_ext(q [D, T, H, 1], k [D, KV, Hkv, 1], v [Dv, KV, Hkv, 1],
-// mask [KV, T]) → dst [Dv, H, T, 1], with f[0] the scale. One thread per
+// mask [KV, T]) → dst [Dv, H, T, 1], with f[0] the scale. One SIMD group per
 // query head and token computes the whole softmax over the cache, in one pass.
+// Thread `lane` holds values `lane`, `lane + 32` and so on of the query and of
+// the output, up to eight each, since a head is at most 256 wide. Only the
+// first `i[6]` cells hold tokens; the mask hides every cell past them.
 kernel void k_flash_attn(device const uchar * q [[buffer(0)]], device const uchar * k [[buffer(1)]],
                          device const uchar * v [[buffer(2)]], device const uchar * mask [[buffer(3)]],
                          device uchar * d [[buffer(4)]], constant Args & a [[buffer(5)]],
-                         uint gid [[thread_position_in_grid]]) {
-    if (long(gid) >= a.i[7]) return;
+                         uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    long item = gid / GROUP;
+    if (item >= a.i[7]) return;
     long tokens = a.src[0].ne[1];
-    long t = gid % tokens;
-    long h = gid / tokens;
+    long t = item % tokens;
+    long h = item / tokens;
     long dk = a.src[0].ne[0];
     long dv = a.src[2].ne[0];
-    long n_kv = a.src[1].ne[1];
+    long n_kv = a.src[1].ne[1] < a.i[6] ? a.src[1].ne[1] : a.i[6];
     long hkv = h / (a.src[0].ne[2] / a.src[1].ne[2]);
     float scale = a.f[0];
+    float qv[8];
+    float acc[8];
+    #pragma unroll
+    for (int m = 0; m < 8; m++) {
+        long e = long(lane) + m * GROUP;
+        qv[m] = e < dk ? load(q, a.src[0], e, t, h, 0) : 0.0f;
+        acc[m] = 0.0f;
+    }
+    // This head's cache and this token's mask row, found once; each cell is
+    // then one stride further on.
+    device const uchar * k_head = k + hkv * a.src[1].nb[2];
+    device const uchar * v_head = v + hkv * a.src[2].nb[2];
+    device const uchar * m_row = mask + t * a.src[3].nb[1];
+    long k_nb0 = a.src[1].nb[0];
+    long k_nb1 = a.src[1].nb[1];
+    long v_nb0 = a.src[2].nb[0];
+    long v_nb1 = a.src[2].nb[1];
+    long m_nb0 = a.src[3].nb[0];
+    int kt = int(a.src[1].type);
+    int vt = int(a.src[2].type);
+    int mt = int(a.src[3].type);
     float running_max = -INFINITY;
     float denom = 0.0f;
-    float acc[256];
-    for (long e = 0; e < dv; e++) acc[e] = 0.0f;
     for (long j = 0; j < n_kv; j++) {
-        float m = load(mask, a.src[3], j, t, 0, 0);
-        if (m == -INFINITY) continue;
+        float mk = float_at(m_row, m_nb0, mt, j);
+        if (mk == -INFINITY) continue;
+        device const uchar * k_cell = k_head + j * k_nb1;
         float s = 0.0f;
-        for (long e = 0; e < dk; e++) {
-            s += load(q, a.src[0], e, t, h, 0) * load(k, a.src[1], e, j, hkv, 0);
+        #pragma unroll
+        for (int m = 0; m < 8; m++) {
+            long e = long(lane) + m * GROUP;
+            if (e < dk) {
+                s += qv[m] * float_at(k_cell, k_nb0, kt, e);
+            }
         }
-        s = s * scale + m;
+        s = simd_sum(s) * scale + mk;
         float next_max = max(running_max, s);
         float old_scale = exp(running_max - next_max);
         float w = exp(s - next_max);
         denom = denom * old_scale + w;
-        for (long e = 0; e < dv; e++) {
-            acc[e] = acc[e] * old_scale + w * load(v, a.src[2], e, j, hkv, 0);
+        device const uchar * v_cell = v_head + j * v_nb1;
+        #pragma unroll
+        for (int m = 0; m < 8; m++) {
+            long e = long(lane) + m * GROUP;
+            if (e < dv) {
+                acc[m] = acc[m] * old_scale + w * float_at(v_cell, v_nb0, vt, e);
+            }
         }
         running_max = next_max;
     }
     float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
-    for (long e = 0; e < dv; e++) {
-        store(d, a.dst, e, h, t, 0, acc[e] * inv);
+    #pragma unroll
+    for (int m = 0; m < 8; m++) {
+        long e = long(lane) + m * GROUP;
+        if (e < dv) {
+            store(d, a.dst, e, h, t, 0, acc[m] * inv);
+        }
     }
 }
 

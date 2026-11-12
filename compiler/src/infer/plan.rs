@@ -32,7 +32,12 @@ pub const KERNELS: &[&str] = &[
     "k_set_rows",
     "k_swiglu",
     "k_flash_attn",
+    "k_mul_mm",
 ];
+
+/// The kernel a `mul_mat` runs in a step of more than one token, by its place
+/// in [`KERNELS`]. No op record names it; the step picks it.
+pub const MUL_MM: i64 = 10;
 
 /// How many threads an op runs, by what it computes one of. The number is
 /// word 73 of its record.
@@ -45,6 +50,21 @@ pub mod threads {
     pub const SRC1: i64 = 2;
     /// One per query token and head, for attention.
     pub const ATTENTION: i64 = 3;
+    /// For `mul_mat`: one per value of the destination, as [`DST`], in a step
+    /// of one token. In a step of more, the step runs [`super::MUL_MM`]
+    /// instead, with one per tile of [`TILE`] rows by [`TILE`] tokens, and
+    /// [`TILE_THREADS`] threads each.
+    pub const MAT: i64 = 4;
+    /// The rows of weights and the tokens in one `k_mul_mm` tile. `TILE` in
+    /// `kernels.metal` is the same number.
+    pub const TILE: i64 = 32;
+    /// The threads that compute one `k_mul_mm` tile: two SIMD groups, one
+    /// threadgroup.
+    pub const TILE_THREADS: i64 = 64;
+    /// The threads that share each of those in `mul_mat`, `rms_norm` and
+    /// `flash_attn_ext`, which read a whole row for each: one SIMD group. Word
+    /// 74 of a record is this or 1.
+    pub const GROUP: i64 = 32;
 }
 
 /// Purpose: This struct holds where a tensor is: a region and a byte offset.
@@ -75,8 +95,9 @@ pub struct InferPlan {
     /// for none), byte offset, `ne` four times, `nb` four times, ggml type, and
     /// the dimension that counts tokens (-1 for none). Words 61 to 64 are
     /// eight `f32` parameters, two to a word, low half first; words 65 to 72
-    /// are eight integer parameters; word 73 says how many threads, from
-    /// [`threads`].
+    /// are eight integer parameters, of which the step sets the last two; word
+    /// 73 says what the kernel computes one of, from [`threads`], and word 74
+    /// how many threads share each one.
     pub ops: Vec<[i64; OP_WORDS]>,
     /// The step's inputs: token ids (i32), positions (i32), the KV cells each
     /// token is written to (i64, for K and for V), the attention mask (f16,
@@ -221,19 +242,19 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
         let output = op["outputs"][0].as_str().unwrap_or("");
         let params = &op["params"];
         let p = |k: &str| params[k].as_f64().unwrap_or(0.0);
-        let (kernel, rule) = match kind {
+        let (kernel, rule, width) = match kind {
             // These move no data: their tensors are views the plan placed.
             "view" | "reshape" | "permute" | "transpose" => continue,
-            "get_rows" => (0, threads::DST),
-            "rms_norm" => (1, threads::DST_ROWS),
-            "mul" => (2, threads::DST),
-            "add" => (3, threads::DST),
-            "mul_mat" => (4, threads::DST),
-            "rope" => (5, threads::DST),
-            "cpy" | "cont" => (6, threads::DST),
-            "set_rows" => (7, threads::SRC1),
-            "swiglu" => (8, threads::DST),
-            "flash_attn_ext" => (9, threads::ATTENTION),
+            "get_rows" => (0, threads::DST, 1),
+            "rms_norm" => (1, threads::DST_ROWS, threads::GROUP),
+            "mul" => (2, threads::DST, 1),
+            "add" => (3, threads::DST, 1),
+            "mul_mat" => (4, threads::MAT, threads::GROUP),
+            "rope" => (5, threads::DST, 1),
+            "cpy" | "cont" => (6, threads::DST, 1),
+            "set_rows" => (7, threads::SRC1, 1),
+            "swiglu" => (8, threads::DST, 1),
+            "flash_attn_ext" => (9, threads::ATTENTION, threads::GROUP),
             other => {
                 return Err(fail(format!(
                     "its step uses the op `{other}`, which the Metal kernels do not run yet"
@@ -262,6 +283,15 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
         let mut ints = [0i64; 8];
         match kind {
             "rms_norm" => f[0] = p("eps") as f32,
+            // The kernel decodes the weights and reads the other side as floats.
+            "mul_mat" if ![0, 1, 30].contains(&rec[1 + 12 + 10]) => {
+                return Err(fail(format!(
+                    "its mul_mat {output} multiplies by {}, of ggml type {}, and the Metal kernels \
+                     multiply weights by f32, f16 or bf16 values only",
+                    inputs.get(1).unwrap_or(&""),
+                    rec[1 + 12 + 10]
+                )));
+            }
             "rope" => {
                 if p("ext_factor") != 0.0 {
                     return Err(fail(
@@ -287,6 +317,16 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
                 if rec[1 + 2 * 12 + 2] > 256 {
                     return Err(fail("its attention heads are wider than 256".into()));
                 }
+                for slot in [1, 2] {
+                    let ty = rec[1 + slot * 12 + 10];
+                    if ![0, 1, 30].contains(&ty) {
+                        return Err(fail(format!(
+                            "its attention reads a KV cache of ggml type {ty}, and the Metal \
+                             kernels read f32, f16 or bf16 caches only; add the model to dovata \
+                             with an f16 cache, the default"
+                        )));
+                    }
+                }
                 f[0] = p("scale") as f32;
             }
             _ => {}
@@ -298,6 +338,7 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
         }
         rec[65..73].copy_from_slice(&ints);
         rec[73] = rule;
+        rec[74] = width;
         ops.push(rec);
     }
 

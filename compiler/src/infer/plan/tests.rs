@@ -88,3 +88,51 @@ fn rope_parameters_ride_in_the_record() {
     assert_eq!(rec[65], 4);
     assert_eq!(rec[66], 2);
 }
+
+#[test]
+fn row_kernels_give_each_output_a_simd_group() {
+    let p = plan(
+        json!([{"op": "rms_norm", "inputs": ["inpL"], "outputs": ["inpL"], "params": {"eps": 1e-6}},
+               {"op": "mul_mat", "inputs": ["token_embd.weight", "inpL"], "outputs": ["inpL"], "params": {}},
+               {"op": "add", "inputs": ["inpL", "inpL"], "outputs": ["inpL"], "params": {}}]),
+        Vec::new(),
+    );
+    let r = read("m", &p).unwrap();
+    let widths: Vec<i64> = r.ops.iter().map(|rec| rec[74]).collect();
+    assert_eq!(widths, vec![threads::GROUP, threads::GROUP, 1]);
+    // A mul_mat over many tokens runs as tiles, through a kernel the step picks.
+    assert_eq!(r.ops[1][73], threads::MAT);
+    assert_eq!(KERNELS[MUL_MM as usize], "k_mul_mm");
+}
+
+#[test]
+fn a_mul_mat_by_quantized_values_is_refused() {
+    let q = json!({"tensor": "blk.0.q", "role": {"kind": "weight"}, "ggml_type": 8,
+                   "dims": [32, 4], "region": 0, "offset": 64});
+    let p = plan(
+        json!([{"op": "mul_mat", "inputs": ["token_embd.weight", "blk.0.q"], "outputs": ["inpL"], "params": {}}]),
+        vec![q],
+    );
+    let e = read("m", &p).unwrap_err();
+    assert!(e.contains("mul_mat inpL") && e.contains("blk.0.q"), "{e}");
+}
+
+#[test]
+fn attention_over_a_quantized_cache_is_refused() {
+    let tensor = |name: &str, ty: i64, dims: serde_json::Value, offset: i64| {
+        json!({"tensor": name, "role": {"kind": "kv"}, "ggml_type": ty, "dims": dims,
+               "region": 1, "offset": offset})
+    };
+    let entries = vec![
+        tensor("q", 0, json!([64, 8, 2]), 8192),
+        tensor("k", 8, json!([64, 16, 2]), 16384),
+        tensor("v", 1, json!([64, 16, 2]), 24576),
+    ];
+    let p = plan(
+        json!([{"op": "flash_attn_ext", "inputs": ["q", "k", "v", "attn_inp_kq_mask"],
+                "outputs": ["inpL"], "params": {"scale": 0.125}}]),
+        entries,
+    );
+    let e = read("m", &p).unwrap_err();
+    assert!(e.contains("KV cache of ggml type 8") && e.contains("f16 cache"), "{e}");
+}
