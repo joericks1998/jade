@@ -26,7 +26,7 @@ A merge that changes no version tags nothing and releases nothing. A merge that 
 
 ## Why each workflow only runs for its own directory
 
-`ci.yml` ignores `dovata/**` and `vscode/**`, and `dovata-ci.yml` runs only for `dovata/**`, the root `Cargo.toml` and `Cargo.lock`, and its own workflow files. A change to dovata alone does not install LLVM 18 and build the compiler, and a change to the compiler does not run dovata's tests. The root `Cargo.toml` is the workspace's alone, with no version of its own, and the lockfile is shared, so a change to either runs both. `vscode-ci.yml` runs only for `vscode/**` and its own workflow files, and builds no Rust.
+`ci.yml` ignores `dovata/**` and `vscode/**`, and `dovata-ci.yml` runs only for `dovata/**`, the root `Cargo.toml` and `Cargo.lock`, and its own workflow files. A change to dovata alone does not install LLVM 18 and build the compiler, and a change to the compiler does not run dovata's tests. The root `Cargo.toml` is the workspace's alone, with no version of its own, and the lockfile is shared, so a change to either runs both. `vscode-ci.yml` runs for `vscode/**`, its own workflow files and any `.jde` file, since its grammar test tokenizes every example, and builds no Rust.
 
 Every cargo command in dovata's workflows names dovata's packages with `-p`, never `--workspace`, because the workspace holds the compiler too, and the compiler needs LLVM 18 to build. The compiler's commands need no `-p`: the workspace's `default-members` is `compiler`, so a bare `cargo build` at the root builds `jade` alone. The one exception is `cargo fmt -p jade --check`, since `cargo fmt --all` would reach dovata, which is not formatted with rustfmt.
 
@@ -46,7 +46,7 @@ Never re-cut an existing tag. A new version is a new tag.
 - `release.yml` builds `jade` for Linux x86_64 and Apple Silicon and publishes it.
 - `dovata-ci.yml` builds and tests dovata's three crates on Ubuntu and macOS: the tests with every capability compiled out, refback's Metal tests on macOS, the quantize tests on both through the llama.cpp build `dovata setup` installs, `dovata machine info` on the runner, and clippy. On `main` it also runs `tag-release` for dovata.
 - `dovata-release.yml` builds `dovata` and `gguf-inspect` for Linux x86_64 and Apple Silicon and publishes them. `refback` is the test-only reference backend and is never published.
-- `vscode-ci.yml` checks that the extension's JSON files parse and packages it with `vsce`. On `main` it also runs `tag-release` for the extension.
+- `vscode-ci.yml` checks that the extension's JSON files parse, runs `vscode/test/`, which tokenizes a case for each construct in the language and every `.jde` file in the repo with the engine VS Code uses, and packages the extension with `vsce`. On `main` it also runs `tag-release` for the extension.
 - `vscode-release.yml` packages the extension, publishes it to the Visual Studio Marketplace with the `VSCE_PAT` secret, a Marketplace token for the `joericks` publisher, and attaches the `.vsix` to a GitHub release.
 - `deploy-docs.yml` builds and publishes the docs site when `docs/` or `dovata/install.sh` changes on `main`. It copies `dovata/install.sh` into the site, so both installers come from jadelang.org: `/install.sh` for the compiler and `/dovata/install.sh` for dovata.
 

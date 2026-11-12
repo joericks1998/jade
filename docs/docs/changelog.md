@@ -6,10 +6,13 @@ sidebar_label: Changelog
 
 ## vscode v1.1.3
 
-*The VS Code extension lives in the Jade repo.* This is an extension release alone; the compiler and dovata do not change.
+*The VS Code extension colors Jade 2.0, and lives in the Jade repo.* This is an extension release alone; the compiler and dovata do not change.
 
-- *The extension's source moved here* from `joericks1998/jadelang-extension` at 1.1.2, under `vscode/`, with its history. It keeps its own version and releases, tagged `vscode-v1.1.3`, and publishes to the Visual Studio Marketplace from this repo's CI.
-- *The Marketplace page links to the right repo.* It pointed at `joericks/jadelang-vscode-extension`, which does not exist; it now points at `vscode/` in `joericks1998/jade`. Highlighting is the same as 1.1.2.
+- *Classes are colored.* `class Dog(Animal)` colors the class and its parents, `fn Dog::speak()` colors the class and the method, and `Account::new`, `Animal(d)`, `x is Dog` and class literals color the class name. `@public` and type decorators such as `@int` and `@Animal` get their own colors, and a decorator no longer colors the rest of its line, so `@public name` leaves `name` alone.
+- *The rest of 2.0's syntax is colored:* `break`, `continue`, `yield`, `and`, `or`, `not`, the `...` of a copy-with literal, a `?` before any expression such as `?(a + b)`, and every global that needs no import, such as `wait`, `join` and `set_max_tokens`. Function parameters are colored, defaults included.
+- *Removed syntax is struck through in red:* `struct`, `extend`, `interface`, `use x as y` and quoted import paths. Closure parameters and binary literals are no longer colored as if they worked, and an escape the compiler would refuse, such as `"\q"`, is marked as an error.
+- *A test checks the grammar against the compiler.* `vscode/test/` holds a case for each construct in the lexer and parser, and tokenizes every `.jde` file in the repo with the engine VS Code uses; CI runs it.
+- *The extension's source moved here* from `joericks1998/jadelang-extension` at 1.1.2, under `vscode/`, with its history. It keeps its own version and releases, tagged `vscode-v1.1.3`, and publishes to the Visual Studio Marketplace from this repo's CI. The Marketplace page now links to it; it pointed at a repo that does not exist.
 
 ## dovata v3.2.1
 

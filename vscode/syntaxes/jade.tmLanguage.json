@@ -2,253 +2,538 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Jade",
   "scopeName": "source.jade",
-  "fileTypes": ["jde"],
+  "fileTypes": [
+    "jde"
+  ],
+  "comment": "The syntax of Jade 2.0.2, from compiler/src/frontend/lexer.rs and parser.rs. docs/jade-syntax-spec.md lists each construct and the scope it gets here.",
   "patterns": [
-    { "include": "#comment" },
-    { "include": "#expression" }
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#expression"
+    }
   ],
   "repository": {
     "expression": {
-      "comment": "Everything except line comments. Split out from the top-level list so f-string interpolations can reuse it: a `//` inside `{...}` is division-adjacent noise at worst, but as a comment rule it would swallow the closing brace and quote and wreck the rest of the line.",
+      "comment": "Everything except line comments. Split out from the top-level list so f-string interpolations can reuse it: a `//` inside `{...}` as a comment rule would swallow the closing brace and quote and wreck the rest of the line. Order matters: the rules for a name in a particular place come before the general rules for keywords, types and calls.",
       "patterns": [
-        { "include": "#fstring-triple-double" },
-        { "include": "#fstring-triple-single" },
-        { "include": "#fstring-double" },
-        { "include": "#fstring-single" },
-        { "include": "#string-triple-double" },
-        { "include": "#string-triple-single" },
-        { "include": "#string-double" },
-        { "include": "#string-single" },
-        { "include": "#prompt-member-deref" },
-        { "include": "#prompt-deref" },
-        { "include": "#exception-catch-typed" },
-        { "include": "#decorator" },
-        { "include": "#function-declaration" },
-        { "include": "#type-declaration" },
-        { "include": "#struct-literal" },
-        { "include": "#keywords" },
-        { "include": "#storage-types" },
-        { "include": "#constants" },
-        { "include": "#constants-nil" },
-        { "include": "#numbers" },
-        { "include": "#support-functions" },
-        { "include": "#function-call" },
-        { "include": "#closure-params" },
-        { "include": "#operators" }
+        {
+          "include": "#removed-quoted-import"
+        },
+        {
+          "include": "#fstring-triple-double"
+        },
+        {
+          "include": "#fstring-triple-single"
+        },
+        {
+          "include": "#fstring-double"
+        },
+        {
+          "include": "#fstring-single"
+        },
+        {
+          "include": "#string-triple-double"
+        },
+        {
+          "include": "#string-triple-single"
+        },
+        {
+          "include": "#string-double"
+        },
+        {
+          "include": "#string-single"
+        },
+        {
+          "include": "#prompt-member-deref"
+        },
+        {
+          "include": "#prompt-deref"
+        },
+        {
+          "include": "#exception-catch-typed"
+        },
+        {
+          "include": "#decorator"
+        },
+        {
+          "include": "#class-declaration"
+        },
+        {
+          "include": "#function-declaration"
+        },
+        {
+          "include": "#is-test"
+        },
+        {
+          "include": "#removed-keywords"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#storage-types"
+        },
+        {
+          "include": "#constants"
+        },
+        {
+          "include": "#constants-nil"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#support-functions"
+        },
+        {
+          "include": "#support-classes"
+        },
+        {
+          "include": "#type-reference"
+        },
+        {
+          "include": "#function-call"
+        },
+        {
+          "include": "#operators"
+        }
       ]
     },
-
     "comment": {
+      "comment": "Jade has line comments only.",
       "name": "comment.line.double-slash.jade",
       "match": "//.*$"
     },
-
-    "escape": {
+    "escape-double": {
+      "comment": "The lexer accepts these escapes and no others; in a string it can escape only its own quote.",
       "name": "constant.character.escape.jade",
+      "match": "\\\\[\\\\nrt\"]"
+    },
+    "escape-single": {
+      "name": "constant.character.escape.jade",
+      "match": "\\\\[\\\\nrt']"
+    },
+    "fescape-double": {
+      "comment": "An f-string also escapes its braces: \\{ and \\}.",
+      "name": "constant.character.escape.jade",
+      "match": "\\\\[\\\\nrt\"{}]"
+    },
+    "fescape-single": {
+      "name": "constant.character.escape.jade",
+      "match": "\\\\[\\\\nrt'{}]"
+    },
+    "escape-invalid": {
+      "comment": "Any other escape is a compile error, so it is marked as one.",
+      "name": "invalid.illegal.escape.jade",
       "match": "\\\\."
     },
-
     "fstring-interpolation": {
-      "comment": "shared {expr} interpolation body for all f-string variants. `meta.embedded.line.jade` sits on top of the enclosing string scope so the theme rule for it can reset the interpolated code back to normal code coloring — without it the expression inherits the string foreground and `f\"x = {foo(bar)}\"` renders as one undifferentiated orange run.",
+      "comment": "The {expr} part of every f-string. `meta.embedded.line.jade` sits on top of the string scope so the theme rule for it resets the code inside to normal coloring; without it `f\"x = {foo(bar)}\"` renders as one run of string color.",
       "name": "meta.embedded.line.jade",
       "begin": "\\{",
       "beginCaptures": {
-        "0": { "name": "punctuation.section.embedded.begin.jade" }
+        "0": {
+          "name": "punctuation.section.embedded.begin.jade"
+        }
       },
       "end": "\\}",
       "endCaptures": {
-        "0": { "name": "punctuation.section.embedded.end.jade" }
+        "0": {
+          "name": "punctuation.section.embedded.end.jade"
+        }
       },
       "patterns": [
-        { "include": "#fstring-nested-braces" },
-        { "include": "#expression" }
+        {
+          "include": "#fstring-nested-braces"
+        },
+        {
+          "include": "#expression"
+        }
       ]
     },
-
     "fstring-nested-braces": {
-      "comment": "Balances inner braces — dict literals and struct literals inside an interpolation, e.g. f\"{Point { x: 1 }}\" — so the first inner `}` doesn't close the interpolation early.",
+      "comment": "Balances inner braces, such as a dict or class literal inside an interpolation, f\"{Point { x: 1 }}\", so the first inner `}` does not close the interpolation. The lexer counts braces the same way.",
       "begin": "\\{",
       "end": "\\}",
       "patterns": [
-        { "include": "#fstring-nested-braces" },
-        { "include": "#expression" }
+        {
+          "include": "#fstring-nested-braces"
+        },
+        {
+          "include": "#expression"
+        }
       ]
     },
-
     "fstring-triple-double": {
-      "comment": "f\"\"\"...{expr}...\"\"\" — must be tried before fstring-double so the closing triple-quote isn't mistaken for an empty string",
+      "comment": "Triple-quoted forms come before single-quoted ones, so the closing quotes are not read as an empty string. `\\b` keeps `buf\"x\"` a name and a string, as the lexer reads it.",
       "name": "string.quoted.triple.jade",
-      "begin": "f\"\"\"",
+      "begin": "\\bf\"\"\"",
       "end": "\"\"\"",
       "patterns": [
-        { "include": "#fstring-interpolation" },
-        { "include": "#escape" }
+        {
+          "include": "#fstring-interpolation"
+        },
+        {
+          "include": "#fescape-double"
+        },
+        {
+          "include": "#escape-invalid"
+        }
       ]
     },
-
     "fstring-triple-single": {
-      "comment": "f'''...{expr}...''' — single-quote triple variant",
       "name": "string.quoted.triple.jade",
-      "begin": "f'''",
+      "begin": "\\bf'''",
       "end": "'''",
       "patterns": [
-        { "include": "#fstring-interpolation" },
-        { "include": "#escape" }
+        {
+          "include": "#fstring-interpolation"
+        },
+        {
+          "include": "#fescape-single"
+        },
+        {
+          "include": "#escape-invalid"
+        }
       ]
     },
-
     "fstring-double": {
       "name": "string.quoted.double.jade",
-      "begin": "f\"",
+      "begin": "\\bf\"",
       "end": "\"",
       "patterns": [
-        { "include": "#fstring-interpolation" },
-        { "include": "#escape" }
+        {
+          "include": "#fstring-interpolation"
+        },
+        {
+          "include": "#fescape-double"
+        },
+        {
+          "include": "#escape-invalid"
+        }
       ]
     },
-
     "fstring-single": {
-      "comment": "f'...{expr}...' — single-quote f-strings are equivalent to double-quote ones",
       "name": "string.quoted.single.jade",
-      "begin": "f'",
+      "begin": "\\bf'",
       "end": "'",
       "patterns": [
-        { "include": "#fstring-interpolation" },
-        { "include": "#escape" }
+        {
+          "include": "#fstring-interpolation"
+        },
+        {
+          "include": "#fescape-single"
+        },
+        {
+          "include": "#escape-invalid"
+        }
       ]
     },
-
     "string-triple-double": {
-      "comment": "\"\"\"...\"\"\" multi-line string — must be tried before string-double",
+      "comment": "Every string may span lines; the triple-quoted forms only spare escaping the quote.",
       "name": "string.quoted.triple.jade",
       "begin": "\"\"\"",
       "end": "\"\"\"",
-      "patterns": [{ "include": "#escape" }]
+      "patterns": [
+        {
+          "include": "#escape-double"
+        },
+        {
+          "include": "#escape-invalid"
+        }
+      ]
     },
-
     "string-triple-single": {
-      "comment": "'''...''' multi-line string — single-quote triple variant",
       "name": "string.quoted.triple.jade",
       "begin": "'''",
       "end": "'''",
-      "patterns": [{ "include": "#escape" }]
+      "patterns": [
+        {
+          "include": "#escape-single"
+        },
+        {
+          "include": "#escape-invalid"
+        }
+      ]
     },
-
     "string-double": {
       "name": "string.quoted.double.jade",
       "begin": "\"",
       "end": "\"",
-      "patterns": [{ "include": "#escape" }]
+      "patterns": [
+        {
+          "include": "#escape-double"
+        },
+        {
+          "include": "#escape-invalid"
+        }
+      ]
     },
-
     "string-single": {
-      "comment": "'...' single-quote strings are equivalent to double-quote ones",
       "name": "string.quoted.single.jade",
       "begin": "'",
       "end": "'",
-      "patterns": [{ "include": "#escape" }]
+      "patterns": [
+        {
+          "include": "#escape-single"
+        },
+        {
+          "include": "#escape-invalid"
+        }
+      ]
     },
-
     "prompt-member-deref": {
-      "comment": "obj~>p — sugar for obj.(?p), a prompt dereference on a member. Mirrors prompt-deref: the ~> gets jade-green, the prompt name gets variable coloring. Listed before prompt-deref and before operators so the name isn't left unstyled and the ~ / > aren't split into bitwise + comparison tokens.",
-      "match": "(~>)\\s*([a-zA-Z_][a-zA-Z0-9_]*)",
+      "comment": "obj~>p, the short form of obj.(?p): a prompt dereference on a member. Listed before the operators so `~` and `>` are not split into bitwise and comparison tokens.",
+      "match": "(~>)\\s*([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "keyword.other.prompt.jade" },
-        "2": { "name": "variable.other.jade" }
+        "1": {
+          "name": "keyword.other.prompt.jade"
+        },
+        "2": {
+          "name": "variable.other.jade"
+        }
       }
     },
-
     "prompt-deref": {
-      "comment": "?varname — the ? gets jade-green, the name gets variable coloring",
-      "match": "(\\?)([a-zA-Z_][a-zA-Z0-9_]*)",
+      "comment": "?p, and the `?` of obj.(?p). `?prompt \"...\"` is left to the keyword rule. A `?` before anything else, such as ?(a + b) or ?items[0], is colored by the operators rule.",
+      "match": "(\\?)\\s*(?!prompt\\b)([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "keyword.other.prompt.jade" },
-        "2": { "name": "variable.other.jade" }
+        "1": {
+          "name": "keyword.other.prompt.jade"
+        },
+        "2": {
+          "name": "variable.other.jade"
+        }
       }
     },
-
     "exception-catch-typed": {
-      "comment": "catch TypeName binding — TypeName gets type coloring; catch-all `catch e` falls through to the plain keyword rule since bindings are lowercase",
-      "match": "\\b(catch)\\s+([A-Z][A-Za-z0-9_]*)\\b",
+      "comment": "catch TypeName binding: two names before the block. `catch e` has one, and falls to the keyword rule.",
+      "match": "\\b(catch)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s+[A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "keyword.control.jade" },
-        "2": { "name": "entity.name.type.jade" }
+        "1": {
+          "name": "keyword.control.jade"
+        },
+        "2": {
+          "name": "entity.name.type.jade"
+        }
       }
     },
-
     "decorator": {
-      "comment": "@name or @ns::name preceding fn/async fn/struct/extend, e.g. `@tools::register`, `@route(on = \"action\")`. Confirmed against jade's own parser_tests.rs (parse_decorators): stacks (one per line), optional (args), positional and `key = value` forms. Ends right before `(` — the argument list itself is left to the normal top-level rules (strings, numbers, operators, nested struct literals all already tokenize correctly there, same as any other call's parens).",
-      "begin": "(@)([A-Za-z_][A-Za-z0-9_]*)",
-      "beginCaptures": {
-        "1": { "name": "punctuation.decorator.jade" },
-        "2": { "name": "entity.name.function.decorator.jade" }
-      },
-      "end": "(?=[^A-Za-z0-9_:\\s]|$)",
+      "comment": "@public on a class member, a type such as @int or @Animal, or any other decorator such as @tools::register or @retry(3). A decorator may share its line with what it decorates, `@public @int count`, so the rule stops at the end of the name; an argument list is left to the other rules.",
+      "match": "(@)\\s*(?:(public)\\b|(int|float|bool|str|char)\\b|((?:[A-Za-z_][A-Za-z0-9_]*\\s*::\\s*)*[A-Za-z_][A-Za-z0-9_]*))",
+      "captures": {
+        "1": {
+          "name": "punctuation.decorator.jade"
+        },
+        "2": {
+          "name": "storage.modifier.visibility.jade"
+        },
+        "3": {
+          "name": "storage.type.jade"
+        },
+        "4": {
+          "patterns": [
+            {
+              "name": "keyword.operator.path.jade",
+              "match": "::"
+            },
+            {
+              "comment": "A capitalized name is a class, which declares the type of what it decorates.",
+              "name": "entity.name.type.jade",
+              "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+            },
+            {
+              "name": "entity.name.function.decorator.jade",
+              "match": "[A-Za-z_][A-Za-z0-9_]*"
+            }
+          ]
+        }
+      }
+    },
+    "class-declaration": {
+      "comment": "class Name, with an optional parent list that may span lines: class Dog(Animal, shapes.Pet).",
       "patterns": [
         {
-          "name": "keyword.operator.path.jade",
-          "match": "::"
+          "begin": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.jade"
+            },
+            "2": {
+              "name": "entity.name.type.jade"
+            },
+            "3": {
+              "name": "punctuation.definition.inheritance.begin.jade"
+            }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.inheritance.end.jade"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comment"
+            },
+            {
+              "comment": "The last name of each parent; `shapes` in `shapes.Pet` is the file it comes from.",
+              "name": "entity.other.inherited-class.jade",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?!\\s*\\.)"
+            }
+          ]
         },
         {
-          "name": "entity.name.function.decorator.jade",
-          "match": "[A-Za-z_][A-Za-z0-9_]*"
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.jade"
+            },
+            "2": {
+              "name": "entity.name.type.jade"
+            }
+          }
         }
       ]
     },
-
     "function-declaration": {
-      "comment": "fn name( — colors fn as keyword and name as function entity",
-      "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
-      "captures": {
-        "1": { "name": "keyword.declaration.jade" },
-        "2": { "name": "entity.name.function.jade" }
-      }
-    },
-
-    "type-declaration": {
+      "comment": "fn name(params), or fn Type::method(params) for a method defined outside its class, where Type may be qualified: fn shapes.Point::area(). The parameter list may span lines, and each parameter may have a default.",
+      "begin": "\\b(fn)\\s+(?:((?:[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*)*)([A-Za-z_][A-Za-z0-9_]*)\\s*(::)\\s*)?([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.declaration.jade"
+        },
+        "3": {
+          "name": "entity.name.type.jade"
+        },
+        "4": {
+          "name": "keyword.operator.path.jade"
+        },
+        "5": {
+          "name": "entity.name.function.jade"
+        },
+        "6": {
+          "name": "punctuation.definition.parameters.begin.jade"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.parameters.end.jade"
+        }
+      },
       "patterns": [
         {
-          "comment": "struct Name / interface Name",
-          "match": "\\b(struct|interface)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "include": "#comment"
+        },
+        {
+          "include": "#parameter-nested"
+        },
+        {
+          "comment": "A parameter is the first name in the list, after a comma, or at the start of a line.",
+          "match": "(?:(?<=[(,])|^)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "keyword.declaration.jade" },
-            "2": { "name": "entity.name.type.jade" }
+            "1": {
+              "name": "variable.parameter.jade"
+            }
           }
         },
         {
-          "comment": "extend Name / extend Name: Interface",
-          "match": "\\b(extend)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*))?",
-          "captures": {
-            "1": { "name": "keyword.declaration.jade" },
-            "2": { "name": "entity.name.type.jade" },
-            "3": { "name": "entity.other.inherited-class.jade" }
-          }
+          "include": "#expression"
         }
       ]
     },
-
-    "struct-literal": {
-      "comment": "TypeName { ... } struct instantiation — highlights the type name at the call site, e.g. `Point { x: 10 }`",
-      "match": "\\b([A-Z][A-Za-z0-9_]*)\\b(?=\\s*\\{)",
+    "parameter-nested": {
+      "comment": "Brackets inside a default value, such as `b = f(1, c)` or `d = [1, e]`, so their commas do not start a parameter and their `)` does not end the list.",
+      "patterns": [
+        {
+          "begin": "\\(",
+          "end": "\\)",
+          "patterns": [
+            {
+              "include": "#parameter-nested"
+            },
+            {
+              "include": "#expression"
+            }
+          ]
+        },
+        {
+          "begin": "\\[",
+          "end": "\\]",
+          "patterns": [
+            {
+              "include": "#parameter-nested"
+            },
+            {
+              "include": "#expression"
+            }
+          ]
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [
+            {
+              "include": "#parameter-nested"
+            },
+            {
+              "include": "#expression"
+            }
+          ]
+        }
+      ]
+    },
+    "is-test": {
+      "comment": "x is Dog, a class test, where the class may be qualified: x is shapes.Dog.",
+      "match": "\\b(is)\\s+(?:[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*)*([A-Za-z_][A-Za-z0-9_]*)\\b",
       "captures": {
-        "1": { "name": "entity.name.type.jade" }
+        "1": {
+          "name": "keyword.operator.word.jade"
+        },
+        "2": {
+          "name": "entity.name.type.jade"
+        }
       }
     },
-
+    "removed-quoted-import": {
+      "comment": "use \"file.jde\" and from \"file.jde\" use ... were removed; imports name a module with :: notation, such as use std::math.",
+      "match": "\\b(use|from)\\s+(\"[^\"]*\"|'[^']*')",
+      "captures": {
+        "1": {
+          "name": "keyword.declaration.jade"
+        },
+        "2": {
+          "name": "string.quoted.jade invalid.deprecated.removed.jade"
+        }
+      }
+    },
+    "removed-keywords": {
+      "comment": "struct, extend and interface were removed in favor of class, and the `as` import alias was removed. The lexer still reads them so the compiler can name the replacement; they are marked removed rather than colored as working keywords.",
+      "name": "invalid.deprecated.removed.jade",
+      "match": "\\b(struct|extend|interface|as)\\b"
+    },
     "keywords": {
       "patterns": [
         {
           "name": "keyword.control.jade",
-          "match": "\\b(if|elif|else|while|for|in|return|try|catch|raise|await)\\b"
+          "match": "\\b(if|elif|else|while|for|in|return|break|continue|yield|try|catch|raise|await)\\b"
         },
         {
           "name": "keyword.declaration.jade",
-          "match": "\\b(let|fn|struct|extend|interface|use|async|from|as)\\b"
+          "match": "\\b(let|fn|class|use|from|async)\\b"
         },
         {
-          "comment": "prompt keyword — same jade-green scope as ?deref",
+          "comment": "The same jade green as ? and ~>.",
           "name": "keyword.other.prompt.jade",
           "match": "\\bprompt\\b"
+        },
+        {
+          "comment": "The lexer reads these as &&, || and !, and `is` tests a class.",
+          "name": "keyword.operator.word.jade",
+          "match": "\\b(and|or|not|is)\\b"
         },
         {
           "name": "keyword.other.jade",
@@ -256,31 +541,23 @@
         }
       ]
     },
-
     "storage-types": {
-      "comment": "primitive types used in typed prompts and interface signatures",
+      "comment": "The built-in types: conversions such as int(x), pipe targets such as ?p |> int, and decorators such as @int. Not after a dot, where the name is a field.",
       "name": "storage.type.jade",
-      "match": "\\b(int|float|bool|str)\\b"
+      "match": "(?<!\\.)\\b(int|float|bool|str|char)\\b"
     },
-
     "constants": {
       "name": "constant.language.boolean.jade",
       "match": "\\b(true|false)\\b"
     },
-
     "constants-nil": {
-      "comment": "nil, None, and null are interchangeable spellings of the same absence-of-value literal",
+      "comment": "nil, None and null are three spellings of the same value.",
       "name": "constant.language.null.jade",
       "match": "\\b(nil|None|null)\\b"
     },
-
     "numbers": {
+      "comment": "Decimal integers and floats with digits on both sides of the point. Jade has no hex, binary, exponent or underscore forms.",
       "patterns": [
-        {
-          "comment": "binary integer literal — must precede the generic integer rule so 0b1010 isn't split into 0 + b1010",
-          "name": "constant.numeric.integer.jade",
-          "match": "\\b0b[01]+\\b"
-        },
         {
           "name": "constant.numeric.float.jade",
           "match": "\\b\\d+\\.\\d+\\b"
@@ -291,49 +568,50 @@
         }
       ]
     },
-
     "support-functions": {
+      "comment": "The globals a program has without an import, from compiler/src/core/mod.rs, plus join. Not after a dot, so list.join(\",\") stays a method call.",
       "name": "support.function.builtin.jade",
-      "match": "\\b(print|len|write|input)\\b(?=\\s*\\()"
+      "match": "(?<!\\.)\\b(print|len|write|input|wait|route|join|cancelled|max_tasks|set_max_tasks|max_tokens|set_max_tokens)\\b(?=\\s*\\()"
     },
-
-    "function-call": {
-      "comment": "name(...) — every call site: plain calls, `extend`-block methods and other dot-calls (`bird.is_bipedal()`, `math.sqrt(…)`), and the trailing segment of a module-path call like `pkg::helper(…)`. One rule covers all three because `\\b` matches after a `.` or a `:` just as it does after a space, so the receiver and the path separators fall to their own rules and only the callee is captured. Deliberately placed AFTER keywords, storage-types, constants and support-functions in the `expression` list: those all match the same bare-identifier shape, so an earlier position here would repaint `if (x)`, `int(1, 6)`, and `print(x)` as ordinary calls. `fn name(` is likewise claimed earlier by `function-declaration`, so definitions keep their own color.",
-      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+    "support-classes": {
+      "comment": "Grammar, the one built-in class: Grammar.new(pattern).",
+      "name": "support.class.builtin.jade",
+      "match": "\\bGrammar\\b"
+    },
+    "type-reference": {
+      "comment": "A capitalized name before {, ( or :: is a class: a literal Point { x: 1 }, a view Animal(d), or a member Account::new and Parent::m().",
+      "match": "\\b([A-Z][A-Za-z0-9_]*)\\b(?=\\s*(?:\\{|\\(|::))",
       "captures": {
-        "1": { "name": "entity.name.function.call.jade" }
+        "1": {
+          "name": "entity.name.type.jade"
+        }
       }
     },
-
-    "closure-params": {
-      "comment": "Matches |x, y| closure params. Lookbehind excludes alnum/]/)/| to avoid bitwise |. Lookahead requires the content starts with a letter (not a space), filtering out bitwise `a | b | c` chains.",
-      "begin": "(?<![a-zA-Z0-9_])\\|(?=[a-zA-Z_][a-zA-Z0-9_,\\s]*\\|)",
-      "beginCaptures": {
-        "0": { "name": "punctuation.definition.parameters.begin.jade" }
-      },
-      "end": "\\|",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.parameters.end.jade" }
-      },
-      "patterns": [
-        {
-          "name": "variable.parameter.jade",
-          "match": "[a-zA-Z_][a-zA-Z0-9_]*"
+    "function-call": {
+      "comment": "name(...): plain calls, method calls such as bird.speak(), and the last part of a path such as Account::new(...). `\\b` matches after `.` and `:` as it does after a space, so only the callee is captured. It comes after the keyword, type and built-in rules, which match the same shape.",
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.call.jade"
         }
-      ]
+      }
     },
-
     "operators": {
       "patterns": [
         {
-          "comment": "module-path separator — use std::math, from std::math use floor, @tools::register",
+          "comment": "The base of a copy-with literal: Config { ...c, port: 9090 }.",
+          "name": "keyword.operator.spread.jade",
+          "match": "\\.\\.\\."
+        },
+        {
+          "comment": "Paths and class members: std::time, Account::new, @tools::register.",
           "name": "keyword.operator.path.jade",
           "match": "::"
         },
         {
-          "comment": "~> — jade-green like `prompt` and `?`. Must precede the bitwise and comparison rules so the ~ and > aren't tokenized separately.",
+          "comment": "~> and a ? that prompt-deref did not take. Before the bitwise and comparison rules so ~> stays one token.",
           "name": "keyword.other.prompt.jade",
-          "match": "~>"
+          "match": "~>|\\?"
         },
         {
           "name": "keyword.operator.pipe.jade",
@@ -341,7 +619,11 @@
         },
         {
           "name": "keyword.operator.logical.jade",
-          "match": "&&|\\|\\||!"
+          "match": "&&|\\|\\||!(?!=)"
+        },
+        {
+          "name": "keyword.operator.comparison.jade",
+          "match": "==|!=|<=|>="
         },
         {
           "name": "keyword.operator.bitwise.jade",
@@ -349,7 +631,7 @@
         },
         {
           "name": "keyword.operator.comparison.jade",
-          "match": "==|!=|<=|>=|<|>"
+          "match": "<|>"
         },
         {
           "name": "keyword.operator.arithmetic.jade",
@@ -357,7 +639,7 @@
         },
         {
           "name": "keyword.operator.assignment.jade",
-          "match": "(?<![=!<>])=(?!=)"
+          "match": "="
         }
       ]
     }

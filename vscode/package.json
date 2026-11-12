@@ -152,6 +152,43 @@
             "settings": {
               "foreground": "#8AA3B0"
             }
+          },
+          {
+            "scope": "keyword.operator.word.jade",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "storage.modifier.visibility.jade",
+            "settings": {
+              "foreground": "#4FA6E0"
+            }
+          },
+          {
+            "scope": "support.class.builtin.jade",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "keyword.operator.spread.jade",
+            "settings": {
+              "foreground": "#8AA3B0"
+            }
+          },
+          {
+            "scope": "invalid.illegal.escape.jade",
+            "settings": {
+              "foreground": "#F44747"
+            }
+          },
+          {
+            "scope": "invalid.deprecated.removed.jade",
+            "settings": {
+              "foreground": "#F44747",
+              "fontStyle": "strikethrough"
+            }
           }
         ]
       }

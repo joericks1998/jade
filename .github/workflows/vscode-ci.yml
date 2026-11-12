@@ -6,19 +6,24 @@
 
 name: VS Code extension CI
 
-# Only changes to the extension and its two workflows. The compiler's ci.yml
-# ignores the same tree, so an extension change builds no Rust.
+# Changes to the extension and its two workflows, and to any .jde file, since the
+# grammar test tokenizes every one. The compiler's ci.yml ignores vscode/, so an
+# extension change builds no Rust.
 on:
   push:
     branches: [main]
     paths:
       - "vscode/**"
       - ".github/workflows/vscode-*.yml"
+      - "compiler/src/**/*.jde"
+      - "examples/**"
   pull_request:
     branches: [main]
     paths:
       - "vscode/**"
       - ".github/workflows/vscode-*.yml"
+      - "compiler/src/**/*.jde"
+      - "examples/**"
   workflow_dispatch:
 
 jobs:
@@ -46,6 +51,16 @@ jobs:
             node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$f"
             echo "ok $f"
           done
+
+      # Tokenizes a case for each construct in the compiler's lexer and parser,
+      # and every .jde file in the repo, with vscode-textmate, the engine VS Code
+      # uses. A rule that colors a construct wrongly, or marks valid code as an
+      # error, fails here.
+      - name: Test the grammar
+        working-directory: vscode/test
+        run: |
+          npm ci
+          npm test
 
       # The same packaging the release runs, so a manifest the Marketplace would
       # refuse fails before the merge.

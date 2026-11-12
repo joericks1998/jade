@@ -2,7 +2,7 @@
 
 Syntax highlighting for the [Jade programming language](https://jadelang.org), in `.jde` files.
 
-The extension colors Jade's keywords, types, strings and f-string interpolation, numbers, decorators, function definitions and calls, and the prompt operators, with prompts in jade green. It also sets up comment toggling, bracket matching and auto-closing pairs for `.jde` files.
+The extension colors all of Jade 2.0.2: classes and their parents, `@public` and type decorators, methods defined as `fn Type::method`, functions and their parameters, calls, keywords, strings and f-string interpolation, and the prompt operators, with prompts in jade green. Syntax the compiler has removed, such as `struct` or `use x as y`, is struck through in red, and an escape the compiler would refuse is red. It also sets up comment toggling, bracket matching and auto-closing pairs for `.jde` files.
 
 Install it from the Visual Studio Marketplace by searching for *Jade Language*, or with:
 
@@ -20,12 +20,22 @@ What each file does:
 - `syntaxes/jade.tmLanguage.json` is the TextMate grammar: the rules that split a line into scopes, such as `keyword.other.prompt.jade`.
 - `language-configuration.json` sets comments, brackets and auto-closing pairs.
 - `assets/Vector.svg` is the file icon for `.jde` files.
-- `docs/jade-syntax-spec.md` lists every Jade syntax construct and whether the grammar colors it. It was written against Jade 1.1.12, so check it against the current language before trusting it.
-- `examples/demo.jde` is a file to open while working on the grammar, to see each rule at once.
+- `docs/jade-syntax-spec.md` lists every construct in Jade 2.0.2 and the scope the grammar gives it, taken from the compiler's lexer and parser.
+- `examples/demo.jde` uses each construct once, to see every rule at a glance. It is real Jade: `jade check vscode/examples/demo.jde` passes.
+- `test/` checks the grammar with vscode-textmate, the engine VS Code uses. `cases.js` holds one case per construct, and `grammar.js` runs them and then tokenizes every `.jde` file in the repo, failing on valid code marked as an error or a keyword left uncolored. It has its own `package.json`, so the extension itself has no dependencies.
 - `.vscodeignore` lists what the `.vsix` leaves out: the files above that are for working on the extension, not for running it.
 - `.vscode/launch.json` runs the extension in a new VS Code window. Open this directory, `vscode/`, as the workspace folder and press F5.
 
-To try a change, open `vscode/` in VS Code, press F5, and open `examples/demo.jde` in the window that starts. *Developer: Inspect Editor Tokens and Scopes* shows the scope under the cursor.
+To try a change, open `vscode/` in VS Code, press F5, and open `examples/demo.jde` in the window that starts. *Developer: Inspect Editor Tokens and Scopes* shows the scope under the cursor. To test it:
+
+```sh
+cd vscode/test
+npm ci
+npm test                        # every case, then every .jde file in the repo
+node grammar.js show file.jde   # each token in a file and its scopes
+```
+
+When the language gains or loses syntax, change the grammar, add a case to `test/cases.js`, and update `docs/jade-syntax-spec.md` and `examples/demo.jde` in the same change.
 
 ## Releasing
 
