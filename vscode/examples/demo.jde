@@ -1,0 +1,213 @@
+// Jade language syntax highlighting demo
+
+// --- Structs and interfaces ---
+
+interface Describable {
+    fn describe(self)
+}
+
+struct Animal {
+    name,
+    legs,
+    sound
+}
+
+extend Animal: Describable {
+    fn describe(self) {
+        return f"{self.name} has {self.legs} legs and says {self.sound}"
+    }
+
+    fn is_bipedal(self) {
+        return self.legs == 2
+    }
+}
+
+// --- Functions and recursion ---
+
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn range(n) {
+    let result = []
+    let i = 0
+    while i < n {
+        result[len(result)] = i
+        i = i + 1
+    }
+    return result
+}
+
+// --- Closures and pipe operator ---
+
+let double = |x| x * 2
+let add = |x, y| x + y
+
+let nums = [1, 2, 3, 4, 5]
+for n in nums {
+    let r = n |> double |> double
+    print(r)
+}
+
+// --- Exception handling ---
+
+fn safe_divide(a, b) {
+    if b == 0 {
+        raise "division by zero"
+    }
+    return a / b
+}
+
+try {
+    let result = safe_divide(10, 0)
+    print(result)
+} catch e {
+    print(f"caught: {e}")
+}
+
+// --- Operators and types ---
+
+let x = 42
+let y = 3.14
+let flag = true
+let bits = 0b1010 & 6
+let shifted = 8 >> 1
+let piped = 5 |> add(3)
+
+// --- Prompt declarations (jade green) ---
+
+prompt summary = "Summarize the Jade language in one sentence."
+prompt score: int = "Rate the readability of Jade from 1 to 10."
+prompt is_simple: bool = "Is Jade a simple language? Answer true or false."
+
+// --- Using prompt dereferences (jade green) ---
+
+let description = ?summary
+let rating = ?score
+let simple = ?is_simple
+
+print(description)
+print(f"Readability score: {rating}")
+print(f"Simple language: {simple}")
+
+// --- Member prompt dereference: obj~>p is sugar for obj.(?p) ---
+
+struct Critic {
+    name
+}
+
+extend Critic {
+    fn review(self) {
+        prompt verdict = f"{self.name} reviews Jade in one word."
+        return ?verdict
+    }
+}
+
+let critic = Critic { name: "Ada" }
+
+let verdict_long  = critic.(?verdict)
+let verdict_short = critic~>verdict
+
+print(verdict_short)
+
+// --- Main demo ---
+
+let dog = Animal { name: "Dog", legs: 4, sound: "woof" }
+let bird = Animal { name: "Bird", legs: 2, sound: "tweet" }
+
+print(dog.describe())
+print(bird.describe())
+print(f"Bird is bipedal: {bird.is_bipedal()}")
+print(f"5! = {factorial(5)}")
+print(f"2 + 3 = {add(2, 3)}")
+
+// --- Literals: nil family, single/triple-quoted strings, binary ints ---
+
+let empty1 = nil
+let empty2 = None
+let empty3 = null
+
+let single = 'hello'
+let block  = """
+multi
+line
+"""
+let block2 = '''
+also
+multi
+line
+'''
+let mask = 0b1010 & 6
+
+let single_f = f'single-quoted f-string: {mask}'
+let block_f  = f"""
+triple f-string
+value: {single}
+"""
+
+// Interpolations hold real code: nested string args, calls, and brace literals
+// all stay distinguishable from the surrounding string text.
+print(f"basename   = {strlib.basename("/usr/local/lib/libglib.so")}")
+print(f"has prefix = {strlib.has_prefix("jadelang", "jade")}")
+print(f"point      = {Animal { name: "Dog", legs: 4, sound: "woof" }}")
+
+// --- Imports: ::, from ... use, as ---
+
+use std::math
+use std::string as strlib
+from std::random use int, choice
+
+let root = math.sqrt(144.0)
+let roll = int(1, 6)
+
+// --- Async / await ---
+
+async fn ask(q) {
+    prompt p = q
+    return await ?p
+}
+
+let future = ask("What is the capital of France?")
+let answer = await future
+
+// --- Typed catch arm ---
+
+struct ValueError {
+    message
+}
+
+try {
+    raise ValueError { message: "bad input" }
+} catch ValueError e {
+    print(e.message)
+} catch e {
+    print("unexpected error")
+}
+
+// --- Decorators ---
+
+@tools::register
+fn get_weather(city) {
+    return f"Sunny in {city}"
+}
+
+@retry(3)
+@route(on = "action")
+async fn handle_action(payload) {
+    return await payload
+}
+
+@log("City")
+struct City {
+    name
+}
+
+@route("action")
+extend City {
+    fn describe(self) {
+        return f"City: {self.name}"
+    }
+}
