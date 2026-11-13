@@ -1,0 +1,152 @@
+// A tour of Jade 2.0.2's syntax, for checking the grammar by eye.
+// Open it in the window F5 starts. `jade check vscode/examples/demo.jde` passes.
+
+use std::math
+use std::string
+use std::time
+
+// --- Classes: parents, @public, type decorators, constructors, destructors ---
+
+class Animal {
+    @public name
+    @public @int legs
+    @public let sound = "..."
+
+    @public fn new(name, legs)
+    @public fn speak()
+    fn drop()
+}
+
+fn Animal::new(name, legs) {
+    return Animal { name: name, legs: legs }
+}
+
+fn Animal::speak() {
+    return f"{.name} says {.sound}"
+}
+
+fn Animal::drop() { }
+
+class Dog(Animal) {
+    @public let tricks = 0
+
+    @public fn speak() {
+        return Animal::speak() + "!"
+    }
+
+    @public fn learn(trick) {
+        print(f"{.name} learns {trick}")
+        .tricks = .tricks + 1
+    }
+}
+
+let rex = Dog { name: "Rex", legs: 4, sound: "woof" }
+rex.learn("sit")
+print(rex.speak())
+
+// A class test, a class view, and a copy with one field changed
+if rex is Dog and not (rex.legs == 2) {
+    let pet = Animal(rex)
+    print(pet.name)
+}
+let older = Dog { ...rex, name: "Rex II" }
+
+// Type decorators convert or declare
+@int
+let n = "42"
+@float let ratio = 1
+@Animal let creature = Dog { name: "Fido", legs: 4 }
+
+// --- Functions: defaults, keyword arguments, pipes, streams ---
+
+fn scale(x, by = 2, offset = math.floor(0.5)) {
+    return x * by + offset
+}
+
+fn count_to(limit) {
+    let i = 0
+    while i < limit {
+        i = i + 1
+        if i % 2 == 0 { continue }
+        yield i
+    }
+}
+
+let big = 5 |> scale(by = 10)
+for odd in count_to(9) {
+    if odd > 7 { break }
+    print(odd)
+}
+
+// --- Async: tasks, await, join ---
+
+async fn square(x) {
+    return x * x
+}
+
+let squares = join(square(2), square(3))
+let one = await square(4)
+set_max_tasks(max_tasks() * 2)
+
+// --- Exceptions: raising a class, typed and catch-all arms ---
+
+class ValueError {
+    @public message
+}
+
+try {
+    raise ValueError { message: "bad input" }
+} catch ValueError e {
+    print(e.message)
+} catch e {
+    print("something else")
+}
+
+// --- Prompts: declarations, ?p, typed reads, prompt fields ---
+
+class Critic {
+    @public name
+    @public prompt verdict = "Review Jade in one word."
+}
+
+prompt summary = "Summarize Jade in one sentence."
+prompt score = "Rate Jade from 1 to 10. Answer with a number."
+
+let critic = Critic { name: "Ada" }
+let words = ?summary
+let rating = ?score |> int
+let short = critic~>verdict
+let long = critic.(?verdict)
+let inline = ?prompt "Name a color."
+set_max_tokens(64)
+
+// --- Decorators on let, fn and prompt ---
+
+fn shout(text) {
+    return string.upper(text)
+}
+
+@shout
+let greeting = "hello"
+
+// --- Literals and operators ---
+
+let empty = [nil, None, null]
+let flags = true && !false || false
+let limits = { "min": -9223372036854775808, "max": 9223372036854775807 }
+let pi = 3.14159
+let bits = (6 & 3) | (1 << 4) ^ ~0 >> 1
+let compare = 1 <= 2 and 3 != 4 and 5 >= 5
+let missing = "z" not in ["a", "b"]
+let quoted = 'single, with \'escape\''
+let escapes = "tab\tnewline\nquote\"backslash\\"
+let block = """
+a string over
+several lines
+"""
+let started = time.now()
+let report = f"""
+{rex.name} knows {rex.tricks} trick, {len(words)} characters of summary, \{braces\} are literal,
+and {Dog { name: "Ace", legs: 3 }.name} has three legs
+"""
+write(report)

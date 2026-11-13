@@ -1,0 +1,83 @@
+# Author: Joe Ricks
+# File: .github/workflows/vscode-release.yml
+# Description: Packages the VS Code extension, under vscode/, publishes it to the
+# Visual Studio Marketplace, and attaches the .vsix to a GitHub release tagged vscode-v*.
+
+name: VS Code extension Release
+
+on:
+  push:
+    tags:
+      - 'vscode-v*'
+  # Sent by the tag-release job in vscode-ci.yml when the extension's version is new.
+  repository_dispatch:
+    types: [release-vscode]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, such as vscode-v1.1.3'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      # Every trigger builds the tagged commit. A manual run names its tag as an
+      # input, and a dispatch carries it in its payload.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.tag || github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      # A tag whose name does not match vscode/package.json's version would publish
+      # a different version than the tag says, so the release stops here.
+      - name: Check the tag and the version
+        working-directory: vscode
+        run: |
+          case "$TAG" in
+            vscode-v*) ;;
+            *) echo "::error::the tag \"$TAG\" does not start with vscode-v"; exit 1 ;;
+          esac
+          version="$(node -p "require('./package.json').version")"
+          if [ "$version" != "${TAG#vscode-v}" ]; then
+            echo "::error::the tag is $TAG, but vscode/package.json says $version"
+            exit 1
+          fi
+          echo "VSIX=jadelang-extension-$version.vsix" >> "$GITHUB_ENV"
+
+      # The same .vsix goes to the Marketplace and to the GitHub release.
+      - name: Package
+        working-directory: vscode
+        run: vsce package --out "$VSIX"
+
+      - name: Publish to the Marketplace
+        working-directory: vscode
+        run: vsce publish --packagePath "$VSIX"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      # make_latest is false because the repo's latest release is the compiler's:
+      # `jade upgrade` and the compiler's install.sh ask GitHub for the latest
+      # release and read its tag as jade's version.
+      - name: Create release and upload the .vsix
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          make_latest: false
+          files: vscode/${{ env.VSIX }}

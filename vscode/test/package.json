@@ -1,0 +1,12 @@
+{
+  "name": "jadelang-extension-grammar-test",
+  "private": true,
+  "description": "Tests vscode/syntaxes/jade.tmLanguage.json with vscode-textmate, the engine VS Code uses. Not part of the extension.",
+  "scripts": {
+    "test": "node grammar.js test"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
+  }
+}

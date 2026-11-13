@@ -31,20 +31,21 @@ let review = a~>system        // or the explicit a.(?system)
 
 ## What is in this repo
 
-The repo holds two programs. Each is a directory with its own `Cargo.toml`, `README.md` and `src/`, and each has its own version and its own releases.
+The repo holds two programs and an editor extension. Each is a directory with its own manifest and `README.md`, and each has its own version and its own releases.
 
 | directory | what it is |
 |---|---|
 | [`compiler/`](compiler/README.md) | `jade`, the compiler and the rest of the toolchain: lexer, parser, type checker, LLVM backend, package manager and CLI. Start here to work on the language. |
 | [`dovata/`](dovata/README.md) | the process that holds a model's memory, plans where every tensor lives, and hands that memory to compiled programs. |
+| [`vscode/`](vscode/README.md) | the VS Code extension: syntax highlighting for `.jde` files. Not a Cargo crate. |
 
-The rest is shared by both:
+The rest is shared:
 
 - [`examples/`](examples/README.md) is the `.jde` fixture suite. CI checks every one, and builds and runs most of them.
 - [`design/`](design/README.md) holds design documents for work in progress.
 - [`docs/`](docs/README.md) is the jadelang.org site, for people using Jade.
 - [`bench/`](bench/README.md) holds benchmarks against CPython.
-- [`.github/workflows/`](.github/workflows/README.md) tests and releases both programs.
+- [`.github/workflows/`](.github/workflows/README.md) tests and releases all three.
 
 The root `Cargo.toml` is the workspace and nothing else. A bare `cargo build` or `cargo test` here means the compiler; name dovata's packages with `-p`, as in `cargo build -p dovata`.
 

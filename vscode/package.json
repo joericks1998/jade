@@ -1,0 +1,197 @@
+{
+  "name": "jadelang-extension",
+  "displayName": "Jade Language",
+  "description": "Syntax highlighting for the Jade programming language (.jde files)",
+  "version": "1.1.3",
+  "publisher": "joericks",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joericks1998/jade",
+    "directory": "vscode"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "jadelang",
+        "aliases": ["Jade", "jade", "JadeLang"],
+        "extensions": [".jde"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./assets/Vector.svg",
+          "dark": "./assets/Vector.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "jadelang",
+        "scopeName": "source.jade",
+        "path": "./syntaxes/jade.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": "keyword.other.prompt.jade",
+            "settings": {
+              "foreground": "#00A86B"
+            }
+          },
+          {
+            "scope": "support.function.builtin.jade",
+            "settings": {
+              "foreground": "#0095ff"
+            }
+          },
+          {
+            "scope": "keyword.control.jade",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "keyword.declaration.jade",
+            "settings": {
+              "foreground": "#4FA6E0"
+            }
+          },
+          {
+            "scope": "keyword.other.jade",
+            "settings": {
+              "foreground": "#8AA3B0"
+            }
+          },
+          {
+            "scope": "keyword.operator.path.jade",
+            "settings": {
+              "foreground": "#7A93A6"
+            }
+          },
+          {
+            "scope": "storage.type.jade",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "constant.language.boolean.jade",
+            "settings": {
+              "foreground": "#4FC1FF"
+            }
+          },
+          {
+            "scope": "constant.language.null.jade",
+            "settings": {
+              "foreground": "#4FC1FF"
+            }
+          },
+          {
+            "scope": ["constant.numeric.integer.jade", "constant.numeric.float.jade"],
+            "settings": {
+              "foreground": "#8FD19E"
+            }
+          },
+          {
+            "scope": "entity.name.function.jade",
+            "settings": {
+              "foreground": "#5FB3B3"
+            }
+          },
+          {
+            "scope": "entity.name.function.call.jade",
+            "settings": {
+              "foreground": "#B392F0"
+            }
+          },
+          {
+            "scope": "entity.name.type.jade",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "entity.other.inherited-class.jade",
+            "settings": {
+              "foreground": "#7FCB9C"
+            }
+          },
+          {
+            "scope": "variable.parameter.jade",
+            "settings": {
+              "foreground": "#9CDCFE"
+            }
+          },
+          {
+            "scope": "punctuation.decorator.jade",
+            "settings": {
+              "foreground": "#8AA3B0"
+            }
+          },
+          {
+            "scope": "entity.name.function.decorator.jade",
+            "settings": {
+              "foreground": "#7FD1AE"
+            }
+          },
+          {
+            "scope": "meta.embedded.line.jade",
+            "settings": {
+              "foreground": "#D4D4D4"
+            }
+          },
+          {
+            "scope": [
+              "punctuation.section.embedded.begin.jade",
+              "punctuation.section.embedded.end.jade"
+            ],
+            "settings": {
+              "foreground": "#8AA3B0"
+            }
+          },
+          {
+            "scope": "keyword.operator.word.jade",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "storage.modifier.visibility.jade",
+            "settings": {
+              "foreground": "#4FA6E0"
+            }
+          },
+          {
+            "scope": "support.class.builtin.jade",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "keyword.operator.spread.jade",
+            "settings": {
+              "foreground": "#8AA3B0"
+            }
+          },
+          {
+            "scope": "invalid.illegal.escape.jade",
+            "settings": {
+              "foreground": "#F44747"
+            }
+          },
+          {
+            "scope": "invalid.deprecated.removed.jade",
+            "settings": {
+              "foreground": "#F44747",
+              "fontStyle": "strikethrough"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+# What `vsce package` leaves out of the .vsix: files for working on the
+# extension, not for running it.
+.vscode/**
+.gitignore
+docs/**
+examples/**
+test/**
+*.vsix
