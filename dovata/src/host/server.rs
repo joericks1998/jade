@@ -33,6 +33,10 @@ const LOOK_EVERY: Duration = Duration::from_secs(1);
 /// How often a model's record is rewritten while it loads, so status shows progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
+/// How long a stopping process waits for adds still planning, which remove the names of
+/// any memory they made once they see it stopping.
+const ADDS_WAIT: Duration = Duration::from_secs(10);
+
 /// Purpose: This struct holds one part file of a model, mapped whole.
 struct Part {
     /// The whole file, mapped read-only.
@@ -103,10 +107,10 @@ struct Server {
 }
 
 /// Purpose: This struct holds the process's place in the run directory while it runs:
-/// a lock on `dovata.lock`, held until the process exits. Dropping it removes the
-/// process's record and its models' records, on a stop and on an error alike. Requests
-/// and answers stay, so a program can read the answer to its stop; the next start
-/// removes them.
+/// a lock on `dovata.lock`, held until the process exits. Dropping it removes the names
+/// of every model's shared memory and the process's records, on a stop, an error and a
+/// panic alike. Requests and answers stay, so a program can read the answer to its stop;
+/// the next start removes them.
 struct Claim {
     /// The run directory.
     dir: PathBuf,
@@ -123,6 +127,11 @@ impl Drop for Claim {
     /// Outputs: none.
     fn drop(&mut self)
     {
+        // A stop has removed these names already; no other process can have made them
+        // again, since it cannot start until this one gives back the lock.
+        for name in state::shared_names_in(&self.dir) {
+            memory::unlink_shared(&name);
+        }
         let _ = std::fs::remove_file(state::process_path(&self.dir));
         let _ = std::fs::remove_dir_all(state::models_dir(&self.dir));
     }
@@ -172,17 +181,22 @@ pub(crate) fn serve_in(
         return Ok(());
     }
 
-    'run: loop {
+    loop {
         if wake.wait(LOOK_EVERY) == Wake::Stop {
             eprintln!("dovata: stopping on a signal");
             break;
         }
+        let mut stopping = false;
         for req in state::take_requests(dir) {
+            if stopping {
+                state::answer(dir, &req.id, Err("dovata is stopping".into()));
+                continue;
+            }
             match req.op {
                 Op::Stop => {
                     state::answer(dir, &req.id, Ok(()));
                     eprintln!("dovata: stopping on request");
-                    break 'run;
+                    stopping = true;
                 }
                 Op::Remove => {
                     let name = String::from_utf8_lossy(&req.body).into_owned();
@@ -194,14 +208,20 @@ pub(crate) fn serve_in(
                 Op::Add => {
                     let server = Arc::clone(&server);
                     std::thread::spawn(move || {
-                        let r = match serde_json::from_slice::<Spec>(&req.body) {
+                        // A panic still answers, so the program that asked is not left
+                        // waiting.
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match serde_json::from_slice::<Spec>(&req.body) {
                             Ok(spec) => add(&server, spec).map_err(|e| e.to_string()),
                             Err(e) => Err(format!("the request is not a model dovata can add: {e}")),
-                        };
+                        }))
+                        .unwrap_or_else(|_| Err("dovata failed while adding the model; its log says why".into()));
                         state::answer(&server.dir, &req.id, r);
                     });
                 }
             }
+        }
+        if stopping {
+            break;
         }
     }
     shut_down(&server);
@@ -235,10 +255,19 @@ fn shut_down(
     server: &Server,
 )
 {
-    let mut t = table(server);
-    t.stopping = true;
-    for m in std::mem::take(&mut t.models).into_values() {
-        m.held.unlink();
+    {
+        let mut t = table(server);
+        t.stopping = true;
+        for m in std::mem::take(&mut t.models).into_values() {
+            m.held.unlink();
+        }
+    }
+    // An add still planning may make shared memory before it sees the process stopping;
+    // it removes the names once it does. Exiting first would leave them until the machine
+    // restarts.
+    let start = Instant::now();
+    while !table(server).adding.is_empty() && start.elapsed() < ADDS_WAIT {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -280,6 +309,9 @@ fn add(
     check_name(&spec.name)?;
     let _adding = {
         let mut t = table(server);
+        if t.stopping {
+            return Err(HostError::Refused("dovata is stopping".into()));
+        }
         if t.models.contains_key(&spec.name) || t.adding.contains(&spec.name) {
             return Err(HostError::Refused(format!(
                 "dovata already holds a model named {}; remove it first, or add this one with another --name",
@@ -509,37 +541,36 @@ fn claim(
     let lock_path = state::lock_path(dir);
     let mut lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&lock_path).map_err(|e| io(e, &lock_path))?;
     // A program checking whether dovata runs holds a shared lock for a moment, so a lock
-    // whose named holder is gone is tried again for a little while.
+    // that is held is tried again for a little while before another process is said to
+    // hold it. Its named holder proves nothing: the file may name a process that is gone
+    // and whose id is now another program's, or name no process yet.
     let mut tries = 0;
     loop {
         match lock.try_lock() {
             Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
             Err(std::fs::TryLockError::WouldBlock) => {
                 let pid = std::fs::read_to_string(&lock_path).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
-                tries += 1;
-                if memory::alive(pid) || tries > 50 {
-                    return Err(HostError::AlreadyRunning(pid));
-                }
-                std::thread::sleep(Duration::from_millis(20));
+                return Err(HostError::AlreadyRunning(pid));
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(io(e, &lock_path)),
         }
     }
+    // A killed process's record would say it still runs until this one writes its own.
+    let _ = std::fs::remove_file(state::process_path(dir));
     // The lock file names its holder, so a refused start can say which process runs.
     {
         use std::io::{Seek, Write};
         let _ = lock.set_len(0).and_then(|()| lock.rewind()).and_then(|_| write!(lock, "{}", std::process::id())).and_then(|()| lock.flush());
     }
     // A process that was killed left its records, and the names of its shared memory,
-    // which would otherwise stay until the machine restarts.
-    if let Ok(stale) = state::models(dir) {
-        for m in stale {
-            for r in &m.regions {
-                if let Open::Shared { name } = &r.open {
-                    memory::unlink_shared(name);
-                }
-            }
-        }
+    // which would otherwise stay until the machine restarts. Only the names are read, so
+    // a record of another version still gives them.
+    for name in state::shared_names_in(dir) {
+        memory::unlink_shared(&name);
     }
     let claim = Claim { dir: dir.to_path_buf(), _lock: lock };
     let _ = std::fs::remove_dir_all(state::models_dir(dir));

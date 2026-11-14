@@ -90,9 +90,12 @@ The process holds a lock on `dovata.lock` for as long as it runs, and the system
 releases the lock when it exits, however it exits. That is how a program tells whether
 dovata runs: it asks for a shared lock on the file, which is refused only while the
 process holds its own. A lock it is given means nothing runs, whatever files a killed
-process left. A second process is refused while the lock is held, and is told the first
-one's process id, which the lock file holds. A lock held with no `process` record is a
-dovata older than 3.2.2, and the library says to stop it.
+process left. A process writes its record just after taking the lock and removes it just
+before giving the lock back, so a program that finds the lock held with no record waits
+half a second for one; a lock still held with no record after that is a dovata older
+than 3.2.2, and the library says to stop it. A second process is refused once the lock
+stays held for a fifth of a second, and is told the first one's process id, which the
+lock file holds.
 
 The run directory is per user, so two users on one machine each have their own process.
 Neither sees the other's memory.
@@ -138,14 +141,20 @@ its tokenizer, its name, its layout and the step to plan for. The process:
 1. checks the tokenizer against the model's vocabulary and plans the model for this
    machine, as `dovata machine target` describes it, with the tokenizer in the plan;
 2. sets up the plan's memory: each part file mapped once, read-only, and each allocated
-   region as a named shared memory object, readable and writable by this user only;
+   region as a named shared memory object, readable and writable by this user only. On
+   Linux every page of it is taken now, since the objects live on `/dev/shm`, which
+   holds half the machine's memory by default and 64 MiB in a default container; a model
+   that does not fit there is refused, where a write past the limit later would end the
+   process with SIGBUS;
 3. checks the model fits beside the ones it holds: the files and allocations of every
    model together must fit the new model's budget, Metal's working set on a Mac. The
    planner has already checked the model alone;
 4. writes the model's plan and record, and answers;
-5. reads every page of the model file and writes every page of each allocation on a
+5. reads every page of the model file and touches every page of each allocation on a
    thread of its own, so the whole model ends up in physical memory, rewriting the
-   record as it goes so status shows the progress.
+   record as it goes so status shows the progress. A program may map the allocations
+   while they load, so touching a page is an atomic `or` of zero, which changes no byte
+   the program wrote.
 
 `add` then waits until the record says the model is ready and returns its status. A
 name is taken once: a second model of the same name is refused until the first is
@@ -170,7 +179,14 @@ its offsets do not fit.
 
 A process that is killed cannot remove its names, and shared memory outlives the process
 that made it until the machine restarts. The next start reads the records the killed
-process left and removes every name in them.
+process left and removes every name in them, reading only the names, so a record of
+another version still gives them. A process that stops, on a request, a signal, an error
+or a panic, removes them itself, and waits for any add still planning to remove the
+names it made.
+
+Names are shared by every user of a machine, so another user could make an object under
+a name dovata does not hold at the moment. A program and `map` both refuse an object
+that is not this user's, or that anyone else may read or write.
 
 ### The tokenizer
 
@@ -258,6 +274,9 @@ process and one line per model beside the machine's own readings.
   allocation at its size. A named object cannot be sealed, so a program of the same user
   could shrink one under the others; macOS refuses a second `ftruncate` of a shared
   memory object on its own.
+- *Logging out on Linux.* systemd-logind removes a user's `/dev/shm` objects when their
+  last session ends, by default. dovata keeps its memory, but programs can no longer open
+  it by name; `loginctl enable-linger` keeps it, and the error says so.
 - *Two programs running the same model at once.* They share its KV cache, as they did
   before.
 

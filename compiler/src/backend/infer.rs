@@ -43,8 +43,11 @@ const KERNELS_SOURCE: &str = include_str!("../infer/kernels.metal");
 /// How many tokens a reply runs to unless `set_max_tokens` says otherwise.
 const DEFAULT_MAX_TOKENS: i64 = 256;
 
-/// Where macOS's `struct stat` keeps a file's modification time, seconds then
-/// nanoseconds, and its size. Inference compiles for Apple Silicon only.
+/// Where macOS's `struct stat` keeps a file's mode, its owner, its modification
+/// time, seconds then nanoseconds, and its size. Inference compiles for Apple
+/// Silicon only.
+const STAT_MODE: i64 = 4;
+const STAT_UID: i64 = 16;
 const STAT_MTIME_SEC: i64 = 48;
 const STAT_MTIME_NSEC: i64 = 56;
 const STAT_SIZE: i64 = 96;
@@ -218,6 +221,7 @@ impl<'ctx> Cx<'ctx> {
             // Both take a mode after the flags, which macOS declares variadic.
             "open" | "shm_open" => i32t.fn_type(&[ptr.into(), i32t.into()], true),
             "fstat" => i32t.fn_type(&[i32t.into(), ptr.into()], false),
+            "geteuid" => i32t.fn_type(&[], false),
             "mmap" => ptr.fn_type(
                 &[ptr.into(), i64t.into(), i32t.into(), i32t.into(), i32t.into(), i64t.into()],
                 false,
@@ -425,7 +429,8 @@ impl<'ctx> Cx<'ctx> {
             let (i64t, i8t, ptr) = (cx.i64t(), cx.i8t(), cx.ptrt());
             let plan = cx.plan();
             let model = &plan.model;
-            let st = f.alloca(i8t.array_type(256));
+            // `struct stat` is 144 bytes on macOS; eight-byte words keep its fields aligned.
+            let st = f.alloca(i64t.array_type(32));
             let page = f.sext(f.call_int(cx.objc_fn("getpagesize"), &[]), i64t);
             for (id, r) in plan.regions.iter().enumerate() {
                 let base = f.elem(ptr, cx.infer_regions("base"), f.i64(id as i64));
@@ -459,7 +464,15 @@ impl<'ctx> Cx<'ctx> {
                     let stat_ok = f.call_int(cx.objc_fn("fstat"), &[fd.into(), st.into()]);
                     let size = f.load_i64(f.at_c(st, STAT_SIZE));
                     let bad = if r.shared {
-                        f.or(f.ne(stat_ok, f.i32(0)), f.slt(size, f.i64(r.offset + r.bytes)))
+                        // Names are shared by every user of the machine, so another
+                        // user could have made one before dovata did: the object must
+                        // be this user's, and open to no one else.
+                        let me = f.call_int(cx.objc_fn("geteuid"), &[]);
+                        let owner = f.load_i32(f.at_c(st, STAT_UID));
+                        let others = f.and(f.load_i32(f.at_c(st, STAT_MODE)), f.i32(0o077));
+                        let theirs = f.or(f.ne(owner, me), f.ne(others, f.i32(0)));
+                        let short = f.slt(size, f.i64(r.offset + r.bytes));
+                        f.or(f.ne(stat_ok, f.i32(0)), f.or(short, theirs))
                     } else {
                         let sec = f.load_i64(f.at_c(st, STAT_MTIME_SEC));
                         let nsec = f.load_i64(f.at_c(st, STAT_MTIME_NSEC));
@@ -474,7 +487,8 @@ impl<'ctx> Cx<'ctx> {
                         f.fail(&if r.shared {
                             format!(
                                 "dovata's memory for {model} ({}) is not the size this program \
-                                 was built for; build the program again",
+                                 was built for, or does not belong to this user alone; add the \
+                                 model to dovata again and build the program again",
                                 r.name
                             )
                         } else {

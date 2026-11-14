@@ -130,11 +130,13 @@ fn ask(
     wait: Duration,
 ) -> Result<(), HostError>
 {
-    state::running(&p.dir)?;
+    // The process read now, not when this program connected: an add downloads first,
+    // and dovata may have restarted meanwhile, its old id now another program's.
+    let record = state::running(&p.dir)?;
     let id = state::leave_request(&p.dir, op, body)?;
     // The process also looks for requests every second, so a signal that cannot be sent
     // only slows the answer.
-    let _ = signal::notify(p.pid);
+    let _ = signal::notify(record.pid);
     let start = Instant::now();
     let mut checked = start;
     loop {
@@ -330,10 +332,18 @@ pub(crate) fn add_parts(
     let spec = spec(parts, opts)?;
     let body = serde_json::to_vec(&spec).map_err(|e| HostError::Io(e.to_string()))?;
     ask(p, Op::Add, &body, ADD_WAIT)?;
+    let mut checked = Instant::now();
     loop {
         match state::model(&p.dir, &spec.name) {
             Ok(m) if m.state == State::Ready => return Ok(model_status(&p.dir, &m)),
-            Ok(_) => std::thread::sleep(LOAD_POLL),
+            Ok(_) => {
+                // A process that dies while loading leaves its record saying so.
+                if checked.elapsed() >= Duration::from_secs(1) {
+                    checked = Instant::now();
+                    state::running(&p.dir)?;
+                }
+                std::thread::sleep(LOAD_POLL);
+            }
             Err(HostError::Refused(_)) => {
                 state::running(&p.dir)?;
                 return Err(HostError::Refused(format!("{} was removed before it finished loading", spec.name)));
@@ -432,8 +442,20 @@ pub(crate) fn map(
             Open::File { part } => files.get(*part).ok_or_else(|| HostError::Record(format!("region {} names part {part}, of {}", r.id, files.len())))?.as_fd(),
             Open::Shared { name: object } => {
                 shared = memory::open_shared(object, r.writable).map_err(|e| {
-                    HostError::Refused(format!("dovata no longer holds the memory of {name}'s region {} ({object}: {e}); add the model again", r.id))
+                    let linger = if cfg!(target_os = "linux") {
+                        "; on Linux, logging out can remove a user's shared memory, which `loginctl enable-linger` stops"
+                    } else {
+                        ""
+                    };
+                    HostError::Refused(format!("dovata no longer holds the memory of {name}'s region {} ({object}: {e}); add the model again{linger}", r.id))
                 })?;
+                // Names are shared by every user of the machine, so another user could
+                // have made one before dovata did.
+                if !memory::private_to_me(shared.as_fd()).map_err(|e| HostError::Io(format!("{object}: {e}")))? {
+                    return Err(HostError::Refused(format!(
+                        "the shared memory {object} for {name} belongs to another user or is open to others, so it is not dovata's; it is not mapped"
+                    )));
+                }
                 shared.as_fd()
             }
         };

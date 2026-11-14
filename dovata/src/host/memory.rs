@@ -154,9 +154,10 @@ impl Map {
         Ok(bytes)
     }
 
-    /// Purpose: This function brings every page of a mapping no program has used yet
-    /// into physical memory: a read of each page for a read-only mapping, a write of zero
-    /// for a writable one.
+    /// Purpose: This function brings every page of a mapping into physical memory: a
+    /// read of each page for a read-only mapping, and for a writable one an atomic add of
+    /// nothing, which makes the page without changing a byte a program may already have
+    /// written there.
     ///
     /// Inputs:
     /// - `progress`: called with the bytes done since its last call, every 64 MiB and at
@@ -179,12 +180,13 @@ impl Map {
             let mut at = done;
             while at < end {
                 // SAFETY: `at` is less than the mapping's length, so the byte is mapped.
-                // A writable mapping is fresh shared memory that no program has used, so
-                // writing zero over its zero changes nothing.
+                // Shared memory has a name as soon as it is made, so a program may map it
+                // and write it while it loads; an atomic `or` of zero is a write the page
+                // needs and leaves the byte as that program left it.
                 unsafe {
                     let p = self.ptr.as_ptr().add(at);
                     if self.writable {
-                        std::ptr::write_volatile(p, 0);
+                        std::sync::atomic::AtomicU8::from_ptr(p).fetch_or(0, std::sync::atomic::Ordering::Relaxed);
                     } else {
                         std::ptr::read_volatile(p);
                     }
@@ -232,7 +234,48 @@ pub(crate) fn create_shared(
         unlink_shared(name);
         return Err(e);
     }
+    // On Linux a named object lives on the /dev/shm file system, which holds half the
+    // machine's memory by default and 64 MiB in a default container. A size past that is
+    // allowed, and the first write past it would end dovata with SIGBUS; taking every page
+    // now refuses the model instead.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `fd` is a valid descriptor that this function owns. posix_fallocate
+        // returns the error rather than setting errno.
+        let rc = unsafe { libc::posix_fallocate(fd.as_raw_fd(), 0, size) };
+        if rc != 0 {
+            unlink_shared(name);
+            let e = io::Error::from_raw_os_error(rc);
+            if rc == libc::ENOSPC {
+                return Err(io::Error::new(e.kind(), format!("{e}; /dev/shm has no room for {len} more bytes, so make it larger or hold the model with less KV cache")));
+            }
+            return Err(e);
+        }
+    }
     Ok(fd)
+}
+
+/// Purpose: This function checks that a shared memory object belongs to this user and
+/// that no one else may read or write it. Names are shared by every user of a machine, so
+/// another user could make an object under a name before dovata does.
+///
+/// Inputs:
+/// - `fd`: the object.
+///
+/// Outputs: `Ok(true)` when the object is this user's alone, or the system's error.
+pub(crate) fn private_to_me(
+    fd: BorrowedFd<'_>,
+) -> io::Result<bool>
+{
+    // SAFETY: a zeroed stat is a valid one to fill in.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is a valid descriptor and `st` lives through the call.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: geteuid only reads this process's user id.
+    let me = unsafe { libc::geteuid() };
+    Ok(st.st_uid == me && st.st_mode & 0o077 == 0)
 }
 
 /// Purpose: This function opens a named shared memory object the dovata process made.

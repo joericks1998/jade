@@ -287,6 +287,12 @@ fn a_second_process_is_refused_and_a_killed_ones_memory_is_cleared()
     for n in &names {
         drop(memory::create_shared(n, 4096).unwrap());
     }
+    // A record this dovata cannot read whole still gives its names.
+    let junk = format!("/dovata.{:016x}.9", std::process::id());
+    drop(memory::create_shared(&junk, 4096).unwrap());
+    std::fs::create_dir_all(state::model_dir(&dir.path, "junk")).unwrap();
+    let odd = format!(r#"{{"format":99,"regions":[{{"open":{{"kind":"shared","name":"{junk}"}}}}]}}"#);
+    std::fs::write(state::record_path(&dir.path, "junk"), odd).unwrap();
     std::fs::create_dir_all(state::requests_dir(&dir.path)).unwrap();
     let old = state::requests_dir(&dir.path).join("1-2-3.done");
     std::fs::write(&old, b"").unwrap();
@@ -294,7 +300,7 @@ fn a_second_process_is_refused_and_a_killed_ones_memory_is_cleared()
     let run_dir = dir.path.clone();
     let thread = std::thread::spawn(move || serve_in(&run_dir, move |r| tx.send(r.clone()).is_ok()));
     rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    for n in &names {
+    for n in names.iter().chain([&junk]) {
         assert!(memory::open_shared(n, false).is_err(), "{n} is removed");
     }
     assert!(!old.exists(), "answers nobody read are removed");
@@ -333,7 +339,48 @@ fn a_stop_request_stops_its_own_process_only()
     stop(a);
     assert!(b.process.status().is_ok());
     b.process.add_parts(std::slice::from_ref(&b.model), &opts("still")).unwrap();
-    stop(b);
+
+    // A request taken with a stop is answered, not dropped.
+    let dir = b.dir.path.clone();
+    let stop_id = state::leave_request(&dir, Op::Stop, b"").unwrap();
+    let late = state::leave_request(&dir, Op::Remove, b"still").unwrap();
+    signal::notify(std::process::id()).unwrap();
+    assert_eq!(b.thread.join().unwrap(), Ok(()));
+    assert_eq!(state::read_answer(&dir, &stop_id), Some(Ok(())));
+    assert_eq!(state::read_answer(&dir, &late), Some(Err("dovata is stopping".into())));
+}
+
+#[test]
+fn shared_memory_open_to_others_is_not_dovatas()
+{
+    use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+    let mine = format!("/dovata.{:016x}.7", u64::from(std::process::id()) << 8);
+    let fd = memory::create_shared(&mine, 4096).unwrap();
+    assert!(memory::private_to_me(fd.as_fd()).unwrap(), "dovata's own memory is this user's alone");
+    memory::unlink_shared(&mine);
+
+    // An object others may read, as another user's squatting a name would be. macOS will
+    // not change a shared memory object's mode, so it is made that way.
+    let open = format!("/dovata.{:016x}.8", u64::from(std::process::id()) << 8);
+    memory::unlink_shared(&open);
+    let c = std::ffi::CString::new(open.clone()).unwrap();
+    let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL;
+    // SAFETY: `c` lives through the call; the mode is passed as each system declares it.
+    #[cfg(target_vendor = "apple")]
+    let raw = unsafe { libc::shm_open(c.as_ptr(), flags, 0o644 as libc::c_uint) };
+    #[cfg(not(target_vendor = "apple"))]
+    let raw = unsafe { libc::shm_open(c.as_ptr(), flags, 0o644 as libc::mode_t) };
+    assert!(raw >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: `raw` was just opened and nothing else owns it.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::fstat(raw, &mut st) }, 0);
+    // A umask that takes every bit from others leaves nothing to refuse.
+    if st.st_mode & 0o077 != 0 {
+        assert!(!memory::private_to_me(fd.as_fd()).unwrap(), "memory others may read is refused");
+    }
+    memory::unlink_shared(&open);
 }
 
 #[test]

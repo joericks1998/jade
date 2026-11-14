@@ -10,7 +10,7 @@ sidebar_label: Changelog
 
 - *Building calls dovata directly.* The compiler links dovata's library, finds the running process, and reads which models it holds, where each one's memory is, and the model's plan as Rust values. It used to ask dovata's socket for the plan as several MiB of JSON and walk it by string keys.
 - *A program opens its model's memory by itself.* The name of each region, a model file's path or a shared memory object's name, is a constant of the program, so a prompt's first run opens and maps each region with no message to dovata. The program no longer connects to a socket, receives file descriptors, or parses a JSON reply with `std::json`. A program built against a model keeps running after dovata restarts, once the same model is added again with the same options.
-- *What goes wrong says how to fix it.* A program whose model was removed, added with other options, or changed on disk after dovata loaded it stops with a message naming the model and the fix, rather than mapping memory its offsets do not fit.
+- *What goes wrong says how to fix it.* A program whose model was removed, added with other options, or changed on disk after dovata loaded it stops with a message naming the model and the fix, rather than mapping memory its offsets do not fit. It also refuses shared memory that is not its user's alone, since another user could make an object under a name dovata does not hold.
 
 ## dovata v3.2.2
 
@@ -19,6 +19,7 @@ sidebar_label: Changelog
 - *The run directory says what the process holds.* For every model, dovata writes a record of where each region of its memory is and the model's plan, in `~/.dovata/run/models/<name>/`. Each allocation is a named shared memory object, so a program or the Jade compiler reads the record and opens the memory itself. `Process::models`, `model` and `plan` read it in every build of the library, with no capability turned on.
 - *Requests come with a signal.* `dovata add`, `remove` and `kill` leave a request in the run directory and send the process SIGUSR1; it answers in a file beside the request. SIGTERM and SIGINT stop the process cleanly, removing the names of its memory, where before a signal left its socket behind.
 - *A killed process leaves nothing that lasts.* The next start removes the names of shared memory a killed process left, which would otherwise stay until the machine restarts.
+- *On Linux, a model that does not fit `/dev/shm` is refused* when it is added, where a write past the limit would otherwise end dovata with SIGBUS. `/dev/shm` holds half the machine's memory by default and 64 MiB in a default container.
 - *Status lists each program once,* however many times it mapped a model, and the run directory's path no longer has to fit a socket path's 104 bytes.
 - *The plan a program reads back is exact.* Every float in it, such as the attention scale, reads back exactly as dovata wrote it; serde_json's default parser could be off in the last bit.
 

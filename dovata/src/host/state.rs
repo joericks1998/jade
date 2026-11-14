@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,11 @@ use super::{check_name, run_dir, HeldModel, HostError, Process};
 /// version, so a library and a process of different dovata versions say so instead of
 /// misreading each other.
 pub const FORMAT: u32 = 1;
+
+/// How long a program waits for the process's record when the process holds its lock
+/// with no record: it writes the record just after taking the lock, and removes it just
+/// before giving the lock back.
+const RECORD_WAIT: Duration = Duration::from_millis(500);
 
 /// Purpose: This struct holds the record the process writes once it takes requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,32 +343,83 @@ pub(crate) fn running(
 ) -> Result<ProcessRecord, HostError>
 {
     let lock_path = lock_path(dir);
-    let lock = match File::open(&lock_path) {
+    let start = Instant::now();
+    loop {
+        if !lock_held(&lock_path)? {
+            return Err(HostError::NotRunning);
+        }
+        match read_json::<ProcessRecord>(&process_path(dir))? {
+            Some(r) if r.format == FORMAT => return Ok(r),
+            Some(r) => {
+                return Err(HostError::Record(format!(
+                    "dovata {} is running, pid {}, and keeps {} in format {}, while this program reads format {FORMAT}; use the same dovata version",
+                    r.version,
+                    r.pid,
+                    dir.display(),
+                    r.format
+                )))
+            }
+            // A process starting or stopping holds the lock with no record for a moment.
+            None if start.elapsed() < RECORD_WAIT => std::thread::sleep(Duration::from_millis(10)),
+            None => {
+                let pid = fs::read_to_string(&lock_path).ok().and_then(|t| t.trim().parse::<u32>().ok()).unwrap_or(0);
+                return Err(HostError::Record(format!(
+                    "a dovata older than 3.2.2 is running, pid {pid}, which hands out memory over a socket this program no longer uses; stop it with `kill {pid}` and start dovata again"
+                )));
+            }
+        }
+    }
+}
+
+/// Purpose: This function says whether a process holds the run directory's lock. A
+/// shared lock is refused only while the process holds its own; one this function is
+/// given goes back when the file closes at its end.
+///
+/// Inputs:
+/// - `lock_path`: the lock file.
+///
+/// Outputs: `true` while the lock is held, or a [`HostError::Io`].
+fn lock_held(
+    lock_path: &Path,
+) -> Result<bool, HostError>
+{
+    let lock = match File::open(lock_path) {
         Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(HostError::NotRunning),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(HostError::Io(format!("{}: {e}", lock_path.display()))),
     };
-    // A shared lock is refused only while the process holds its own. When it is granted,
-    // closing the file at the end of this function gives it back.
     match lock.try_lock_shared() {
-        Ok(()) => return Err(HostError::NotRunning),
-        Err(fs::TryLockError::WouldBlock) => {}
-        Err(fs::TryLockError::Error(e)) => return Err(HostError::Io(format!("{}: {e}", lock_path.display()))),
+        Ok(()) => Ok(false),
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(e)) => Err(HostError::Io(format!("{}: {e}", lock_path.display()))),
     }
-    let pid = fs::read_to_string(&lock_path).ok().and_then(|t| t.trim().parse::<u32>().ok()).unwrap_or(0);
-    match read_json::<ProcessRecord>(&process_path(dir))? {
-        Some(r) if r.format == FORMAT => Ok(r),
-        Some(r) => Err(HostError::Record(format!(
-            "dovata {} is running, pid {}, and keeps {} in format {}, while this program reads format {FORMAT}; use the same dovata version",
-            r.version,
-            r.pid,
-            dir.display(),
-            r.format
-        ))),
-        None => Err(HostError::Record(format!(
-            "a dovata older than 3.2.2 is running, pid {pid}, which hands out memory over a socket this program no longer uses; stop it with `kill {pid}` and start dovata again"
-        ))),
+}
+
+/// Purpose: This function lists the names of the shared memory every model record in a
+/// run directory gives, reading only those names, so a record this dovata cannot read
+/// whole, such as one a killed process of another version left, still gives them.
+///
+/// Inputs:
+/// - `dir`: the run directory.
+///
+/// Outputs: the names.
+#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
+pub(crate) fn shared_names_in(
+    dir: &Path,
+) -> Vec<String>
+{
+    let Ok(entries) = fs::read_dir(models_dir(dir)) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(bytes) = fs::read(entry.path().join("model")) else { continue };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        for r in v["regions"].as_array().into_iter().flatten() {
+            if let Some(name) = r["open"]["name"].as_str().filter(|n| n.starts_with("/dovata.") && !n[1..].contains('/')) {
+                out.push(name.to_owned());
+            }
+        }
     }
+    out
 }
 
 /// Purpose: This function reads the record of every model the process holds.
@@ -497,6 +553,9 @@ pub(crate) fn shared_name(
     region: u16,
 ) -> String
 {
+    // The directory as the system names it, so `~/.dovata/run/` with a slash or through
+    // a link gives the same names.
+    let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut h = Sha256::new();
     #[cfg(unix)]
     h.update(dir.as_os_str().as_bytes());
