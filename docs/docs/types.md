@@ -8,7 +8,7 @@ These are Jade's value types.
 
 | Type | Description |
 |------|-------------|
-| `int` | Signed integer, 63 bits wide |
+| `int` | Signed integer, 64 bits wide |
 | `float` | 64-bit floating point (`f64`) |
 | `bool` | Boolean `true` or `false` |
 | `char` | A single Unicode scalar; what indexing or iterating a string yields |
@@ -26,11 +26,19 @@ These are Jade's value types.
 
 An `async fn` and the `future` its call produces are covered in [Async](async).
 
-## Int is 63 bits, not 64
+## Int is 64 bits
 
-An `int` runs from `-4611686018427387904` to `4611686018427387903`. One bit of the machine word is spent tagging what kind of value it holds, which leaves 63 bits for the number. The language exposes that limit directly, so a program means the same thing whether it is interpreted or compiled.
+An `int` is a signed 64-bit integer, from `-9223372036854775808` to `9223372036854775807`. Jade 1.x spent one bit of the machine word tagging what kind of value it held, which left 63 bits; Jade 2.0 knows every value's type when it compiles, so the whole word holds the number.
 
-A literal outside that range is refused when the file is read. The lowest value is a special case. Jade treats `-` as a separate negation, so it checks the digits before applying the sign. That means you cannot type `-4611686018427387904` directly, though arithmetic can still reach it.
+A literal outside that range is refused when the file is read. The lowest value is a special case. Jade treats `-` as a separate negation, so it checks the digits before applying the sign, and allows the one magnitude, `9223372036854775808`, only when a `-` comes before it.
+
+An int literal can also be written in hex: `0x` or `0X`, then the digits 0-9 and a-f in either case. It is an int like any other, with the same range.
+
+```jade
+print(0x11)                  // 17
+print(0xff + 1)              // 256
+print(0x7fffffffffffffff)    // 9223372036854775807
+```
 
 Arithmetic that would leave the range raises an error instead of wrapping around:
 

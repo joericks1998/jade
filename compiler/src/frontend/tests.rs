@@ -19,6 +19,36 @@ mod lexer {
         assert_eq!(kinds("42"), vec![TokenKind::Integer(42), TokenKind::Semicolon, TokenKind::Eof]);
     }
 
+    #[test]
+    fn a_hex_literal_is_an_int() {
+        assert_eq!(
+            kinds("0x11"),
+            vec![TokenKind::Integer(17), TokenKind::Semicolon, TokenKind::Eof]
+        );
+        assert_eq!(kinds("0XfF")[0], TokenKind::Integer(255));
+        assert_eq!(kinds("0x7fffffffffffffff")[0], TokenKind::Integer(i64::MAX));
+        // 2^63 lexes as the marker the parser folds into i64::MIN when negated.
+        assert_eq!(kinds("0x8000000000000000")[0], TokenKind::Integer(NEGATED_INT_MIN));
+        assert!(matches!(tokenize("0x10000000000000000"), Err(JadeError::LiteralOverflow { .. })));
+    }
+
+    #[test]
+    fn a_hex_literal_needs_hex_digits() {
+        for (src, want) in [
+            ("0x", "needs a digit after 0x"),
+            ("0x ", "needs a digit after 0x"),
+            ("0x1g", "'g' is not a hex digit"),
+            ("0x_1", "'_' is not a hex digit"),
+        ] {
+            match tokenize(src) {
+                Err(e @ JadeError::BadHexLiteral { .. }) => {
+                    assert!(e.to_string().contains(want), "{src}: {e}")
+                }
+                other => panic!("{src}: expected BadHexLiteral, got {other:?}"),
+            }
+        }
+    }
+
     // The literal is a float to tokenize, not an approximation of pi.
     #[allow(clippy::approx_constant)]
     #[test]

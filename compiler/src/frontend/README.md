@@ -30,7 +30,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_inf
 
 ## What each file does
 
-- *`lexer.rs`* turns source text into a `Vec<Token>`. It handles Jade's string forms, meaning plain, single-quoted, triple-quoted, and f-strings, plus numeric literals with overflow detection and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
+- *`lexer.rs`* turns source text into a `Vec<Token>`. It handles Jade's string forms, meaning plain, single-quoted, triple-quoted, and f-strings, plus numeric literals, decimal and `0x` hex, with overflow detection, and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
 - *`parser.rs`* turns tokens into a `Program`. It is the largest file here. Operator precedence lives in its call chain, which runs `parse_or`, then `parse_and`, and on down to `parse_primary`. Add a precedence level by inserting a function at the right point in that chain, rather than special-casing inside an existing one.
 - *`ast.rs`* holds the AST node types, plus the small enums shared with later stages: `BinOpKind`, `UnaryOpKind`, `StructFieldDef`, and `FStrPart`. All of them are serde-serializable, because the on-disk cache stores them.
 - *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here, beside the `UndefinedVariable` message it extends. Until phase 6 v1's backend also reported undefined names, for programs type inference had to let through, and it shared the hint so the two worded it the same way.

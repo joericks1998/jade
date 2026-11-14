@@ -19,6 +19,8 @@ sidebar_label: Changelog
 - *A type decorator checks too,* since `@int let n = v` is `let n = int(v)`. `@float let ratio = 1` holds 1.0, and `@toInt let n = "42"` converts. A class field's default is checked the same way, so `@float let rate = 1` works in a class body and `@int let count = "3"` is refused.
 - *A typed dereference names a converter:* `?p |> toInt` constrains the model to write an int and converts the reply, as `?p |> int` did. `?p |> int` is now the check `int(?p)`, which a reply, being a `str`, fails.
 
+*Hex integer literals.* `0x11` is 17. A hex literal is `0x` or `0X` followed by the digits 0-9 and a-f in either case, and is an int with the int's range. A letter that is not a hex digit, as in `0x1g`, and `0x` with no digits are refused with a message saying so.
+
 ## dovata v3.2.2
 
 *dovata keeps a record of what it holds, and takes requests by signal.* There is no socket and no JSON protocol any more. This release goes with jade 2.0.3; jade 2.0.2 cannot use it.

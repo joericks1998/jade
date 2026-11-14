@@ -97,6 +97,10 @@ pub enum JadeError {
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
 
+    /// Lexer encountered a hex literal with no digits, or a letter that is not a
+    /// hex digit, such as `0x` or `0x1g`. `reason` says which and names the fix.
+    BadHexLiteral { reason: String, span: Span },
+
     /// Source nests expressions, blocks or f-string slots deeper than the
     /// parser will descend. Recursive descent costs native stack per level, and
     /// running out of it aborts the process rather than raising — so the depth
@@ -359,6 +363,9 @@ impl std::fmt::Display for JadeError {
             }
             JadeError::TypeError { message, span } => {
                 write!(f, "[{}:{}] type error: {}", span.line, span.col, message)
+            }
+            JadeError::BadHexLiteral { reason, span } => {
+                write!(f, "[{}:{}] syntax error: {}", span.line, span.col, reason)
             }
             JadeError::LiteralOverflow { span } => {
                 write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col)

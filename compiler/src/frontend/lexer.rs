@@ -7,6 +7,28 @@ pub const NEGATED_INT_MIN: i64 = i64::MIN;
 
 use super::error::{JadeError, Result, Span};
 
+/// Purpose: This function bounds an integer literal's magnitude, decimal or hex.
+///
+/// The bound is one *past* `i64::MAX`, not `i64::MAX`. A literal is lexed
+/// without its sign, since `-` is a separate token the parser applies, and the
+/// range is asymmetric, so the magnitude of the smallest integer, `i64::MIN`, is
+/// 2^63, one more than `i64::MAX`. So 2^63 is lexed, as the `NEGATED_INT_MIN`
+/// marker, and `parse_unary` folds it into `i64::MIN` when it is negated.
+/// Anywhere else it is refused, by `parse_primary`.
+///
+/// Inputs:
+/// - `magnitude`: the digits read as a u64, or `None` when they do not fit one.
+/// - `span`: where the literal starts.
+///
+/// Outputs: the literal's value, or `LiteralOverflow`.
+fn int_literal(magnitude: Option<u64>, span: Span) -> Result<i64> {
+    match magnitude {
+        Some(v) if v <= i64::MAX as u64 => Ok(v as i64),
+        Some(v) if v == i64::MAX as u64 + 1 => Ok(NEGATED_INT_MIN),
+        _ => Err(JadeError::LiteralOverflow { span }),
+    }
+}
+
 /// A raw part of an f-string as produced by the lexer.
 /// The `Expr` variant holds the raw source text inside `{…}` — it is
 /// parsed into an `Expr` node later by the parser.
@@ -551,6 +573,38 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 });
             }
 
+            // A hex integer: `0x` or `0X`, then hex digits, such as `0x1f`. Like
+            // a decimal literal it is an int, refused past `i64::MAX`.
+            '0' if matches!(chars.get(i + 1), Some('x' | 'X')) => {
+                let start_col = col;
+                let span = Span { line, col: start_col };
+                i += 2;
+                col += 2;
+                let mut digits = String::new();
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    if !chars[i].is_ascii_hexdigit() {
+                        return Err(JadeError::BadHexLiteral {
+                            reason: format!(
+                                "{:?} is not a hex digit; a hex literal uses 0-9 and a-f, such as 0x1f",
+                                chars[i]
+                            ),
+                            span,
+                        });
+                    }
+                    digits.push(chars[i]);
+                    i += 1;
+                    col += 1;
+                }
+                if digits.is_empty() {
+                    return Err(JadeError::BadHexLiteral {
+                        reason: "a hex literal needs a digit after 0x, such as 0x1f".to_string(),
+                        span,
+                    });
+                }
+                let value = int_literal(u64::from_str_radix(&digits, 16).ok(), span)?;
+                tokens.push(Token { kind: TokenKind::Integer(value), span });
+            }
+
             // Integer and float literals
             '0'..='9' => {
                 let start_col = col;
@@ -578,26 +632,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                         span: Span { line, col: start_col },
                     });
                 } else {
-                    // Jade integers are full 64-bit. Parsing as u64 and then
-                    // bounding gives one message for "not a number" and "too
-                    // large" alike.
-                    // The bound is one *past* `i64::MAX`, not `i64::MAX`. A
-                    // literal is lexed without its sign — `-` is a separate
-                    // token the parser applies — and the range is asymmetric,
-                    // so the magnitude of the smallest integer, `i64::MIN`, is
-                    // 2^63, one more than `i64::MAX`. So 2^63 is lexed, as the
-                    // `NEGATED_INT_MIN` marker, and `parse_unary` folds it into
-                    // `i64::MIN` when it is negated. Anywhere else it is
-                    // refused, by `parse_primary`.
-                    let value: i64 = match num_str.parse::<u64>() {
-                        Ok(v) if v <= i64::MAX as u64 => v as i64,
-                        Ok(v) if v == i64::MAX as u64 + 1 => NEGATED_INT_MIN,
-                        _ => {
-                            return Err(JadeError::LiteralOverflow {
-                                span: Span { line, col: start_col },
-                            });
-                        }
-                    };
+                    let span = Span { line, col: start_col };
+                    let value = int_literal(num_str.parse::<u64>().ok(), span)?;
                     tokens.push(Token {
                         kind: TokenKind::Integer(value),
                         span: Span { line, col: start_col },
