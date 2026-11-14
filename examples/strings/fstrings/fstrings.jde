@@ -51,7 +51,7 @@ fn echo(v) { return f"{v}" }
 let rounds = 0
 let last = ""
 while rounds < 50 {
-    let made = "round-" + str(rounds)
+    let made = "round-" + toString(rounds)
     last = echo(echo(made))
     // Mixed parts alongside it: rendering a non-string allocates, and treating
     // that as borrowed leaked one string per interpolation.

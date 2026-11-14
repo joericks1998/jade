@@ -361,7 +361,7 @@ Returning nothing is what marks such a call. A lone `void *` on a call that does
 
 A field like `char mnemonic[32]` is a row, and a row of things Jade has maps to an array of them. The element type decides what those things are: plain `char` is text, and everything else is data. That is the same rule a pointer parameter follows, so `int reserved[4]` and `uint8_t bytes[24]` need no separate cases.
 
-Nothing is trimmed on the way out. Thirty-two characters arrive, NUL padding included, because trimming would mean guessing where the text stops. `int(c)` exists so a program can find the end itself. On the way in, a row longer than the field is refused by name rather than truncated, and a shorter one is padded with zeros.
+Nothing is trimmed on the way out. Thirty-two characters arrive, NUL padding included, because trimming would mean guessing where the text stops. `toInt(c)` exists so a program can find the end itself. On the way in, a row longer than the field is refused by name rather than truncated, and a shorter one is padded with zeros.
 
 *A `char` element is cast through `unsigned char` before widening.* `char` is signed on x86 Linux and unsigned on ARM macOS. Without the cast, a byte of `0x80` sign-extends to `0xFFFFFF80`, which is not a Unicode scalar. The far side then raises, on one platform and not the other.
 

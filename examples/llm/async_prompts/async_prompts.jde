@@ -86,7 +86,7 @@ print(results[2])
 //    as in sync context, with retries handled transparently.
 
 async fn classify_sentiment(text) {
-    return ?prompt "Is this positive? " + text + " Respond with only true or false." |> bool
+    return ?prompt "Is this positive? " + text + " Respond with only true or false." |> toBool
 }
 
 let f1 = classify_sentiment("I love this language.")

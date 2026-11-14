@@ -8,7 +8,7 @@ Jade's purpose is to be a compiler with LLM inference built in, not a general-pu
 
 - *A class replaces a struct and its `extend` blocks.* It is modeled on C++, with one difference: Jade infers types, so nothing is annotated unless the program means to convert or declare one. A method is defined inside the class body, or outside it as `fn A::foo(a, b)`, in any file that can see the class.
 - *Members are private unless marked public.* A built-in `@public` decorator makes a field or method visible outside the class.
-- *Types are decorators.* `@int let x = v` converts `v` to an int, and `@Animal let a = d` declares `a` as an `Animal`. The same decorators type a class's fields.
+- *Types are decorators.* `@int let x = v` checks that `v` is an int, and `@Animal let a = d` declares `a` as an `Animal`. The same decorators type a class's fields. Since 2.0.3 a type function never converts; `toInt` and the other converters do.
 - *Closures are removed.* Named functions stay values that can be passed and stored, and the pipe operator and extra arguments cover what inline closures did.
 
 ```
@@ -157,7 +157,9 @@ class Puppy(Dog) {
 
 *Decided.* The built-in types are decorators: `@int`, `@float`, `@str`, `@bool` and `@char`, and every class name. They decorate `let` statements and class fields.
 
-- *On a built-in type*, the decorator converts, as `@f let x = v` already means `let x = f(v)`: `@int let n = "42"` makes `n` the int 42, and `@float let x = 1` makes it 1.0.
+- *On a built-in type*, the decorator checks, as `@f let x = v` already means `let x = f(v)` and `int()` only checks: `@int let n = 42` keeps the int, `@int let n = "42"` is refused, and `@float let x = 1` makes it 1.0, since an int is also a float. A converter decorates the same way: `@toInt let n = "42"` makes `n` the int 42.
+
+  *Changed in 2.0.3.* This bullet first said the decorator converts, as `int()` then did. Joe reversed that once Jade compiled only: `int`, `float`, `str`, `bool` and `char` check a value's type and return it unchanged, and `toInt`, `toFloat`, `toString`, `toBool` and `toChar` convert. `?p |> int` became `?p |> toInt` too.
 - *On a class*, it declares the variable's class, which may be a parent of the value's: `@Animal let a = Dog { … }` lets `a` later hold a `Cat`. A class that is not the value's own or one of its ancestors is a compile error.
 - *On a field*, it gives the field a type in place of a default: `@int count`, or `@public @int count` for a public one.
 
@@ -211,7 +213,7 @@ print([1, 2, 3].map(scale, 10))      // [10, 20, 30]
 
 - the class syntax, `A::` definitions and implicit `self`, which the parser rewrites into today's definitions;
 - visibility, which is a compile-time check;
-- conversion decorators, which are calls;
+- type decorators on a `let`, which are calls;
 - removing closures and bound methods, which only removes code.
 
 The rest is static only: a shared ancestor once, `Parent::m()`, `is`, second-parent field tables, class decorators and extra arguments to `map`. Examples that use those are listed for `golden.sh --backend=static` and skipped by the default gate with the reason "static backend only".
@@ -285,7 +287,7 @@ Building them settled two details. A declared method with no definition is an er
 
 *Steps 4 to 8 are done* (2026-11-05), which completes this design.
 
-- *Type decorators.* A built-in type decorator on a `let` converts, as it always did by becoming a call. A class decorator becomes `Class(value)`, which is now a general expression: a class applied to one value views the value as that class, and the checker requires the value to be the class or a descendant. A field's type decorator joins into the field's type. `@public` outside a class body is refused.
+- *Type decorators.* A built-in type decorator on a `let` becomes a call, as it always did; since 2.0.3 that call checks the type rather than converting. A class decorator becomes `Class(value)`, which is now a general expression: a class applied to one value views the value as that class, and the checker requires the value to be the class or a descendant. A field's type decorator joins into the field's type. `@public` outside a class body is refused.
 - *Inheritance.* Flattening inherits a shared ancestor's fields once, by tracking which class declared each field. Two parents supplying different versions of a method are an error unless the class defines the method itself; a method both reach through their shared ancestor is one method.
 - *`Parent::m()` and `is`.* The type pass puts `self` first among a parent call's arguments; the checker resolves the call to the parent's method, and the import pass renames the class part like any class reference. `x is C` narrows inside `if` and `&&`, as `!= nil` does.
 - *Second-parent fields.* The static backend switches on the object's class id wherever a descendant keeps a field at a different offset than the static class does, and reads it directly otherwise.

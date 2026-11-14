@@ -112,12 +112,13 @@ A stage is whatever sits to the right of a `|>`. There are three kinds. Which on
 | Stage | Meaning |
 |-------|---------|
 | A function | Applied to the value, which becomes its first argument |
-| A type name | On a prompt dereference, it constrains generation with a grammar and coerces the reply. Anywhere else it is the ordinary type constructor, so `x \|> int` means `int(x)` |
+| A converter | `toInt`, `toFloat`, `toBool`, `toChar` or `toString`. On a prompt dereference, it constrains generation with a grammar and converts the reply. Anywhere else it is an ordinary call, so `x \|> toInt` means `toInt(x)` |
+| A type function | `int`, `float`, `bool`, `char` or `str`. Always an ordinary call, which checks the value's type: `x \|> int` means `int(x)` |
 | A `Grammar` value | Constrains sampling on a prompt dereference |
 
 Two rules settle a name that could mean more than one thing. They only matter on a prompt dereference:
 
-- A builtin type keyword is always a type, never a function. `int`, `float`, `bool`, `char`, and `str` are also callable constructors. Without this rule, `?p |> int` would stop constraining the model and merely try to convert whatever came back.
+- A builtin converter always constrains the model. `toInt` and the others are also callable functions. Without this rule, `?p |> toInt` would stop constraining the model and merely try to convert whatever came back. A type function such as `int` gets no such rule, so `?p |> int` checks the reply's type and is refused, since a reply is a `str`.
 - A `struct` you declared is always a type. A struct registers a constructor under its own name, so judged on callability alone, every struct looks like a function. Without this rule, `?p |> City` would have become `City(?p)`.
 
 Everything else prefers a function.
@@ -125,7 +126,7 @@ Everything else prefers a function.
 ```jade
 prompt p = "What is 21 + 21? Respond with only the number."
 
-let n = ?p |> int |> double   // constrain, coerce, then apply
+let n = ?p |> toInt |> double   // constrain, convert, then apply
 let g = Grammar.new('"yes" | "no"')
 let a = ?p |> g               // constrain sampling with a grammar
 ```

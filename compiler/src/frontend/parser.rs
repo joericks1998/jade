@@ -52,6 +52,29 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     parser.parse_program()
 }
 
+/// Purpose: This function passes a class field's default through the field's
+/// built-in type decorators, so `@float let rate = 1` in a class body holds
+/// `float(1)`, the same call the line means outside a class.
+///
+/// Inputs:
+/// - `decorators`: the field's decorators.
+/// - `default`: the default as written.
+///
+/// Outputs: the default, inside one call per `@int`, `@float`, `@str`, `@bool`
+/// or `@char`.
+fn type_checked_default(decorators: &Decorators, default: Expr) -> Expr {
+    let span = Parser::expr_span(&default);
+    decorators
+        .iter()
+        .filter(|(n, _)| matches!(n.as_str(), "int" | "float" | "str" | "bool" | "char"))
+        .fold(default, |acc, (n, _)| Expr::Call {
+            callee: Box::new(Expr::Identifier { name: n.clone(), span }),
+            args: vec![acc],
+            kwargs: vec![],
+            span,
+        })
+}
+
 impl Parser {
     /// Open one nesting level, or refuse if the source is deeper than
     /// [`MAX_NESTING_DEPTH`].
@@ -1035,7 +1058,7 @@ impl Parser {
                     self.advance(); // consume `let`
                     let field_name = self.expect_ident("field name after `let`")?;
                     self.expect(&TokenKind::Equals)?;
-                    let default = self.parse_pipe()?;
+                    let default = type_checked_default(&decorators, self.parse_pipe()?);
                     fields.push(StructFieldDef::Let { name: field_name.clone(), default });
                     field_name
                 }
@@ -1043,7 +1066,7 @@ impl Parser {
                     self.advance(); // consume `prompt`
                     let field_name = self.expect_ident("field name after `prompt`")?;
                     self.expect(&TokenKind::Equals)?;
-                    let default = self.parse_pipe()?;
+                    let default = type_checked_default(&decorators, self.parse_pipe()?);
                     fields.push(StructFieldDef::Prompt { name: field_name.clone(), default });
                     field_name
                 }

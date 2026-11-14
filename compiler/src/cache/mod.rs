@@ -32,7 +32,12 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// v7: `JadeType` gained `Handle` (1.3.0), inserted after `Struct` and so ahead
 ///     of `Fn`/`AsyncFn`/`Future`/`Unknown` — the same mid-enum renumbering that
 ///     made v6 necessary, with the same silent-misread failure if not bumped.
-pub const CACHE_FORMAT_VERSION: u32 = 16;
+/// v17: no shape changed, but what the parser and the type pass build did. In
+///     2.0.3 a converter such as `toInt` folds into a dereference and `int`
+///     does not, and a class field's default passes through its type
+///     decorators. A v16 cache holds `?p |> int` folded in, which would let a
+///     program the checker now refuses through.
+pub const CACHE_FORMAT_VERSION: u32 = 17;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

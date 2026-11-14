@@ -79,32 +79,34 @@ print(name)
 Under `jade run`, sending the *same* prompt text with the same target type reuses the first reply instead of calling the model again. That cache lives in one process, so it never carries between runs. A compiled binary has no such cache, so under `jade build` every dereference is a real call. To get a fresh answer from a prompt you have already sent, change the text.
 :::
 
-## Typed dereference, written `?p |> type`
+## Typed dereference, written `?p |> toInt`
 
-Add `|> type` after a prompt dereference to coerce the model's response into a Jade value type. Naming a type does two things. It builds a grammar that constrains how the model *generates*, and it converts the reply afterwards. These are the supported targets:
+Add a converter such as `|> toInt` after a prompt dereference to turn the model's response into a Jade value. A converter does two things here. It builds a grammar that constrains how the model *generates*, and it converts the reply afterwards. These are the supported targets:
 
-| Type | Accepted reply | Result |
+| Stage | Accepted reply | Result |
 |------|----------------|--------|
-| `int` | `42`, `-7` | `int` value |
-| `float` | `3.14`, `-0.5` | `float` value |
-| `bool` | `true`, `True`, `false` | `bool` value |
-| `char` | exactly one character | `char` value |
-| `str` | anything | `str` value (always succeeds) |
+| `toInt` | `42`, `-7` | `int` value |
+| `toFloat` | `3.14`, `-0.5` | `float` value |
+| `toBool` | `true`, `True`, `false` | `bool` value |
+| `toChar` | exactly one character | `char` value |
+| `toString` | anything | `str` value (always succeeds) |
 | `array` | a JSON array | `array` of int, float, bool, or str |
 | `dict` | a JSON object | `dict` |
 | a `struct` name | a JSON object | an instance of that struct |
 
-`str` is the one target with no grammar, because any text is already valid. `int`, `float`, `bool`, and `char` get a full grammar, since the output is short and constraining every token costs little. `array`, `dict`, and structs get a *prefix* grammar instead. A prefix grammar pins the opening bracket and then lets the model generate freely, which keeps the cost of grammar checking to the first few tokens.
+A type function such as `int` is not a converter. It only checks a value's type, so `?p |> int` is `int(?p)`, and the build refuses it because a reply is a `str`. See [Types](types#type-functions-and-converters).
+
+`toString` is the one target with no grammar, because any text is already valid. `toInt`, `toFloat`, `toBool`, and `toChar` get a full grammar, since the output is short and constraining every token costs little. `array`, `dict`, and structs get a *prefix* grammar instead. A prefix grammar pins the opening bracket and then lets the model generate freely, which keeps the cost of grammar checking to the first few tokens.
 
 ```jade
 prompt p = "What is 3 + 4? Respond with only the number."
-let n = ?p |> int
+let n = ?p |> toInt
 print(n + 1)          // 8
 ```
 
 ```jade
 prompt p = "Is 5 greater than 3? Respond with only: true or false"
-let result = ?p |> bool
+let result = ?p |> toBool
 if result {
     print("correct!")
 }
@@ -130,19 +132,19 @@ print(c.country)      // "unknown" if the reply left it out
 
 ### Chaining past the type
 
-A type stage is just one stage of an ordinary pipe, so anything can follow it. The type constrains how the model *generates*, and the next stage receives the value after coercion:
+A converter stage is just one stage of an ordinary pipe, so anything can follow it. The converter constrains how the model *generates*, and the next stage receives the value after conversion:
 
 ```jade
 fn double(x) { return x * 2 }
 
 prompt p = "What is 21 + 21? Respond with only the number."
-let n = ?p |> int |> double   // 84
+let n = ?p |> toInt |> double   // 84
 ```
 
-Order matters here, in a useful way. `?p |> int |> double` constrains the reply to an integer and hands `double` a real int. `?p |> double` gives Jade no type to build a grammar from, so the model generates freely and `double` receives the raw reply text.
+Order matters here, in a useful way. `?p |> toInt |> double` constrains the reply to an integer and hands `double` a real int. `?p |> double` gives Jade no type to build a grammar from, so the model generates freely and `double` receives the raw reply text.
 
 :::note
-Before v1.2.0 you could write neither of these. A `|>` after `?p` went through a separate parse path that read only one constraint, so no chain could form, and a typed dereference inside `print(...)` was rejected outright. Both work now. `print(?p |> int)` prints the coerced int, and `print(?p)` still streams tokens live.
+Before v1.2.0 you could write neither of these. A `|>` after `?p` went through a separate parse path that read only one constraint, so no chain could form, and a typed dereference inside `print(...)` was rejected outright. Both work now. `print(?p |> toInt)` prints the converted int, and `print(?p)` still streams tokens live.
 :::
 
 ## Constraining with a Grammar
@@ -186,7 +188,7 @@ let a = Agent {}
 
 let r = a.(?system)                  // explicit
 let r = a~>system                    // shorter, and means the same
-let n = a.(?system) |> int           // constraints work as usual
+let n = a.(?system) |> toInt           // constraints work as usual
 let d = build(cfg).agent.(?system)   // reads left-to-right; no backtracking
 ```
 
@@ -204,7 +206,7 @@ A typed dereference gets one attempt, because grammar-constrained sampling alrea
 
 ```jade
 prompt p = "Pick a lucky number."
-let n = ?p |> int
+let n = ?p |> toInt
 print(n)
 ```
 
@@ -222,7 +224,7 @@ The error carries the line and column of the dereference rather than the name of
 prompt p = "Pick a lucky number."
 let n = 0
 try {
-    n = ?p |> int
+    n = ?p |> toInt
 } catch e {
     print("model did not give a number, using 0")
 }

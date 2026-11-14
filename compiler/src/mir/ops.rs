@@ -175,11 +175,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 Ok((r, Ty::Int))
             }
-            "str" => {
+            "int" | "float" | "str" | "bool" | "char" => {
+                let (v, t) = one(argv, span)?;
+                self.type_checked(name, v, &t, span)
+            }
+            "toString" => {
                 let (v, t) = one(argv, span)?;
                 Ok((self.text_of(v, &t), Ty::Str))
             }
-            "int" => {
+            "toInt" => {
                 let (v, t) = one(argv, span)?;
                 let r = match &t {
                     Ty::Int => v,
@@ -189,11 +193,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Json => {
                         self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::ToInt), vec![v]))
                     }
-                    other => return Err(not_yet(format!("int() of {other}"), span)),
+                    other => return Err(not_yet(format!("toInt() of {other}"), span)),
                 };
                 Ok((r, Ty::Int))
             }
-            "float" => {
+            "toFloat" => {
                 let (v, t) = one(argv, span)?;
                 let r = match &t {
                     Ty::Float => v,
@@ -204,11 +208,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Json => {
                         self.assign_temp(Ty::Float, Rvalue::Op(Op::Json(JsonFn::ToFloat), vec![v]))
                     }
-                    other => return Err(not_yet(format!("float() of {other}"), span)),
+                    other => return Err(not_yet(format!("toFloat() of {other}"), span)),
                 };
                 Ok((r, Ty::Float))
             }
-            "bool" => {
+            "toBool" => {
                 let (v, t) = one(argv, span)?;
                 let r = match &t {
                     Ty::Bool => v,
@@ -218,18 +222,18 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Json => {
                         self.assign_temp(Ty::Bool, Rvalue::Op(Op::Json(JsonFn::ToBool), vec![v]))
                     }
-                    other => return Err(not_yet(format!("bool() of {other}"), span)),
+                    other => return Err(not_yet(format!("toBool() of {other}"), span)),
                 };
                 Ok((r, Ty::Bool))
             }
-            "char" => {
+            "toChar" => {
                 let (v, t) = one(argv, span)?;
                 let r = match &t {
                     Ty::Char => v,
                     Ty::Int | Ty::Str => {
                         self.assign_temp(Ty::Char, Rvalue::Op(Op::ToChar(t.clone()), vec![v]))
                     }
-                    other => return Err(not_yet(format!("char() of {other}"), span)),
+                    other => return Err(not_yet(format!("toChar() of {other}"), span)),
                 };
                 Ok((r, Ty::Char))
             }
@@ -257,6 +261,48 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Err(internal(format!("an unknown builtin '{other}'"), span))
             }
         }
+    }
+
+    /// Purpose: This function lowers a type function, which returns its
+    /// argument unchanged once it has the type: an int widens to a float, and a
+    /// json value's kind is checked when the program runs.
+    ///
+    /// Inputs:
+    /// - `name`: `int`, `float`, `str`, `bool` or `char`.
+    /// - `v`, `t`: the argument and its type.
+    /// - `span`: where.
+    ///
+    /// Outputs: the value and the type it now has.
+    fn type_checked(
+        &mut self,
+        name: &str,
+        v: Operand,
+        t: &Ty,
+        span: Span,
+    ) -> Result<(Operand, Ty)> {
+        let want = match name {
+            "int" => Ty::Int,
+            "float" => Ty::Float,
+            "str" => Ty::Str,
+            "bool" => Ty::Bool,
+            _ => Ty::Char,
+        };
+        let r = match t {
+            t if *t == want => v,
+            Ty::Int if want == Ty::Float => self.as_float(v, t),
+            Ty::Json => {
+                let m = match name {
+                    "int" => JsonFn::AsInt,
+                    "float" => JsonFn::AsFloat,
+                    "str" => JsonFn::AsStr,
+                    "bool" => JsonFn::AsBool,
+                    _ => return Err(internal("char() of a json value", span)),
+                };
+                self.assign_temp(want.clone(), Rvalue::Op(Op::Json(m), vec![v]))
+            }
+            other => return Err(internal(format!("{name}() of {other}"), span)),
+        };
+        Ok((r, want))
     }
 
     /// Purpose: This function says whether an expression names a std package
@@ -574,11 +620,12 @@ impl<'a, 'l> Fx<'a, 'l> {
 /// Outputs: the type it returns.
 fn builtin_result(name: &str) -> Ty {
     match name {
-        "len" | "int" | "max_tasks" | "set_max_tasks" | "max_tokens" | "set_max_tokens" => Ty::Int,
-        "str" | "input" => Ty::Str,
-        "float" => Ty::Float,
-        "bool" | "cancelled" => Ty::Bool,
-        "char" => Ty::Char,
+        "len" | "int" | "toInt" | "max_tasks" | "set_max_tasks" | "max_tokens"
+        | "set_max_tokens" => Ty::Int,
+        "str" | "toString" | "input" => Ty::Str,
+        "float" | "toFloat" => Ty::Float,
+        "bool" | "toBool" | "cancelled" => Ty::Bool,
+        "char" | "toChar" => Ty::Char,
         _ => Ty::Nil,
     }
 }

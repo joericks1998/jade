@@ -1,5 +1,6 @@
 //! The globals every program has without an import: `print`, `len`, `write`,
-//! `input`, the task controls, the primitive conversions and `Grammar`.
+//! `input`, the task controls, the type functions and their converters, and
+//! `Grammar`.
 
 use crate::typechecker::{tir::JadeType, type_infer::TypeContext};
 
@@ -24,6 +25,11 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "bool",
     "str",
     "char",
+    "toInt",
+    "toFloat",
+    "toString",
+    "toBool",
+    "toChar",
     "func",
     "Grammar",
 ];
@@ -88,8 +94,12 @@ pub fn register_types(ctx: &mut TypeContext) {
             ret: Box::new(JadeType::Unknown),
         },
     );
-    // Primitive type constructors
-    for name in &["int", "float", "bool", "str", "char", "func"] {
+    // The type functions, which check a value's type and return it unchanged,
+    // and the converters, which make a value of that type from another.
+    for name in &[
+        "int", "float", "bool", "str", "char", "toInt", "toFloat", "toString", "toBool", "toChar",
+        "func",
+    ] {
         ctx.define(
             name.to_string(),
             JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Unknown) },

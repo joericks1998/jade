@@ -1,26 +1,31 @@
 // Types are decorators.
 //
-// Jade infers types, so a program names one only when it means to convert a
-// value or to declare what a variable or field holds. It does that with a
-// decorator, which sits above the declaration and changes what it binds.
+// Jade infers types, so a program names one only when it means to state what a
+// variable or field holds. It does that with a decorator, which sits above the
+// declaration. A decorator on a `let` is a call: `@int let n = v` is
+// `let n = int(v)`.
 //
-// - On a built-in type, the decorator converts: `@int let n = "42"` is
-//   `let n = int("42")`.
+// - On a built-in type, the decorator checks and never converts: int() returns
+//   its argument unchanged when it is an int and refuses anything else, which
+//   type_decorator_error.jde shows. An int is also a float, so
+//   `@float let ratio = 1` holds 1.0. To convert, use a converter such as
+//   toString, which works as a decorator the same way.
 // - On a class, it declares the variable's class, which may be a parent of the
 //   value's own: `@Animal let pet = Dog { … }`. That is `Animal(Dog { … })`,
 //   a class view, which class_view_error.jde shows refused for a class the value
 //   does not descend from.
-// - On a field, it gives the field a type in place of a default.
+// - On a field, it gives the field a type in place of a default, or checks the
+//   default it has.
 
 @int
-let n = "42"
+let n = 42
 print(n + 1)
 
 @float
 let ratio = 1
 print(ratio)
 
-@str
+@toString
 let label = 7
 print(label + "!")
 

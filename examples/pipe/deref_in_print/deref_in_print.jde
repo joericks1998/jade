@@ -15,7 +15,7 @@
 prompt p = "What is 3 + 4? Respond with only the number."
 
 // Not streamed: the int arrives complete, then prints.
-print(?p |> int)
+print(?p |> toInt)
 
 // Still streamed, exactly as before: no type stage, so tokens appear live.
 print(?p)

@@ -252,14 +252,14 @@ try {
 ```jade
 async fn count_words(sentence) {
     prompt p = "How many words in: " + sentence + "? Reply with only the number."
-    return ?p |> int
+    return ?p |> toInt
 }
 
 let n = count_words("The quick brown fox")
 print(await n)   // integer word count
 ```
 
-A typed dereference such as `|> int` or `|> bool` works inside an async function.
+A typed dereference such as `|> toInt` or `|> toBool` works inside an async function.
 
 ### Passing futures to functions
 

@@ -22,7 +22,7 @@ It runs on Apple Silicon Macs for now. The kernels are simple on purpose, becaus
 
 ## How a prompt becomes a reply
 
-*Before checking*, `rewrite.rs` adds `prelude.jde` to the merged program, in a namespace of its own like any imported module, and turns each dereference into a call into it: `?p` becomes `reply(__infer.text(p))`, and `?p |> int` becomes `reply_int(…)`. The checker then checks the prelude's functions at the types they are called with, and MIR lowers them like any others. A prompt is its text from here on.
+*Before checking*, `rewrite.rs` adds `prelude.jde` to the merged program, in a namespace of its own like any imported module, and turns each dereference into a call into it: `?p` becomes `reply(__infer.text(p))`, and `?p |> toInt` becomes `reply_int(…)`. A converter stage folds into the dereference this way; a type function such as `int` does not, so `?p |> int` is the check `int(?p)`, which the checker refuses. The checker then checks the prelude's functions at the types they are called with, and MIR lowers them like any others. A prompt is its text from here on.
 
 *The prelude* is Jade. It tokenizes text with byte-level BPE, the kind Qwen, Llama 3 and GPT-2 use: it splits the text into words by the model's pre-tokenizer pattern, writes each word's bytes in the byte alphabet, merges pairs by rank, and looks the pieces up. Added tokens such as `<|im_start|>` are matched first. Decoding maps pieces back to bytes. Its tables come from the plan through `__infer.data`, built once when the program starts, so a task that dereferences a prompt only reads them, and the task check accepts it. The typed forms read the first number, the first yes or no, or the first char out of the reply.
 

@@ -133,12 +133,12 @@ Hello from myapp!
 
 ## Calling a model
 
-This step is the reason Jade exists. A `prompt` is a value. The `?` operator sends it to your provider. The `|> int` stage makes the result an `int`, or raises if it cannot:
+This step is the reason Jade exists. A `prompt` is a value. The `?` operator sends it to your provider. The `|> toInt` stage makes the result an `int`, or raises if it cannot:
 
 ```jade
 prompt p = "How many moons does Mars have? Reply with just the number."
 
-let n = ?p |> int
+let n = ?p |> toInt
 print(n + 1)
 ```
 

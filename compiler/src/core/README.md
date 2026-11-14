@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the reply length `max_tokens` and `set_max_tokens`, the primitive conversions such as `int` and `str`, and `Grammar`.
+The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the reply length `max_tokens` and `set_max_tokens`, the type functions `int`, `float`, `str`, `bool` and `char`, which check a value's type and return it unchanged, their converters `toInt`, `toFloat`, `toString`, `toBool` and `toChar`, and `Grammar`.
 
 `GLOBAL_NAMES` lists them, and `register_types` declares the type of each to the checker. The two sit side by side so a name cannot be callable without being typed. Nothing here runs: `typechecker/infer/builtins.rs` gives each one its static type, `mir/ops.rs` lowers each call, and the code they run is support code emitted by `src/backend/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
 

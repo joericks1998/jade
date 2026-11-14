@@ -1,0 +1,10 @@
+// `?p |> int` checks the reply's type, and a model's reply is a str.
+//
+// int() is a type check, so the stage is the call `int(?p)`, which refuses the
+// str. The converter is toInt: `?p |> toInt` constrains the model to write an
+// int and turns the reply into one.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+prompt p = "What is 3 + 4? Respond with only the number."
+print(?p |> int)

@@ -211,7 +211,7 @@ fn a_function_passed_as_a_value_takes_its_types_from_the_call() {
 #[test]
 fn map_and_filter_are_typed() {
     let t = ok(
-        "fn double(x) { x * 2 }\nfn big(x) { x > 1 }\nlet xs = [1, 2, 3]\nlet ys = xs.map(double)\nlet zs = xs.filter(big)\nlet ss = xs.map(str)\n",
+        "fn double(x) { x * 2 }\nfn big(x) { x > 1 }\nlet xs = [1, 2, 3]\nlet ys = xs.map(double)\nlet zs = xs.filter(big)\nlet ss = xs.map(toString)\n",
     );
     assert_eq!(global(&t, "ys"), Ty::Array(Box::new(Ty::Int)));
     assert_eq!(global(&t, "zs"), Ty::Array(Box::new(Ty::Int)));
@@ -269,6 +269,28 @@ fn json_is_its_own_type() {
         ok("use std::json\nlet v = json.parse(\"{}\")\nlet a = v[\"Action\"]\nlet s = str(a)\n");
     assert_eq!(global(&t, "v"), Ty::Json);
     assert_eq!(global(&t, "s"), Ty::Str);
+}
+
+#[test]
+fn type_functions_check_and_converters_convert() {
+    let t = ok("let a = int(5)\nlet b = float(5)\nlet c = toInt(\"42\")\nlet d = toString(7)\n\
+                @float\nlet e = 2\n@toInt\nlet f = \"9\"\n");
+    assert_eq!(global(&t, "a"), Ty::Int);
+    assert_eq!(global(&t, "b"), Ty::Float);
+    assert_eq!(global(&t, "c"), Ty::Int);
+    assert_eq!(global(&t, "d"), Ty::Str);
+    assert_eq!(global(&t, "e"), Ty::Float);
+    assert_eq!(global(&t, "f"), Ty::Int);
+    rejects("let n = int(\"42\")\n", "int() needs an int, got str; convert one with toInt()");
+    rejects("@int\nlet n = 4.5\n", "int() needs an int, got float");
+    rejects("let s = str(7)\n", "convert one with toString()");
+    rejects("let b = bool(1)\n", "convert one with toBool()");
+    rejects("let c = char(\"j\")\n", "convert one with toChar()");
+    rejects("let x = float(\"1.5\")\n", "float() needs a float or an int, got str");
+    rejects(
+        "class Rate {\n    @public @int let count = \"3\"\n}\nprint(Rate {}.count)\n",
+        "int() needs an int, got str",
+    );
 }
 
 #[test]

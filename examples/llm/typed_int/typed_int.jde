@@ -1,5 +1,7 @@
-// Typed dereference: LLM output coerced to int with retry on failure.
+// Typed dereference: LLM output converted to an int with retry on failure.
+// The converter, toInt, constrains the reply; `?p |> int` would only check the
+// reply's type, and refuse it, since a reply is a str.
 
 prompt p = "What is 3 + 4? Respond with only the number."
-let n = ?p |> int
+let n = ?p |> toInt
 print(n + 1)

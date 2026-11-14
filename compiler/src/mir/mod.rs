@@ -614,10 +614,18 @@ pub enum JsonFn {
     /// `(j: json) -> [json]`: what a `for` loop walks: an array's elements,
     /// an object's keys or a string's characters.
     Items,
-    /// `(j: json) -> int`, `-> float`, `-> bool`: `int(j)` and friends.
+    /// `(j: json) -> int`, `-> float`, `-> bool`: `toInt(j)` and friends,
+    /// which convert a string or a number.
     ToInt,
     ToFloat,
     ToBool,
+    /// `(j: json) -> int`, `-> float`, `-> bool`, `-> str`: `int(j)` and
+    /// friends, which raise unless the value already has the type; `float(j)`
+    /// also takes an int.
+    AsInt,
+    AsFloat,
+    AsBool,
+    AsStr,
 }
 
 /// Purpose: This enum lists what the inference prelude, `src/infer/prelude.jde`,

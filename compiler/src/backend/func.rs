@@ -886,9 +886,10 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Op::Json(m) => {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
                 let t = match m {
-                    JsonFn::Len | JsonFn::ToInt => Ty::Int,
-                    JsonFn::ToFloat => Ty::Float,
-                    JsonFn::ToBool => Ty::Bool,
+                    JsonFn::Len | JsonFn::ToInt | JsonFn::AsInt => Ty::Int,
+                    JsonFn::ToFloat | JsonFn::AsFloat => Ty::Float,
+                    JsonFn::ToBool | JsonFn::AsBool => Ty::Bool,
+                    JsonFn::AsStr => Ty::Str,
                     JsonFn::Items => Ty::Array(Box::new(Ty::Json)),
                     _ => Ty::Json,
                 };

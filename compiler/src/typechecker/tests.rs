@@ -567,8 +567,8 @@ mod type_infer {
     /// model would simply generate unconstrained, which is exactly the kind of
     /// failure that shows up as a flaky reply rather than an error.
     #[test]
-    fn a_type_name_stage_on_a_deref_becomes_an_output_type() {
-        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> int");
+    fn a_converter_stage_on_a_deref_becomes_an_output_type() {
+        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> toInt");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
         let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
             panic!("expected PromptDeref, got {:?}", value.kind)
@@ -576,6 +576,15 @@ mod type_infer {
         assert_eq!(output_type.as_deref(), Some("int"));
         assert!(grammar_expr.is_none());
         assert_eq!(value.ty, JadeType::Int);
+    }
+
+    /// A type function only checks, so it does not fold into the dereference:
+    /// `?p |> int` is the call `int(?p)`, which the static checker refuses.
+    #[test]
+    fn a_type_function_stage_on_a_deref_is_a_call() {
+        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> int");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert!(matches!(value.kind, TExprKind::Call { .. }), "got {:?}", value.kind);
     }
 
     /// A struct registers itself as a callable constructor under its own name,
@@ -704,12 +713,12 @@ mod type_infer {
         }
     }
 
-    /// `char` is a builtin type keyword, so it constrains a dereference rather
-    /// than applying the `char()` constructor to the raw reply. Without the
-    /// grammar the model generates freely and the coercion then fails.
+    /// `toChar` is a builtin converter, so it constrains a dereference rather
+    /// than applying the function to the raw reply. Without the grammar the
+    /// model generates freely and the conversion then fails.
     #[test]
-    fn a_char_stage_on_a_deref_constrains_rather_than_converts() {
-        let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> char");
+    fn a_char_converter_stage_on_a_deref_constrains_rather_than_converts() {
+        let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> toChar");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
         let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
             panic!("expected PromptDeref, got {:?}", value.kind)

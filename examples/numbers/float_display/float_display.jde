@@ -33,8 +33,8 @@ print(0.0)
 // → 0.001
 // → 0.0
 
-// str() and f-strings take the same path as print.
-print(str(48000.0))
+// toString() and f-strings take the same path as print.
+print(toString(48000.0))
 print(f"rate {44100.0} hz")
 // → 48000.0
 // → rate 44100.0 hz

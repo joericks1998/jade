@@ -12,6 +12,13 @@ sidebar_label: Changelog
 - *A program opens its model's memory by itself.* The name of each region, a model file's path or a shared memory object's name, is a constant of the program, so a prompt's first run opens and maps each region with no message to dovata. The program no longer connects to a socket, receives file descriptors, or parses a JSON reply with `std::json`. A program built against a model keeps running after dovata restarts, once the same model is added again with the same options.
 - *What goes wrong says how to fix it.* A program whose model was removed, added with other options, or changed on disk after dovata loaded it stops with a message naming the model and the fix, rather than mapping memory its offsets do not fit. It also refuses shared memory that is not its user's alone, since another user could make an object under a name dovata does not hold.
 
+*A type function checks a value's type; a converter changes it.* Now that Jade only compiles, a type name says what a value is.
+
+- *`int`, `float`, `str`, `bool` and `char` only check.* Each returns its argument unchanged when it already has the type, and the build refuses anything else, naming the converter to use: `int("42")` stops with `int() needs an int, got str; convert one with toInt()`. An int is also a float, so `float(5)` is 5.0. A JSON value's kind is known only when the program runs, so `int(j)` raises then if `j` is not an int.
+- *Five converters do what the type functions used to:* `toInt`, `toFloat`, `toString`, `toBool` and `toChar`. `toInt("42")` is 42, `toString(7)` is `"7"`, and `toChar(106)` is `'j'`.
+- *A type decorator checks too,* since `@int let n = v` is `let n = int(v)`. `@float let ratio = 1` holds 1.0, and `@toInt let n = "42"` converts. A class field's default is checked the same way, so `@float let rate = 1` works in a class body and `@int let count = "3"` is refused.
+- *A typed dereference names a converter:* `?p |> toInt` constrains the model to write an int and converts the reply, as `?p |> int` did. `?p |> int` is now the check `int(?p)`, which a reply, being a `str`, fails.
+
 ## dovata v3.2.2
 
 *dovata keeps a record of what it holds, and takes requests by signal.* There is no socket and no JSON protocol any more. This release goes with jade 2.0.3; jade 2.0.2 cannot use it.

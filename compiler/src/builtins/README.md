@@ -28,7 +28,7 @@ Two things to keep in mind when adding a function:
 
 | Module | Import name | Notes |
 |---|---|---|
-| `src/core/` | *(globals)* | The names every program has without an import, in `GLOBAL_NAMES`: `print`, `len`, `write`, `input`, the task controls, the primitive conversions and `Grammar`. |
+| `src/core/` | *(globals)* | The names every program has without an import, in `GLOBAL_NAMES`: `print`, `len`, `write`, `input`, the task controls, the type functions and their converters, and `Grammar`. |
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods, such as `upper`, `split`, and `trim`. |
 | `src/array/` | `std/array` | Its package functions take the *functional* style, so `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |

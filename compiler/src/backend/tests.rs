@@ -101,7 +101,7 @@ fn a_child_struct_runs_its_own_method_through_a_parent() {
 fn a_program_declares_nothing_but_c_library_functions() {
     let src = "use std::time\nasync fn nap(n) {\n    time.sleep(0.01)\n    return n\n}\n\
                let d = {\"k\": \"v\"}\nlet a = [1.5, 2.5]\na.sort()\nprint(f\"{d} {a} {\"x\".upper()}\")\n\
-               print(int(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
+               print(toInt(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
     let ctx = Context::create();
     let module = build_module(&ctx, &mir_of(src)).expect("builds");
     let allowed = [
@@ -243,14 +243,14 @@ fn an_uncaught_class_reports_its_message() {
 #[test]
 fn map_and_filter_pass_extra_arguments() {
     let src = "fn scale(x, by) { x * by }\nfn above(x, floor) { x > floor }\n\
-               print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(str))\n";
+               print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(toString))\n";
     let (out, _, _) = run(src);
     assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[1, 22]\n");
 }
 
 #[test]
 fn tasks_join_in_order_and_settle_their_errors() {
-    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + str(n)\n    }\n    return n / 2\n}\n\
+    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + toString(n)\n    }\n    return n / 2\n}\n\
                print(join(half(4), half(8)))\n\
                for r in join(half(2), half(3), settle = true) {\n    print(r.ok)\n}\n\
                try {\n    join(half(1), half(2))\n} catch e {\n    print(e.message)\n}\n\
@@ -268,6 +268,19 @@ fn a_commands_output_is_refused_as_a_command_however_it_is_rebuilt() {
     let (out, _, code) = run(src);
     assert_eq!(out, "refused\nrefused\nrefused\nrefused\nrefused\ntrusted\n");
     assert_eq!(code, 0);
+}
+
+#[test]
+fn type_functions_check_a_json_value_when_the_program_runs() {
+    let src = "use std::json\nlet j = json.parse(\"{\\\"n\\\": 3, \\\"s\\\": \\\"x\\\"}\")\n\
+               print(int(j[\"n\"]) + 1)\nprint(float(j[\"n\"]))\nprint(str(j[\"s\"]) + \"!\")\n\
+               print(toInt(toString(j[\"n\"])))\n\
+               try {\n    print(int(j[\"s\"]))\n} catch e {\n    print(e.message)\n}\n";
+    let (out, _, _) = run(src);
+    assert_eq!(
+        out,
+        "4\n3.0\nx!\n3\nint() needs an int, got json string; convert one with toInt()\n"
+    );
 }
 
 #[test]

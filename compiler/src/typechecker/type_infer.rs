@@ -1549,19 +1549,19 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     JadeType::Unknown => JadeType::Unknown,
                     _ => return Err(JadeError::NotCallable { span: *span }),
                 };
-                // Type-conversion constructors int/float/bool/str are registered
-                // as Fn{ret: Unknown}; refine a direct `int(x)`/`str(x)`/… call to
-                // the concrete result type so codegen formats it correctly (notably
-                // bool → "true"/"false" rather than the Unknown→1/0 path). Only
-                // applied when the call would otherwise be Unknown, so a user
-                // function shadowing the name with a real return type keeps its own.
+                // The type functions and converters are registered as
+                // Fn{ret: Unknown}; refine a direct `int(x)` or `toInt(x)` call to
+                // the concrete result type. Only applied when the call would
+                // otherwise be Unknown, so a user function shadowing the name
+                // with a real return type keeps its own.
                 if matches!(generic, JadeType::Unknown) {
                     match callee.as_ref() {
                         Expr::Identifier { name, .. } => match name.as_str() {
-                            "int" => JadeType::Int,
-                            "float" => JadeType::Float,
-                            "bool" => JadeType::Bool,
-                            "str" => JadeType::Str,
+                            "int" | "toInt" => JadeType::Int,
+                            "float" | "toFloat" => JadeType::Float,
+                            "bool" | "toBool" => JadeType::Bool,
+                            "str" | "toString" => JadeType::Str,
+                            "char" | "toChar" => JadeType::Char,
                             _ => generic,
                         },
                         _ => generic,
@@ -2092,11 +2092,14 @@ enum DerefStage {
 ///
 /// The order of these checks is the language rule, so it is worth stating:
 ///
-/// 1. **A builtin type keyword always wins.** `int`, `str` and friends are also
-///    registered as callables in `core::register_types`, so without this they
-///    would classify as functions and `?p |> int` would stop constraining the
-///    model — it would generate freely, reply "the answer is 42", and fail to
-///    coerce. The grammar is the valuable half of a typed dereference.
+/// 1. **A converter always wins.** `?p |> toInt` folds in as the type `int`:
+///    the model is constrained to write an int, and the reply becomes one.
+///    `toInt` and friends are also registered as callables in
+///    `core::register_types`, so without this they would classify as functions,
+///    the model would generate freely, reply "the answer is 42", and fail to
+///    convert. The grammar is the valuable half of a typed dereference. A type
+///    function such as `int` is not a converter: `?p |> int` is `int(?p)`,
+///    which refuses the reply's str and names `toInt`.
 /// 2. **A declared struct is a type.** This has to be checked *before* the
 ///    function test below, because a struct registers itself as a callable
 ///    constructor under its own name (see the `StructDef` arm), so by type
@@ -2115,7 +2118,12 @@ fn classify_deref_stage(stage: &Expr, ctx: &mut TypeContext) -> Result<Option<De
     let Some(name) = extract_type_name(stage) else {
         return Ok(None);
     };
-    if is_builtin_type_name(&name) || ctx.struct_defs.contains_key(&name) {
+    if let Some(ty) = converter_type(&name) {
+        return Ok(Some(DerefStage::Type(ty.to_string())));
+    }
+    if (is_builtin_type_name(&name) && !is_type_function(&name))
+        || ctx.struct_defs.contains_key(&name)
+    {
         return Ok(Some(DerefStage::Type(name)));
     }
     if matches!(ctx.get(&name), Some(JadeType::Fn { .. }) | Some(JadeType::AsyncFn { .. })) {
@@ -2129,6 +2137,35 @@ fn classify_deref_stage(stage: &Expr, ctx: &mut TypeContext) -> Result<Option<De
         JadeType::Fn { .. } | JadeType::AsyncFn { .. } => Ok(None),
         _ => Ok(Some(DerefStage::Grammar(Box::new(t)))),
     }
+}
+
+/// Purpose: This function gives the type a converter makes.
+///
+/// Inputs:
+/// - `name`: a name a pipe stage names.
+///
+/// Outputs: the type's name for `toInt`, `toFloat`, `toString`, `toBool` and
+/// `toChar`, and `None` for anything else.
+fn converter_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "toInt" => "int",
+        "toFloat" => "float",
+        "toString" => "str",
+        "toBool" => "bool",
+        "toChar" => "char",
+        _ => return None,
+    })
+}
+
+/// Purpose: This function says whether a name is a type function, which
+/// checks a value's type and returns it unchanged.
+///
+/// Inputs:
+/// - `name`: the name.
+///
+/// Outputs: true for `int`, `float`, `str`, `bool` and `char`.
+fn is_type_function(name: &str) -> bool {
+    matches!(name, "int" | "float" | "str" | "bool" | "char")
 }
 
 /// Type keywords that name a coercion target for a dereference. `nil`/`null`

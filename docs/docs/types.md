@@ -64,6 +64,38 @@ Arithmetic promotion converts an `int` to a `float` when the other operand is a 
 Every row marked "type error" is caught by `jade check` before the program runs, not while it runs.
 :::
 
+## Type functions and converters
+
+Each built-in type has two functions. The *type function*, named for the type, checks that a value already has that type and returns it unchanged. The *converter* makes a value of the type from another one.
+
+| Type | Type function | Converter |
+|------|---------------|-----------|
+| `int` | `int(x)` | `toInt(x)` |
+| `float` | `float(x)` | `toFloat(x)` |
+| `str` | `str(x)` | `toString(x)` |
+| `bool` | `bool(x)` | `toBool(x)` |
+| `char` | `char(x)` | `toChar(x)` |
+
+```jade
+print(int(5))          // 5
+print(float(5))        // 5.0: an int is also a float
+print(toInt("42"))     // 42
+print(toString(7))     // 7
+let n = int("42")      // refused by the build: int() needs an int, got str; convert one with toInt()
+```
+
+A type function's check happens when the program is built, since every value's type is known then. A JSON value is the exception. Its kind is known only when the program runs, so `int(j)` raises then if `j` is not an int.
+
+A type name as a decorator on a `let` is the same call. `@int let n = v` means `let n = int(v)`, so it checks the type, and a converter decorates the same way:
+
+```jade
+@float
+let ratio = 1          // 1.0
+
+@toInt
+let n = "42"           // 42
+```
+
 ### The one exception: `char` and `str`
 
 A `char` compares equal to the one-character string that spells it. It also orders against strings and concatenates with them in either direction. That is a deliberate hole in the strict-equality rule above, and the reason is worth knowing so you do not read the rest of the rule as merely a suggestion.
@@ -81,14 +113,14 @@ for c in s { print(c) }  // four lines: "é" is one character, not two
 
 A `char` is a single Unicode scalar, not a byte. It is an *immediate* value, meaning it fits inside the tagged value word alongside `int`, `bool`, and `nil`. Scanning a string therefore allocates nothing. The old one-character-string behavior allocated once per character.
 
-There is no char literal. A char comes from indexing a string, iterating one, `char("x")`, `char(<number>)`, or `?p |> char`.
+There is no char literal. A char comes from indexing a string, iterating one, `toChar("x")`, `toChar(<number>)`, or `?p |> toChar`.
 
-`int(c)` gives a character's Unicode scalar. `char(n)` builds a character from a number, and refuses anything that is not a valid scalar rather than substituting a replacement character.
+`toInt(c)` gives a character's Unicode scalar. `toChar(n)` builds a character from a number, and refuses anything that is not a valid scalar rather than substituting a replacement character.
 
-The pair exists for reading fixed-size C fields across the FFI. A `char[32]` arrives as thirty-two characters with its NUL padding intact. Nothing trims the padding, because trimming would mean guessing where the text stops. Instead, a program finds the end itself by testing `int(c) == 0`.
+The pair exists for reading fixed-size C fields across the FFI. A `char[32]` arrives as thirty-two characters with its NUL padding intact. Nothing trims the padding, because trimming would mean guessing where the text stops. Instead, a program finds the end itself by testing `toInt(c) == 0`.
 
 ```jade
-let c = char("x")
+let c = toChar("x")
 let first = "hello"[0]
 ```
 
@@ -179,7 +211,7 @@ prompt p = "Name one prime number under 10."
 print(?p)
 ```
 
-`?p` on its own produces a stream of the reply. A `|>` stage after it limits what the model may generate and coerces the result, so `?p |> int` gives you an `int`. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#what-a-stage-can-be) for what a stage may be.
+`?p` on its own produces a stream of the reply. A `|>` stage after it limits what the model may generate and coerces the result, so `?p |> toInt` gives you an `int`. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#what-a-stage-can-be) for what a stage may be.
 
 ## Handle
 

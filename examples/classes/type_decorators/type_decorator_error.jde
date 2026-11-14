@@ -1,0 +1,11 @@
+// A type decorator checks a value's type; it never converts.
+//
+// `@int let n = v` is `let n = int(v)`, and int() refuses a value that is not
+// already an int. To turn the text "42" into a number, use the converter
+// toInt, as a call or as a decorator: `@toInt let n = "42"`.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+@int
+let n = "42"
+print(n + 1)

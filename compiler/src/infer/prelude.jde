@@ -27,9 +27,9 @@ fn byte_alphabet() {
     while b < 256 {
         let printable = (b >= 33 and b <= 126) or (b >= 161 and b <= 172) or (b >= 174 and b <= 255)
         if printable {
-            out.push(char(b))
+            out.push(toChar(b))
         } else {
-            out.push(char(extra))
+            out.push(toChar(extra))
             extra = extra + 1
         }
         b = b + 1
@@ -43,7 +43,7 @@ fn byte_values(alphabet) {
     let out = {}
     let b = 0
     while b < 256 {
-        out[str(alphabet[b])] = b
+        out[toString(alphabet[b])] = b
         b = b + 1
     }
     return out
@@ -89,7 +89,7 @@ fn read_added() {
     for line in __infer.data(2).split("\n") {
         let space = line.index_of(" ")
         if space > 0 {
-            out[line.slice(space + 1, len(line))] = int(line.slice(0, space))
+            out[line.slice(space + 1, len(line))] = toInt(line.slice(0, space))
         }
     }
     return out
@@ -135,7 +135,7 @@ fn contraction(cs, i, fold) {
     if cs[i] != "'" or i + 1 >= n {
         return i
     }
-    let a = str(cs[i + 1])
+    let a = toString(cs[i + 1])
     if fold {
         a = a.lower()
     }
@@ -143,7 +143,7 @@ fn contraction(cs, i, fold) {
         return i + 2
     }
     if i + 2 < n {
-        let b = str(cs[i + 2])
+        let b = toString(cs[i + 2])
         if fold {
             b = b.lower()
         }
@@ -272,7 +272,7 @@ fn encode_word(word, out) {
     let raw = word.encode()
     let k = 0
     while k < len(raw) {
-        symbols.push(str(ALPHABET[raw[k]]))
+        symbols.push(toString(ALPHABET[raw[k]]))
         k = k + 1
     }
     while len(symbols) > 1 {
@@ -381,7 +381,7 @@ fn decode(ids) {
             }
         } else {
             for c in piece {
-                let key = str(c)
+                let key = toString(c)
                 if BYTE_OF.has(key) {
                     raw.push(BYTE_OF[key])
                 }
@@ -431,7 +431,7 @@ fn first_number(text) {
     let out = ""
     let seen_digit = false
     for c in text {
-        let digit = c >= char("0") and c <= char("9")
+        let digit = c >= toChar("0") and c <= toChar("9")
         if digit {
             out = out + c
             seen_digit = true
@@ -458,12 +458,12 @@ fn reply_int(text) {
     if dot >= 0 {
         n = n.slice(0, dot)
     }
-    return int(n)
+    return toInt(n)
 }
 
 // Purpose: This function asks for a float: the first number in the reply.
 fn reply_float(text) {
-    return float(first_number(reply(text)))
+    return toFloat(first_number(reply(text)))
 }
 
 // Purpose: This function asks for a bool: the first yes, no, true or false.

@@ -246,5 +246,5 @@ A prompt dereference pipes like any other value. A type name used as a stage lim
 
 ```jade
 prompt p = "What is 21 + 21? Respond with only the number."
-let n = ?p |> int |> double   // 84
+let n = ?p |> toInt |> double   // 84
 ```

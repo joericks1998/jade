@@ -116,6 +116,11 @@ pub(super) fn is_builtin_value(name: &str) -> bool {
             | "float"
             | "bool"
             | "char"
+            | "toInt"
+            | "toFloat"
+            | "toString"
+            | "toBool"
+            | "toChar"
             | "print"
             | "write"
             | "input"
@@ -125,6 +130,22 @@ pub(super) fn is_builtin_value(name: &str) -> bool {
             | "set_max_tokens"
             | "cancelled"
     )
+}
+
+/// Purpose: This function gives the type a type function checks for.
+///
+/// Inputs:
+/// - `name`: `int`, `float`, `str`, `bool` or `char`.
+///
+/// Outputs: that type.
+fn type_fn_ty(name: &str) -> Ty {
+    match name {
+        "int" => Ty::Int,
+        "float" => Ty::Float,
+        "str" => Ty::Str,
+        "bool" => Ty::Bool,
+        _ => Ty::Char,
+    }
 }
 
 /// Purpose: This function says whether a type is a number.
@@ -194,35 +215,61 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
                 t => Err(format!("len() has no answer for {t}")),
             }
         }
-        "str" => arity(1).map(|_| Ty::Str),
-        "int" => {
+        // The type functions check that a value already has their type and
+        // return it unchanged; an int is also a float. A json value's kind is
+        // known only when the program runs, so it is checked then.
+        "int" | "float" | "str" | "bool" | "char" => {
+            arity(1)?;
+            let want = type_fn_ty(name);
+            let fits = match &tys[0] {
+                t if *t == want => true,
+                Ty::Var(_) => true,
+                Ty::Int => want == Ty::Float,
+                Ty::Json => want != Ty::Char,
+                _ => false,
+            };
+            if fits {
+                return Ok(want);
+            }
+            let (article, conv) = match name {
+                "int" => ("an int", "toInt"),
+                "float" => ("a float or an int", "toFloat"),
+                "str" => ("a str", "toString"),
+                "bool" => ("a bool", "toBool"),
+                _ => ("a char", "toChar"),
+            };
+            Err(format!("{name}() needs {article}, got {}; convert one with {conv}()", tys[0]))
+        }
+        // The converters make a value of their type from another.
+        "toString" => arity(1).map(|_| Ty::Str),
+        "toInt" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Char | Ty::Json | Ty::Var(_) => {
                     Ok(Ty::Int)
                 }
-                t => Err(format!("int() cannot convert {t}")),
+                t => Err(format!("toInt() cannot convert {t}")),
             }
         }
-        "float" => {
+        "toFloat" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Int | Ty::Float | Ty::Str | Ty::Json | Ty::Var(_) => Ok(Ty::Float),
-                t => Err(format!("float() cannot convert {t}")),
+                t => Err(format!("toFloat() cannot convert {t}")),
             }
         }
-        "bool" => {
+        "toBool" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Bool | Ty::Int | Ty::Str | Ty::Json | Ty::Var(_) => Ok(Ty::Bool),
-                t => Err(format!("bool() cannot convert {t}")),
+                t => Err(format!("toBool() cannot convert {t}")),
             }
         }
-        "char" => {
+        "toChar" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Int | Ty::Str | Ty::Char | Ty::Var(_) => Ok(Ty::Char),
-                t => Err(format!("char() cannot convert {t}")),
+                t => Err(format!("toChar() cannot convert {t}")),
             }
         }
         "max_tasks" | "max_tokens" => arity(0).map(|_| Ty::Int),
