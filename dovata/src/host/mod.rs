@@ -1,8 +1,8 @@
 //! Author: Joe Ricks
 //! File: src/host/mod.rs
 //! Description: Runs dovata as the one process that holds models in memory, and lets
-//! other programs start it, add and remove models, map their memory, read its status and
-//! stop it.
+//! other programs start it, add and remove models, read what it holds, map their memory,
+//! read its status and stop it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,33 +25,30 @@ mod client;
 mod memory;
 #[cfg(all(feature = "host", unix))]
 mod server;
+#[cfg(all(feature = "host", unix))]
+mod signal;
+mod state;
 #[cfg(all(test, feature = "host", unix))]
 mod tests;
-#[cfg(all(feature = "host", unix))]
-mod wire;
 
 #[cfg(all(feature = "host", unix))]
-pub use client::{connect, start};
+pub use client::start;
 #[cfg(all(feature = "host", unix))]
 pub use server::serve;
-
-/// The version of the messages between a dovata process and the programs that talk to
-/// it. Both sides refuse a message of another version.
-pub const PROTOCOL: u32 = 2;
+pub use state::{connect, FORMAT};
 
 /// The longest name a model can have.
 pub const MAX_NAME: usize = 48;
 
-/// The longest socket path macOS accepts, which is 104 bytes with the closing NUL. Linux
-/// accepts 108, so this limit holds on both.
-const MAX_SOCKET_PATH: usize = 103;
-
-/// Purpose: This struct holds the running dovata process, as a program talks to it.
-/// There is one per user: every model is added to it.
+/// Purpose: This struct holds the running dovata process, as a program finds it. There
+/// is one per user: every model is added to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Process {
-    /// The process's socket.
-    socket: PathBuf,
+    /// The run directory, which holds the process's lock, its log and a record of every
+    /// model it holds.
+    dir: PathBuf,
+    /// The process id.
+    pid: u32,
 }
 
 /// Purpose: This struct holds what the dovata process needs to add a model: the
@@ -126,17 +123,16 @@ impl Default for AddOptions {
     }
 }
 
-/// Purpose: This struct holds what the dovata process reports once it answers on its
-/// socket.
+/// Purpose: This struct holds what the dovata process reports once it takes requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ready {
     /// Its process id.
     pub pid: u32,
-    /// Its socket.
-    pub socket: PathBuf,
-    /// [`PROTOCOL`] in the process.
-    pub protocol: u32,
-    /// The dovata version the process runs, such as `3.1.0`.
+    /// Its run directory.
+    pub dir: PathBuf,
+    /// [`FORMAT`] in the process: the version of the files it writes there.
+    pub format: u32,
+    /// The dovata version the process runs, such as `3.2.2`.
     pub version: String,
 }
 
@@ -145,7 +141,7 @@ pub struct Ready {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartLine {
-    /// The process answers on its socket.
+    /// The process takes requests.
     Ready(Ready),
     /// The process could not start, and has exited.
     Error(String),
@@ -187,7 +183,8 @@ pub struct ModelStatus {
     /// Every region of the plan, in id order. Windows of the same file can overlap, so
     /// the weights' memory is counted in `files`, not here.
     pub regions: Vec<RegionUse>,
-    /// Every program that has mapped the model's memory, in the order they mapped it.
+    /// Every program that has mapped the model's memory, once each, in the order they
+    /// first mapped it.
     pub clients: Vec<Client>,
     /// The tokenizer the model's plan carries.
     pub tokenizer: Option<TokenizerUse>,
@@ -283,10 +280,109 @@ pub enum Holds {
 pub struct Client {
     /// The program's process id.
     pub pid: u32,
-    /// When it mapped the memory, in seconds since 1970.
+    /// When it first mapped the memory, in seconds since 1970.
     pub mapped_unix: u64,
     /// Whether the program is still running.
     pub alive: bool,
+}
+
+/// Purpose: This struct holds one model the dovata process holds, as the process records
+/// it in its run directory: enough for a program to open and map every region of the
+/// model's memory by itself, with no message to the process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldModel {
+    /// [`FORMAT`] in the process that wrote the record.
+    pub format: u32,
+    /// The model's name in the process, such as `qwen3-8b`.
+    pub name: String,
+    /// When it was added, in seconds since 1970.
+    pub added_unix: u64,
+    /// Whether it is still loading.
+    pub state: State,
+    /// Which model it is.
+    pub model: ModelInfo,
+    /// The machine its plan is for.
+    pub target: Target,
+    /// The plan's table hash. A program's compiled offsets are right for this model
+    /// only when they came from a plan with the same hash.
+    pub table_hash: String,
+    /// Every part file of the model, part 1 first.
+    pub files: Vec<HeldFile>,
+    /// Every region of the plan, in id order, and where its memory is.
+    pub regions: Vec<HeldRegion>,
+    /// The tokenizer the model's plan carries.
+    pub tokenizer: Option<TokenizerUse>,
+}
+
+/// Purpose: This struct holds one part file of a held model, as it was when the process
+/// loaded it. A program compares the file with it before mapping, since a file changed
+/// in place changes the bytes under every mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldFile {
+    /// The file's path.
+    pub path: PathBuf,
+    /// Its size in bytes.
+    pub bytes: u64,
+    /// When it was last changed: whole seconds since 1970.
+    pub modified_sec: i64,
+    /// When it was last changed: the nanoseconds past `modified_sec`.
+    pub modified_nsec: i64,
+}
+
+/// Purpose: This struct holds one region of a held model and where its memory is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldRegion {
+    /// The region's id in the plan.
+    pub id: u16,
+    /// The kind of memory.
+    pub kind: RegionKind,
+    /// What the region holds.
+    pub holds: Vec<Holds>,
+    /// The file or shared memory object that holds the region.
+    pub open: Open,
+    /// Where the region starts in it, in bytes.
+    pub offset: u64,
+    /// The region's size in bytes.
+    pub bytes: u64,
+    /// The alignment the region's base must have.
+    pub align: u64,
+    /// Whether a program may write it: allocated regions yes, weights never.
+    pub writable: bool,
+}
+
+/// Purpose: This enum lists where a region's memory can be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Open {
+    /// A window of one of the model's part files.
+    File {
+        /// Which part, from 0: an index into [`HeldModel::files`].
+        part: usize,
+    },
+    /// A POSIX shared memory object the process made, opened with `shm_open`.
+    Shared {
+        /// The object's name, such as `/dovata.1f2e3d4c5b6a7980.2`.
+        name: String,
+    },
+}
+
+impl HeldModel {
+    /// Purpose: This function finds the part file a region is a window of.
+    ///
+    /// Inputs:
+    /// - `region`: the region.
+    ///
+    /// Outputs: the file, or `None` for a region in shared memory.
+    pub fn file_of(
+        &self,
+        region: &HeldRegion,
+    ) -> Option<&HeldFile>
+    {
+        match region.open {
+            Open::File { part } => self.files.get(part),
+            Open::Shared { .. } => None,
+        }
+    }
 }
 
 impl Status {
@@ -583,12 +679,14 @@ pub enum HostError {
     Unsupported(String),
     /// The dovata program could not be started.
     Start(String),
-    /// The process answered with an error, such as a different table hash or a model
-    /// that does not fit beside the others.
+    /// The process refused a request, or a program asked for memory it cannot have,
+    /// such as a model it does not hold, a different table hash, or a model that does not
+    /// fit beside the others.
     Refused(String),
-    /// A message was not in the expected form, or was of another protocol version.
-    Protocol(String),
-    /// A file, socket or memory call failed.
+    /// A file in the run directory was not in the expected form, or was written by a
+    /// dovata of another format.
+    Record(String),
+    /// A file, signal or memory call failed.
     Io(String),
 }
 
@@ -617,7 +715,7 @@ impl fmt::Display for HostError {
             HostError::Unsupported(m) => write!(f, "{m}"),
             HostError::Start(m) => write!(f, "the dovata process did not start: {m}"),
             HostError::Refused(m) => write!(f, "{m}"),
-            HostError::Protocol(m) => write!(f, "a message from the dovata process was not understood: {m}"),
+            HostError::Record(m) => write!(f, "{m}"),
             HostError::Io(m) => write!(f, "{m}"),
         }
     }
@@ -626,21 +724,90 @@ impl fmt::Display for HostError {
 impl std::error::Error for HostError {}
 
 impl Process {
-    /// Purpose: This function gives the process's socket.
+    /// Purpose: This function gives the process's run directory.
     ///
     /// Inputs: none.
     ///
-    /// Outputs: the socket's path.
-    pub fn socket(&self) -> &Path
+    /// Outputs: the directory.
+    pub fn dir(&self) -> &Path
     {
-        &self.socket
+        &self.dir
     }
 
-    /// Purpose: This function asks the process for its status and every model's.
+    /// Purpose: This function gives the process's id.
     ///
     /// Inputs: none.
     ///
-    /// Outputs: the [`Status`], or a [`HostError`] when the process does not answer.
+    /// Outputs: the process id.
+    pub fn pid(&self) -> u32
+    {
+        self.pid
+    }
+
+    /// Purpose: This function gives the directory a program registers in once it maps a
+    /// model, with an empty file named for its process id, so status can list it.
+    ///
+    /// Inputs:
+    /// - `name`: the model's name in the process.
+    ///
+    /// Outputs: the directory's path.
+    pub fn clients_dir(
+        &self,
+        name: &str,
+    ) -> PathBuf
+    {
+        state::clients_dir(&self.dir, name)
+    }
+
+    /// Purpose: This function reads the record of every model the process holds. It
+    /// reads files only, so it works in every build.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the models, sorted by name, or a [`HostError`] when a record cannot be
+    /// read.
+    pub fn models(&self) -> Result<Vec<HeldModel>, HostError>
+    {
+        state::models(&self.dir)
+    }
+
+    /// Purpose: This function reads the record of one model the process holds: where
+    /// each region of its memory is, so a program can open and map it by itself.
+    ///
+    /// Inputs:
+    /// - `name`: the model's name in the process.
+    ///
+    /// Outputs: the [`HeldModel`], or [`HostError::Refused`] naming the models the
+    /// process holds.
+    pub fn model(
+        &self,
+        name: &str,
+    ) -> Result<HeldModel, HostError>
+    {
+        state::model(&self.dir, name)
+    }
+
+    /// Purpose: This function reads one model's whole plan, the one `dovata plan --json`
+    /// prints. It reads files only, so it works in every build.
+    ///
+    /// Inputs:
+    /// - `name`: the model's name in the process.
+    ///
+    /// Outputs: the [`Plan`], or a [`HostError`].
+    pub fn plan(
+        &self,
+        name: &str,
+    ) -> Result<Plan, HostError>
+    {
+        state::plan(&self.dir, name)
+    }
+
+    /// Purpose: This function reads the process's status and every model's, with how much
+    /// of each model's memory is in physical memory right now.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the [`Status`], or a [`HostError`] when the process has stopped.
     pub fn status(&self) -> Result<Status, HostError>
     {
         #[cfg(all(feature = "host", unix))]
@@ -718,37 +885,17 @@ impl Process {
         }
     }
 
-    /// Purpose: This function asks the process for one model's whole plan, the JSON
-    /// `dovata plan --json` prints.
-    ///
-    /// Inputs:
-    /// - `name`: the model's name in the process.
-    ///
-    /// Outputs: the plan as JSON, or a [`HostError`].
-    pub fn plan(
-        &self,
-        name: &str,
-    ) -> Result<serde_json::Value, HostError>
-    {
-        #[cfg(all(feature = "host", unix))]
-        return client::plan(self, name);
-        #[cfg(not(all(feature = "host", unix)))]
-        {
-            let _ = name;
-            Err(HostError::NotBuilt)
-        }
-    }
-
     /// Purpose: This function maps one model's memory into this program, every region
-    /// where the plan's offsets expect it.
+    /// where the plan's offsets expect it, opening each file and shared memory object by
+    /// the name the model's record gives.
     ///
     /// Inputs:
     /// - `name`: the model's name in the process.
-    /// - `table_hash`: the table hash of the plan this program's offsets came from. The
-    ///   process refuses a different one, since the offsets would then be wrong.
+    /// - `table_hash`: the table hash of the plan this program's offsets came from. A
+    ///   different one is refused, since the offsets would then be wrong.
     ///
-    /// Outputs: the [`Mapping`], or a [`HostError`] such as a different table hash or a
-    /// model that is still loading.
+    /// Outputs: the [`Mapping`], or a [`HostError`] such as a different table hash, a
+    /// model that is still loading, or a model file changed on disk.
     #[cfg(all(feature = "host", unix))]
     pub fn map(
         &self,
@@ -764,8 +911,8 @@ impl Process {
     ///
     /// Inputs:
     /// - `name`: the model's name in the process.
-    /// - `table_hash`: the table hash of the plan this program was compiled against. The
-    ///   process refuses a different one, since the tokenizer could then be another.
+    /// - `table_hash`: the table hash of the plan this program was compiled against. A
+    ///   different one is refused, since the tokenizer could then be another.
     ///
     /// Outputs: the [`crate::tokenize::Tokenizer`], or a [`HostError`].
     #[cfg(all(feature = "host", feature = "tokenize", unix))]
@@ -784,7 +931,7 @@ impl Process {
     /// Inputs: none.
     ///
     /// Outputs: `Ok(())` once the process is gone, or a [`HostError`] when it does not
-    /// answer. Memory a program has mapped stays mapped until that program unmaps it.
+    /// stop. Memory a program has mapped stays mapped until that program unmaps it.
     pub fn kill(&self) -> Result<(), HostError>
     {
         #[cfg(all(feature = "host", unix))]
@@ -811,19 +958,8 @@ pub fn start(
 
 /// Purpose: This function returns `NotBuilt` in a build without the `host` feature.
 ///
-/// Inputs: none.
-///
-/// Outputs: always [`HostError::NotBuilt`].
-#[cfg(not(all(feature = "host", unix)))]
-pub fn connect() -> Result<Process, HostError>
-{
-    Err(HostError::NotBuilt)
-}
-
-/// Purpose: This function returns `NotBuilt` in a build without the `host` feature.
-///
 /// Inputs:
-/// - `ready`: what to call once the process answers; unused.
+/// - `ready`: what to call once the process takes requests; unused.
 ///
 /// Outputs: always [`HostError::NotBuilt`].
 #[cfg(not(all(feature = "host", unix)))]
@@ -970,8 +1106,8 @@ pub fn check_name(
     Ok(())
 }
 
-/// Purpose: This function finds the directory that holds the dovata process's socket,
-/// lock and log.
+/// Purpose: This function finds the directory that holds the dovata process's lock, its
+/// log, and a record of every model it holds.
 ///
 /// Inputs: none; it reads `DOVATA_RUN_DIR` and `HOME`.
 ///
@@ -999,27 +1135,6 @@ fn run_dir_from(
         (None, Some(home)) => Ok(home.join(".dovata").join("run")),
         (None, None) => Err(HostError::Io("neither DOVATA_RUN_DIR nor HOME is set, so dovata cannot find its run directory".into())),
     }
-}
-
-/// Purpose: This function gives the dovata process's socket path.
-///
-/// Inputs:
-/// - `dir`: the run directory.
-///
-/// Outputs: the path, or a [`HostError::Io`] when it is longer than a socket path may
-/// be.
-pub fn socket_path(
-    dir: &Path,
-) -> Result<PathBuf, HostError>
-{
-    let path = dir.join("dovata.sock");
-    if path.as_os_str().len() > MAX_SOCKET_PATH {
-        return Err(HostError::Io(format!(
-            "the socket path {} is longer than the {MAX_SOCKET_PATH} bytes a socket path may be; set DOVATA_RUN_DIR to a shorter directory",
-            path.display()
-        )));
-    }
-    Ok(path)
 }
 
 /// Purpose: This function gives the dovata process's log file.
@@ -1067,106 +1182,6 @@ pub fn holds(
     out
 }
 
-/// Purpose: This struct holds one request to a dovata process, with the protocol
-/// version it was written for.
-#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Ask {
-    /// [`PROTOCOL`] in the program that asks.
-    pub(crate) protocol: u32,
-    /// The request.
-    #[serde(flatten)]
-    pub(crate) request: Request,
-}
-
-/// Purpose: This enum lists the requests the dovata process answers.
-#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub(crate) enum Request {
-    /// The process's [`Status`].
-    Status,
-    /// Add a model and start loading it.
-    Add {
-        /// The model.
-        spec: Spec,
-    },
-    /// Remove a model.
-    Remove {
-        /// The model's name.
-        name: String,
-    },
-    /// A model's whole plan, as JSON.
-    Plan {
-        /// The model's name.
-        name: String,
-    },
-    /// A model's memory, as file descriptors to map.
-    Map {
-        /// The model's name.
-        name: String,
-        /// The table hash of the plan the asking program's offsets came from.
-        table_hash: String,
-    },
-    /// Stop the process.
-    Stop,
-}
-
-/// Purpose: This enum lists the answers the dovata process gives.
-#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Reply {
-    /// The answer to [`Request::Status`], boxed since a status is much larger than the
-    /// other replies.
-    Status(Box<Status>),
-    /// The answer to [`Request::Add`]: the model is planned, fits, and is loading.
-    Added,
-    /// The answer to [`Request::Remove`].
-    Removed,
-    /// The answer to [`Request::Plan`].
-    Plan(serde_json::Value),
-    /// The answer to [`Request::Map`]; the file descriptors come with it.
-    Map(MapReply),
-    /// The answer to [`Request::Stop`]: the process exits after sending it.
-    Stopping,
-    /// The request was refused, and why.
-    Error(String),
-}
-
-/// Purpose: This struct holds how to map each region from the file descriptors sent
-/// with it.
-#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct MapReply {
-    /// The plan's table hash.
-    pub(crate) table_hash: String,
-    /// How many file descriptors come with the reply.
-    pub(crate) objects: usize,
-    /// One per region, in id order.
-    pub(crate) regions: Vec<RegionMap>,
-}
-
-/// Purpose: This struct holds how to map one region.
-#[cfg_attr(not(all(feature = "host", unix)), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RegionMap {
-    /// The region's id.
-    pub(crate) id: u16,
-    /// The kind of memory.
-    pub(crate) kind: RegionKind,
-    /// Which of the reply's file descriptors holds it, from 0.
-    pub(crate) object: usize,
-    /// Where the region starts in that file, in bytes.
-    pub(crate) offset: u64,
-    /// The region's size in bytes.
-    pub(crate) bytes: u64,
-    /// The alignment the region's base must have.
-    pub(crate) align: u64,
-    /// Whether the program may write it.
-    pub(crate) writable: bool,
-}
-
 #[cfg(test)]
 mod pure_tests {
     use super::*;
@@ -1209,12 +1224,9 @@ mod pure_tests {
     }
 
     #[test]
-    fn a_socket_path_must_fit()
+    fn the_log_is_in_the_run_directory()
     {
-        assert_eq!(socket_path(Path::new("/r")), Ok(PathBuf::from("/r/dovata.sock")));
         assert_eq!(log_path(Path::new("/r")), PathBuf::from("/r/dovata.log"));
-        let deep = PathBuf::from(format!("/{}", "d".repeat(100)));
-        assert!(matches!(socket_path(&deep), Err(HostError::Io(m)) if m.contains("DOVATA_RUN_DIR")));
     }
 
     #[test]
@@ -1233,18 +1245,8 @@ mod pure_tests {
     }
 
     #[test]
-    fn messages_keep_their_form()
+    fn records_keep_their_form()
     {
-        let ask = Ask { protocol: PROTOCOL, request: Request::Map { name: "m".into(), table_hash: "ab".into() } };
-        let text = serde_json::to_string(&ask).unwrap();
-        assert_eq!(text, r#"{"protocol":2,"op":"map","name":"m","table_hash":"ab"}"#);
-        assert_eq!(serde_json::from_str::<Ask>(&text).unwrap(), ask);
-        let stop = serde_json::to_string(&Ask { protocol: PROTOCOL, request: Request::Stop }).unwrap();
-        assert_eq!(stop, r#"{"protocol":2,"op":"stop"}"#);
-        let spec = Spec { name: "m".into(), parts: vec![PathBuf::from("/m.gguf")], layout: None, tokenizer: PathBuf::from("/tokenizer.json"), step: AddOptions::default().step, cpu: false };
-        let add = Ask { protocol: PROTOCOL, request: Request::Add { spec } };
-        assert_eq!(serde_json::from_str::<Ask>(&serde_json::to_string(&add).unwrap()).unwrap(), add);
-
         let model = ModelStatus {
             name: "m".into(),
             added_unix: 5,
@@ -1268,19 +1270,48 @@ mod pure_tests {
         assert_eq!((status.bytes(), status.resident_bytes()), (220, 196));
         assert_eq!(status.model("n").map(|m| m.name.as_str()), Some("n"));
         assert!(status.model("x").is_none());
-        for reply in [Reply::Status(Box::new(status.clone())), Reply::Added, Reply::Removed, Reply::Stopping, Reply::Error("no".into())] {
-            let text = serde_json::to_string(&reply).unwrap();
-            assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), reply, "{text}");
-        }
+        let text = serde_json::to_string(&status).unwrap();
+        assert_eq!(serde_json::from_str::<Status>(&text).unwrap(), status, "{text}");
 
-        let line = StartLine::Ready(Ready { pid: 7, socket: PathBuf::from("/r/dovata.sock"), protocol: PROTOCOL, version: "3.1.0".into() });
+        // A program reads where each region is from the model's record.
+        let held = HeldModel {
+            format: FORMAT,
+            name: "m".into(),
+            added_unix: 5,
+            state: State::Ready,
+            model: ModelInfo { name: None, architecture: "llama".into(), file_type: None },
+            target: Target::Cpu { ram_bytes: 1 << 30, page_bytes: 4096 },
+            table_hash: "ab".into(),
+            files: vec![HeldFile { path: PathBuf::from("/m.gguf"), bytes: 100, modified_sec: 1_700_000_000, modified_nsec: 5 }],
+            regions: vec![
+                HeldRegion { id: 0, kind: RegionKind::Mmap, holds: vec![Holds::Weights], open: Open::File { part: 0 }, offset: 0, bytes: 60, align: 32, writable: false },
+                HeldRegion {
+                    id: 1,
+                    kind: RegionKind::Host,
+                    holds: vec![Holds::KvCache],
+                    open: Open::Shared { name: "/dovata.0123456789abcdef.1".into() },
+                    offset: 0,
+                    bytes: 10,
+                    align: 64,
+                    writable: true,
+                },
+            ],
+            tokenizer: None,
+        };
+        let text = serde_json::to_string(&held).unwrap();
+        assert!(text.contains(r#""open":{"kind":"shared","name":"/dovata.0123456789abcdef.1"}"#), "{text}");
+        assert_eq!(serde_json::from_str::<HeldModel>(&text).unwrap(), held);
+        assert_eq!(held.file_of(&held.regions[0]).map(|f| f.bytes), Some(100));
+        assert!(held.file_of(&held.regions[1]).is_none());
+
+        let line = StartLine::Ready(Ready { pid: 7, dir: PathBuf::from("/r"), format: FORMAT, version: "3.2.2".into() });
         let text = serde_json::to_string(&line).unwrap();
         assert!(text.starts_with(r#"{"ready":{"#), "{text}");
         assert_eq!(serde_json::from_str::<StartLine>(&text).unwrap(), line);
     }
 
     #[test]
-    fn a_spec_travels_as_json()
+    fn a_spec_is_written_as_json()
     {
         let spec = Spec {
             name: "m".into(),

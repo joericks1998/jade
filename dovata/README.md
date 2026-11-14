@@ -34,10 +34,12 @@ emit the machine code, so a runtime engine between the program and the GPU was o
 The interface is a Rust crate the compiler takes as a cargo dependency, with no C ABI.
 
 The process came back on 2026-11-03, without the request path. The 2.x daemon took a
-message per inference step. The dovata process takes messages only to add and remove
-models, report, hand out memory and stop; the program's kernels then use that memory directly. The
-messages are dovata's own, between the library and the program of the same version, not
-a protocol other projects implement.
+message per inference step. The dovata process takes requests only to add and remove
+models and to stop, each left in its run directory with a signal; since 3.2.2 nothing
+else crosses to it. It writes down where each model's memory is, and a program, or the
+Jade compiler building one, reads that and opens the memory itself; the program's
+kernels then use that memory directly. The files are dovata's own, read through its
+library of the same version, not a protocol other projects implement.
 
 ## Where the rewrite stands
 
@@ -58,7 +60,7 @@ The runtime has been removed. dovata now has these parts:
 | [`src/moe/`](src/moe/README.md) | MoE expert ranking: which experts each layer uses most |
 | [`src/chat_template/`](src/chat_template/README.md) | `dovata-chat-template`, an optional package for Jade users: builds a model's prompt from the chat template in its GGUF. Chat templates are the programmer's to choose, so it is its own crate; dovata never depends on it, and it uses dovata's vocabulary check. |
 | [`src/machine/`](src/machine/README.md) | the current machine: its memory, page size, GPUs and their limits, and how memory is used right now |
-| [`src/host/`](src/host/README.md) | the dovata process: holds every model added to it, loaded, checks each fits beside the others, reports how much is resident, and hands a model's memory to programs to map as file descriptors over a Unix socket; and the library calls that start it, add and remove models, map them and stop it |
+| [`src/host/`](src/host/README.md) | the dovata process: holds every model added to it, loaded, checks each fits beside the others, reports how much is resident, and keeps a record in its run directory of where each model's memory is, as file paths and named shared memory, for programs to map by themselves; requests reach it by signal. And the library calls that start it, read what it holds, add and remove models, map them and stop it |
 | [`src/cli/`](src/cli/README.md) | `dovata`, the command line: `dovata start`, `add`, `remove`, `status` and `kill` run the dovata process and its models, `dovata machine` reports this machine, and `dovata plan` plans a model, downloading or quantizing it first when asked |
 | [`src/refback/`](src/refback/README.md) | `refback`, the test-only reference backend: sets up a plan's memory for real and checks every tensor against the model file. Its own crate, never published. |
 

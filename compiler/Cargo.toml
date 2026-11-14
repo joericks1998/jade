@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 description = "A language for LLMs"
 license = "MIT"
@@ -25,6 +25,12 @@ libloading = "0.8"
 # and LLVM 18 must be present to build the toolchain. Locate it with
 # LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
 inkwell = { version = "0.8", features = ["llvm18-1"] }
+# The dovata process holds the model a prompt runs. At build time the compiler calls
+# dovata's library to find the process and read its records: which models it holds,
+# where each one's memory is, and its plan, as Rust values. Reading the records is the
+# part of the library every build has, so none of its capabilities are turned on, and
+# the compiler's build pulls in no HTTP client, tokenizer or Metal bindings of dovata's.
+dovata = { path = "../dovata", default-features = false }
 
 [build-dependencies]
 # Compiles src/backend/lld.cpp, the bridge into LLD; see build.rs.

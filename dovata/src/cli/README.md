@@ -68,7 +68,8 @@ their mappings. `dovata kill` stops the process with every model in it.
 `dovata start --foreground` runs the process in the terminal instead, with its log on
 standard error, until Ctrl-C or `dovata kill` stops it. `dovata host` is the process
 itself, which `dovata start` and the library run in the background: it writes one line
-when it answers on its socket. It is not in the help.
+when it takes requests. It is not in the help. A running process also stops on SIGTERM
+or SIGINT, removing the names of its models' memory as `dovata kill` does.
 
 ## `dovata machine`
 

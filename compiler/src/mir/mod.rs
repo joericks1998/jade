@@ -636,11 +636,9 @@ pub enum InferFn {
     Text,
     /// `() -> bool`: whether the model is mapped and its kernels built.
     Ready,
-    /// `() -> str`: ask the dovata process for the model's memory, keeping the
-    /// file descriptors it sends, and return its reply.
-    DovataMap,
-    /// `(region, fd, offset, bytes: int, writable: bool) -> nil`: map one region.
-    MapRegion,
+    /// `() -> nil`: open every region of the model's memory by the name dovata
+    /// gave at build time, and map it.
+    Map,
     /// `() -> nil`: build the GPU buffers and kernels over the mapped regions.
     Setup,
     /// `(ids: [int], max: int) -> [int]`: run the model on a prompt's tokens and
@@ -905,9 +903,7 @@ impl Op {
                 | Op::Sh(_)
                 | Op::Random(RandomFn::Int | RandomFn::Index)
                 | Op::Json(_)
-                | Op::Infer(
-                    InferFn::DovataMap | InferFn::MapRegion | InferFn::Setup | InferFn::Generate
-                )
+                | Op::Infer(InferFn::Map | InferFn::Setup | InferFn::Generate)
                 | Op::Http(..)
                 | Op::UhttpStream(_)
                 | Op::Native(_)

@@ -198,14 +198,16 @@ pub(crate) fn upgrade(
         eprintln!("dovata: llama.cpp is not installed yet; dovata installs it the first time it quantizes");
     }
 
-    if let Ok(status) = host::connect().and_then(|p| p.status()) {
-        if status.version != latest_text {
-            out(&format!(
-                "\nThe dovata process, pid {}, still runs {}. `dovata kill` and `dovata start` restart it on {latest_text}; \
-                 then add its models again.\n",
-                status.pid, status.version
-            ));
-        }
+    match host::connect().and_then(|p| p.status()) {
+        Ok(status) if status.version != latest_text => out(&format!(
+            "\nThe dovata process, pid {}, still runs {}. `dovata kill` and `dovata start` restart it on {latest_text}; \
+             then add its models again.\n",
+            status.pid, status.version
+        )),
+        // A process this program cannot read is another dovata version, and the error
+        // says how to stop it.
+        Err(host::HostError::Record(why)) => out(&format!("\n{why}\n")),
+        _ => {}
     }
     Ok(())
 }

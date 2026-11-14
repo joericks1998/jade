@@ -185,8 +185,7 @@ fn model_plan(source_path: Option<&Path>) -> Result<crate::infer::plan::InferPla
         .and_then(|root| crate::project::load_project(&root).ok())
         .and_then(|m| m.model)
         .and_then(|m| m.name);
-    let (model, plan) = crate::infer::dovata::model_plan(name.as_deref())?;
-    crate::infer::plan::read(&model, &plan)
+    crate::infer::plan::from_dovata(name.as_deref())
 }
 
 #[cfg(test)]

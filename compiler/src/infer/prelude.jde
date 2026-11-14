@@ -13,7 +13,6 @@
 // reads them.
 
 use std::__infer
-use std::json
 use std::bytes
 
 // ── the byte alphabet ───────────────────────────────────────────────────────
@@ -408,21 +407,14 @@ fn decode(ids) {
 
 // ── what a prompt dereference becomes ───────────────────────────────────────
 
-// Purpose: This function maps the model's memory from the dovata process and
-// builds its kernels, the first time a prompt runs. The backend keeps the
-// first mapping when two tasks get here at once.
+// Purpose: This function maps the model's memory, which the dovata process
+// holds, and builds its kernels, the first time a prompt runs. The backend
+// keeps the first mapping when two tasks get here at once.
 fn ensure_model() {
     if __infer.ready() {
         return nil
     }
-    let text = __infer.dovata_map()
-    let r = json.parse(text)
-    if text.starts_with("{\"error\"") {
-        raise f"dovata would not hand out the model: {str(r["error"])}"
-    }
-    for region in r["map"]["regions"] {
-        __infer.map_region(int(region["id"]), int(region["object"]), int(region["offset"]), int(region["bytes"]), bool(region["writable"]))
-    }
+    __infer.map()
     __infer.setup()
 }
 

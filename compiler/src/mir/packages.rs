@@ -174,8 +174,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     "taint" => (InferFn::Taint, Ty::Str),
                     "text" => (InferFn::Text, Ty::Str),
                     "ready" => (InferFn::Ready, Ty::Bool),
-                    "dovata_map" => (InferFn::DovataMap, Ty::Str),
-                    "map_region" => (InferFn::MapRegion, Ty::Nil),
+                    "map" => (InferFn::Map, Ty::Nil),
                     "setup" => (InferFn::Setup, Ty::Nil),
                     "generate" => (InferFn::Generate, Ty::Array(Box::new(Ty::Int))),
                     other => {

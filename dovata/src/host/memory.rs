@@ -209,50 +209,63 @@ pub(crate) fn page_size() -> usize
     usize::try_from(p).ok().filter(|p| p.is_power_of_two()).unwrap_or(4096)
 }
 
-/// Purpose: This function makes a shared memory object that only file descriptors name,
-/// so it disappears once every process that holds or maps it is done.
+/// Purpose: This function makes a named shared memory object, readable and writable by
+/// this user only, replacing one a stopped process left under the same name. The object
+/// stays until its name is removed and every process that holds or maps it is done.
 ///
 /// Inputs:
+/// - `name`: its name, such as `/dovata.1f2e3d4c5b6a7980.2`.
 /// - `len`: its size in bytes.
 ///
 /// Outputs: the object's file descriptor, or the system's error.
-pub(crate) fn shared_memory(
+pub(crate) fn create_shared(
+    name: &str,
     len: u64,
 ) -> io::Result<OwnedFd>
 {
-    let fd = anonymous()?;
+    unlink_shared(name);
+    let fd = shm_open(name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
     let size = libc::off_t::try_from(len).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the size is too large"))?;
     // SAFETY: `fd` is a valid descriptor that this function owns.
     if unsafe { libc::ftruncate(fd.as_raw_fd(), size) } != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        unlink_shared(name);
+        return Err(e);
     }
-    seal(&fd)?;
     Ok(fd)
 }
 
-/// Purpose: This function fixes a memfd's size for good, so no program that is handed
-/// it can shrink it under the others, which would make them crash with SIGBUS. macOS
-/// needs nothing here, since a POSIX shared memory object refuses a second ftruncate.
+/// Purpose: This function opens a named shared memory object the dovata process made.
 ///
 /// Inputs:
-/// - `fd`: the memfd, already at its size.
+/// - `name`: its name.
+/// - `writable`: open it for writing as well as reading.
 ///
-/// Outputs: `Ok(())`, or the system's error.
-fn seal(
-    fd: &OwnedFd,
-) -> io::Result<()>
+/// Outputs: the object's file descriptor, or the system's error, such as no object of
+/// that name.
+pub(crate) fn open_shared(
+    name: &str,
+    writable: bool,
+) -> io::Result<OwnedFd>
 {
-    #[cfg(target_os = "linux")]
-    {
-        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-        // SAFETY: `fd` is a valid memfd made with MFD_ALLOW_SEALING.
-        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    shm_open(name, if writable { libc::O_RDWR } else { libc::O_RDONLY })
+}
+
+/// Purpose: This function removes a shared memory object's name. Programs that opened or
+/// mapped it keep it; nobody can open it by name again.
+///
+/// Inputs:
+/// - `name`: its name.
+///
+/// Outputs: none; a name that does not exist is not an error.
+pub(crate) fn unlink_shared(
+    name: &str,
+)
+{
+    if let Ok(c) = std::ffi::CString::new(name) {
+        // SAFETY: `c` is a NUL-terminated string that lives through the call.
+        unsafe { libc::shm_unlink(c.as_ptr()) };
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = fd;
-    Ok(())
 }
 
 /// Purpose: This function gives the size of a file or shared memory object.
@@ -274,17 +287,29 @@ pub(crate) fn object_size(
     u64::try_from(st.st_size).map_err(|_| io::Error::other("a negative size"))
 }
 
-/// Purpose: This function makes an empty shared memory object with no name: memfd on
-/// Linux.
+/// Purpose: This function opens a POSIX shared memory object, making it readable and
+/// writable by this user only when it is made. The object's descriptor is closed when a
+/// program dovata starts runs: shm_open sets close-on-exec on Linux and macOS alike.
 ///
-/// Inputs: none.
+/// Inputs:
+/// - `name`: its name.
+/// - `flags`: the open flags.
 ///
 /// Outputs: the object's file descriptor, or the system's error.
-#[cfg(target_os = "linux")]
-fn anonymous() -> io::Result<OwnedFd>
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn shm_open(
+    name: &str,
+    flags: libc::c_int,
+) -> io::Result<OwnedFd>
 {
-    // SAFETY: the name is a NUL-terminated string that lives through the call.
-    let fd = unsafe { libc::memfd_create(c"dovata".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    let c = std::ffi::CString::new(name).map_err(io::Error::other)?;
+    // SAFETY: `c` is a NUL-terminated string that lives through the call. macOS declares
+    // shm_open variadic, so its mode is passed as an unsigned int, the type a variadic
+    // argument is promoted to; Linux takes a mode_t.
+    #[cfg(target_vendor = "apple")]
+    let fd = unsafe { libc::shm_open(c.as_ptr(), flags, 0o600 as libc::c_uint) };
+    #[cfg(target_os = "linux")]
+    let fd = unsafe { libc::shm_open(c.as_ptr(), flags, 0o600 as libc::mode_t) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -292,48 +317,21 @@ fn anonymous() -> io::Result<OwnedFd>
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Purpose: This function makes an empty shared memory object with no name: a POSIX
-/// shared memory object whose name is removed as soon as it is open.
+/// Purpose: This function refuses shared memory on a system dovata has not been built
+/// for, whose `shm_open` takes its mode differently.
 ///
-/// Inputs: none.
-///
-/// Outputs: the object's file descriptor, or the system's error.
-#[cfg(target_vendor = "apple")]
-fn anonymous() -> io::Result<OwnedFd>
-{
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    loop {
-        // macOS allows names of up to 31 bytes.
-        let name = format!("/dovata.{}.{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
-        let c = std::ffi::CString::new(name).map_err(io::Error::other)?;
-        // SAFETY: `c` is a NUL-terminated string that lives through both calls. The mode
-        // is passed as an unsigned int, the type a variadic argument is promoted to.
-        let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600 as libc::c_uint) };
-        if fd < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                continue;
-            }
-            return Err(e);
-        }
-        // SAFETY: as above. Removing the name leaves the object open through `fd`.
-        unsafe { libc::shm_unlink(c.as_ptr()) };
-        // SAFETY: `fd` was just opened and nothing else owns it. shm_open sets
-        // close-on-exec, so a program dovata starts does not inherit it.
-        return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-    }
-}
-
-/// Purpose: This function refuses to make shared memory on a system dovata has not been
-/// built for, whose `shm_open` takes its mode differently.
-///
-/// Inputs: none.
+/// Inputs:
+/// - `name`: unused.
+/// - `flags`: unused.
 ///
 /// Outputs: always an error.
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-fn anonymous() -> io::Result<OwnedFd>
+fn shm_open(
+    name: &str,
+    flags: libc::c_int,
+) -> io::Result<OwnedFd>
 {
+    let _ = (name, flags);
     Err(io::Error::new(io::ErrorKind::Unsupported, "dovata makes shared memory on Linux and macOS only"))
 }
 

@@ -2,14 +2,35 @@ name: CI/CD
 
 # The compiler's workflow. dovata, under dovata/, has its own in dovata-ci.yml, and
 # the VS Code extension, under vscode/, has its own in vscode-ci.yml, so a change to
-# either alone does not install LLVM and build the compiler.
+# the extension alone does not install LLVM and build the compiler. The compiler links
+# dovata's library to read the dovata process's records, so a change to that library
+# runs this workflow too; dovata's installer, docs, command line and its other two
+# crates do not.
 on:
   push:
     branches: [main]
-    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml", "vscode/**", ".github/workflows/vscode-*.yml"]
+    paths-ignore:
+      - "dovata/install.sh"
+      - "dovata/docs/**"
+      - "dovata/**/*.md"
+      - "dovata/src/cli/**"
+      - "dovata/src/chat_template/**"
+      - "dovata/src/refback/**"
+      - ".github/workflows/dovata-*.yml"
+      - "vscode/**"
+      - ".github/workflows/vscode-*.yml"
   pull_request:
     branches: [main, "2.0.0"]
-    paths-ignore: ["dovata/**", ".github/workflows/dovata-*.yml", "vscode/**", ".github/workflows/vscode-*.yml"]
+    paths-ignore:
+      - "dovata/install.sh"
+      - "dovata/docs/**"
+      - "dovata/**/*.md"
+      - "dovata/src/cli/**"
+      - "dovata/src/chat_template/**"
+      - "dovata/src/refback/**"
+      - ".github/workflows/dovata-*.yml"
+      - "vscode/**"
+      - ".github/workflows/vscode-*.yml"
   workflow_dispatch:
 
 jobs:

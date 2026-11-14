@@ -310,7 +310,7 @@ pub(crate) fn serve(
     let result = if args.is_empty() {
         host::serve(|r| say(&StartLine::Ready(r.clone())))
     } else {
-        Err(HostError::Protocol("`dovata host` takes no arguments; people use `dovata start`".into()))
+        Err(HostError::Start("`dovata host` takes no arguments; people use `dovata start`".into()))
     };
     match result {
         Ok(()) => Ok(()),

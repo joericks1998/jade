@@ -126,9 +126,10 @@ mod capabilities {
     #[cfg(all(feature = "host", unix))]
     fn host_process_half_is_present()
     {
-        // With the feature, looking for the process reaches the socket, whether or not
-        // one runs; without it, every call is NotBuilt.
-        use crate::host::{connect, HostError};
-        assert!(!matches!(connect(), Err(HostError::NotBuilt)));
+        // With the feature, the calls that map memory are built; without it, they are
+        // not, and this test is not compiled. Nothing here touches a run directory.
+        use crate::host::{HostError, Mapping, Process};
+        let map: fn(&Process, &str, &str) -> Result<Mapping, HostError> = Process::map;
+        let _ = map;
     }
 }

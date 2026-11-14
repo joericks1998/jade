@@ -1,11 +1,16 @@
-//! The model's plan, read into what the backend writes into the program.
+//! The model's plan, from dovata, read into what the backend writes into the
+//! program.
 //!
-//! dovata's plan says where every tensor sits, as a region and a byte offset;
-//! which ggml ops make one forward step, in order; and how the model tokenizes
-//! text. This file checks the plan describes a model these kernels can run, and
-//! turns it into an [`InferPlan`]: one fixed-size record per op that launches a
-//! kernel, the addresses of the inputs each step fills, and the tokenizer's
-//! tables as text.
+//! The compiler links dovata's library and calls it: `dovata::host::connect`
+//! finds the dovata process, and the process's records say which models it
+//! holds, where each region of a model's memory is, and the model's plan. The
+//! plan says where every tensor sits, as a region and a byte offset; which ggml
+//! ops make one forward step, in order; and how the model tokenizes text. This
+//! file checks the plan describes a model these kernels can run, and turns it
+//! into an [`InferPlan`]: one fixed-size record per op that launches a kernel,
+//! the addresses of the inputs each step fills, the tokenizer's tables as text,
+//! and the name of the file or shared memory object each region is in, so the
+//! program opens and maps every region by itself.
 //!
 //! *The step size.* The plan places every short-lived tensor for a step of
 //! `n_tokens` tokens. A step may run fewer: the program fills only the first
@@ -16,6 +21,11 @@
 //! with the largest stride, and the program puts the real count there.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+
+use dovata::host::{HeldModel, HostError, Open};
+use dovata::layout::Param;
+use dovata::memplan::{AddressEntry, Plan, Role};
 
 /// The words in one op record. See [`InferPlan::ops`].
 pub const OP_WORDS: usize = 80;
@@ -74,17 +84,42 @@ pub struct Addr {
     pub offset: i64,
 }
 
+/// Purpose: This struct holds where one region of the model's memory is, as
+/// the program opens and maps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionOpen {
+    /// The part file's path, or the shared memory object's name.
+    pub name: String,
+    /// Whether `name` is a shared memory object, opened with `shm_open`, rather
+    /// than a file.
+    pub shared: bool,
+    /// Where the region starts in the file or object, in bytes.
+    pub offset: i64,
+    /// The region's size in bytes.
+    pub bytes: i64,
+    /// Whether the program may write it: allocations yes, weights never.
+    pub writable: bool,
+    /// For a part file: its size, and when it was last changed, in seconds and
+    /// nanoseconds, as dovata loaded it. The program refuses a file that
+    /// differs, since a file changed in place changes the bytes under it.
+    pub file_bytes: i64,
+    pub modified_sec: i64,
+    pub modified_nsec: i64,
+}
+
 /// Purpose: This struct holds everything about a model the backend writes into
 /// a program that runs it.
 #[derive(Debug, Clone)]
 pub struct InferPlan {
     /// The model's name in the dovata process.
     pub model: String,
-    /// The plan's table hash, which the program sends when it maps the model,
-    /// so dovata refuses memory these offsets do not fit.
-    pub table_hash: String,
-    /// How many regions the program maps.
-    pub regions: usize,
+    /// Every region the program maps, in id order. The shared memory names
+    /// include the plan's table hash, so a program compiled against another
+    /// plan finds no memory to map rather than memory its offsets do not fit.
+    pub regions: Vec<RegionOpen>,
+    /// The directory the program registers in once it maps the model, so
+    /// `dovata status` lists it.
+    pub clients: String,
     /// The most tokens one step runs.
     pub n_tokens: i64,
     /// The KV cache's length: the most tokens a prompt and its reply hold.
@@ -156,75 +191,192 @@ struct Tensor {
     token_axis: i64,
 }
 
+/// The advice every failure to find a model in dovata ends with.
+const START: &str = "a program that dereferences a prompt runs a model the dovata process \
+                     holds; install it with `curl -fsSL \
+                     https://raw.githubusercontent.com/joericks1998/jade/main/dovata/install.sh \
+                     | sh`, start it with `dovata start`, and add a model with `dovata add \
+                     <model>`";
+
+/// Purpose: This function asks dovata for the model a program runs and reads
+/// its plan.
+///
+/// Inputs:
+/// - `name`: the model to use, from `jade.toml`'s `[model]`, or `None` for the
+///   one model the process holds.
+///
+/// Outputs: the plan, or a message: dovata is not running, holds no model or
+/// several, or holds a model these kernels cannot run.
+pub fn from_dovata(name: Option<&str>) -> Result<InferPlan, String> {
+    let dovata = dovata::host::connect().map_err(|e| match e {
+        HostError::NotRunning => format!("dovata is not running; {START}"),
+        e => format!("dovata: {e}"),
+    })?;
+    let held = match name {
+        Some(n) => dovata.model(n).map_err(|e| format!("dovata: {e}"))?,
+        None => {
+            let mut models = dovata.models().map_err(|e| format!("dovata: {e}"))?;
+            match models.len() {
+                1 => models.remove(0),
+                0 => return Err(format!("dovata holds no model; {START}")),
+                n => {
+                    let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+                    return Err(format!(
+                        "dovata holds {n} models, {}; name the one this program runs in \
+                         jade.toml:\n    [model]\n    name = \"{}\"",
+                        names.join(", "),
+                        names[0]
+                    ));
+                }
+            }
+        }
+    };
+    let plan = dovata.plan(&held.name).map_err(|e| format!("dovata: {e}"))?;
+    read(&held, &plan, &dovata.clients_dir(&held.name))
+}
+
+/// Purpose: This function gives an op parameter as a float.
+///
+/// Inputs:
+/// - `params`: the op's parameters.
+/// - `key`: the parameter's name.
+///
+/// Outputs: its value, or 0 when the op has no such number.
+fn float(params: &BTreeMap<String, Param>, key: &str) -> f64 {
+    match params.get(key) {
+        Some(Param::Float(f)) => *f,
+        Some(Param::Int(i)) => *i as f64,
+        _ => 0.0,
+    }
+}
+
+/// Purpose: This function gives an op parameter as an integer.
+///
+/// Inputs:
+/// - `params`: the op's parameters.
+/// - `key`: the parameter's name.
+///
+/// Outputs: its value, or 0 when the op has no such integer.
+fn int(params: &BTreeMap<String, Param>, key: &str) -> i64 {
+    match params.get(key) {
+        Some(Param::Int(i)) => *i,
+        _ => 0,
+    }
+}
+
+/// Purpose: This function says where each region of a model's memory is, from
+/// dovata's record of it.
+///
+/// Inputs:
+/// - `held`: the record.
+/// - `plan`: the model's plan, whose regions the record must match.
+///
+/// Outputs: one [`RegionOpen`] per region, in id order, or a message saying
+/// the record and the plan disagree.
+fn regions(held: &HeldModel, plan: &Plan) -> Result<Vec<RegionOpen>, String> {
+    let again = "add the model to dovata again";
+    if held.table_hash != plan.table_hash || held.regions.len() != plan.regions.len() {
+        return Err(format!("dovata's record of {} and its plan disagree; {again}", held.name));
+    }
+    let mut out = Vec::new();
+    for (i, r) in held.regions.iter().enumerate() {
+        if usize::from(r.id) != i {
+            return Err(format!("dovata lists region {} of {} at {i}; {again}", r.id, held.name));
+        }
+        let text = |p: &Path| {
+            p.to_str().filter(|t| !t.contains('\0')).map(str::to_string).ok_or_else(|| {
+                format!("{} is not a path a program can carry; move the model to a plain path and {again}", p.display())
+            })
+        };
+        let open = match &r.open {
+            Open::File { .. } => {
+                let f = held
+                    .file_of(r)
+                    .ok_or_else(|| format!("region {i} of {} names no file; {again}", held.name))?;
+                RegionOpen {
+                    name: text(&f.path)?,
+                    shared: false,
+                    offset: r.offset as i64,
+                    bytes: r.bytes as i64,
+                    writable: false,
+                    file_bytes: f.bytes as i64,
+                    modified_sec: f.modified_sec,
+                    modified_nsec: f.modified_nsec,
+                }
+            }
+            Open::Shared { name } => RegionOpen {
+                name: name.clone(),
+                shared: true,
+                offset: r.offset as i64,
+                bytes: r.bytes as i64,
+                writable: r.writable,
+                file_bytes: 0,
+                modified_sec: 0,
+                modified_nsec: 0,
+            },
+        };
+        out.push(open);
+    }
+    Ok(out)
+}
+
 /// Purpose: This function reads a plan into what the backend writes.
 ///
 /// Inputs:
-/// - `model`: the model's name in dovata.
-/// - `plan`: the plan's JSON, as dovata gives it.
+/// - `held`: dovata's record of the model: its name and where its memory is.
+/// - `plan`: the model's plan.
+/// - `clients`: the directory a program registers in once it maps the model.
 ///
 /// Outputs: the plan, or a message naming what these kernels cannot run.
-pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> {
+pub fn read(held: &HeldModel, plan: &Plan, clients: &Path) -> Result<InferPlan, String> {
+    let model = held.name.as_str();
     let fail = |m: String| format!("model {model}: {m}");
-    let step = plan.get("step").ok_or_else(|| fail("the plan has no step".into()))?;
-    let opts = &step["options"];
-    let n_tokens = opts["n_tokens"].as_i64().unwrap_or(0);
-    let n_ctx = opts["n_ctx"].as_i64().unwrap_or(0);
-    if opts["n_outputs"].as_i64() != Some(1) {
+    let step = plan.step.as_ref().ok_or_else(|| fail("the plan has no step".into()))?;
+    let opts = step.options;
+    let n_tokens = i64::from(opts.n_tokens);
+    let n_ctx = i64::from(opts.n_ctx);
+    if opts.n_outputs != 1 {
         return Err(fail(format!(
             "the plan returns logits for {} tokens a step, and a program reads one; add the \
              model to dovata with one output",
-            opts["n_outputs"]
+            opts.n_outputs
         )));
     }
-    let entries: HashMap<&str, &serde_json::Value> = plan["entries"]
-        .as_array()
-        .ok_or_else(|| fail("the plan has no address table".into()))?
-        .iter()
-        .filter_map(|e| Some((e["tensor"].as_str()?, e)))
-        .collect();
-    let regions = plan["regions"].as_array().map_or(0, Vec::len);
+    let entries: HashMap<&str, &AddressEntry> =
+        plan.entries.iter().map(|e| (e.tensor.as_str(), e)).collect();
+    let regions = regions(held, plan).map_err(fail)?;
+    let clients = clients
+        .to_str()
+        .filter(|t| !t.contains('\0'))
+        .ok_or_else(|| fail(format!("{} is not a path a program can carry", clients.display())))?
+        .to_string();
 
     let tensor = |name: &str| -> Result<Tensor, String> {
         let e =
             entries.get(name).ok_or_else(|| fail(format!("tensor {name} is not in the plan")))?;
-        let ty = e["ggml_type"].as_i64().unwrap_or(-1);
+        let ty = i64::from(e.ggml_type);
         let (blk, bytes) = block(ty).ok_or_else(|| {
             fail(format!("tensor {name} has ggml type {ty}, which these kernels do not read"))
         })?;
-        let dims: Vec<i64> = e["dims"]
-            .as_array()
-            .map(|d| d.iter().filter_map(|x| x.as_i64()).collect())
-            .unwrap_or_default();
         let mut ne = [1i64; 4];
-        for (i, d) in dims.iter().take(4).enumerate() {
-            ne[i] = *d;
+        for (i, d) in e.dims.iter().take(4).enumerate() {
+            ne[i] = *d as i64;
         }
-        let role = &e["role"];
-        let nb = match role["nb"].as_array() {
-            Some(v) if role["kind"] == "view" => {
-                let mut nb = [0i64; 4];
-                for (i, x) in v.iter().take(4).enumerate() {
-                    nb[i] = x.as_i64().unwrap_or(0);
-                }
-                nb
-            }
+        let nb = match &e.role {
+            Role::View { nb, .. } => nb.map(|x| x as i64),
             _ => {
                 let row = ne[0] / blk * bytes;
                 [bytes, row, row * ne[1], row * ne[1] * ne[2]]
             }
         };
-        let kind = role["kind"].as_str().unwrap_or("");
-        let grows = !matches!(kind, "weight" | "kv") && n_tokens > 1;
+        let grows = !matches!(e.role, Role::Weight | Role::Kv) && n_tokens > 1;
         let token_axis = if grows {
             (0..4).filter(|&i| ne[i] == n_tokens).max_by_key(|&i| nb[i]).map_or(-1, |i| i as i64)
         } else {
             -1
         };
         Ok(Tensor {
-            addr: Addr {
-                region: e["region"].as_i64().unwrap_or(-1),
-                offset: e["offset"].as_i64().unwrap_or(0),
-            },
+            addr: Addr { region: i64::from(e.region), offset: e.offset as i64 },
             ne,
             nb,
             ty,
@@ -233,15 +385,12 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
     };
 
     let mut ops = Vec::new();
-    for op in step["ops"].as_array().ok_or_else(|| fail("the plan's step has no ops".into()))? {
-        let kind = op["op"].as_str().unwrap_or("");
-        let inputs: Vec<&str> = op["inputs"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
-            .unwrap_or_default();
-        let output = op["outputs"][0].as_str().unwrap_or("");
-        let params = &op["params"];
-        let p = |k: &str| params[k].as_f64().unwrap_or(0.0);
+    for op in &step.ops {
+        let kind = op.op.as_str();
+        let inputs: Vec<&str> = op.inputs.iter().map(String::as_str).collect();
+        let output = op.outputs.first().map_or("", String::as_str);
+        let params = &op.params;
+        let p = |k: &str| float(params, k);
         let (kernel, rule, width) = match kind {
             // These move no data: their tensors are views the plan placed.
             "view" | "reshape" | "permute" | "transpose" => continue,
@@ -301,8 +450,8 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
                 f[0] = p("freq_base") as f32;
                 f[1] = p("freq_scale") as f32;
                 f[2] = p("attn_factor") as f32;
-                ints[0] = params["n_dims"].as_i64().unwrap_or(0);
-                ints[1] = params["mode"].as_i64().unwrap_or(0);
+                ints[0] = int(params, "n_dims");
+                ints[1] = int(params, "mode");
                 if ints[1] != 0 && ints[1] != 2 {
                     return Err(fail(format!(
                         "its rope mode {} is not one the kernels run",
@@ -348,7 +497,7 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
     let known =
         ["inp_tokens", "inp_pos", "inp_k_idxs", "inp_v_idxs", "attn_inp_kq_mask", "inp_out_ids"];
     for (name, e) in &entries {
-        if e["role"]["kind"] == "input" && !known.contains(name) {
+        if e.role == Role::Input && !known.contains(name) {
             return Err(fail(format!(
                 "its step takes the input {name}, which a program does not fill yet; a quantized \
                  KV cache needs one, so add the model to dovata with an f16 cache"
@@ -375,7 +524,7 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
             mask_t.ne[0]
         )));
     }
-    let out_name = step["outputs"][0].as_str().unwrap_or("result_output");
+    let out_name = step.outputs.first().map_or("result_output", String::as_str);
     let out = tensor(out_name)?;
     if out.ty != 0 {
         return Err(fail(format!("its logits, {out_name}, are not f32")));
@@ -384,8 +533,8 @@ pub fn read(model: &str, plan: &serde_json::Value) -> Result<InferPlan, String> 
     let tok = read_tokenizer(model, plan)?;
     Ok(InferPlan {
         model: model.to_string(),
-        table_hash: plan["table_hash"].as_str().unwrap_or("").to_string(),
         regions,
+        clients,
         n_tokens,
         n_ctx,
         ops,
@@ -418,21 +567,22 @@ struct Tokenizer {
 ///
 /// Inputs:
 /// - `model`: the model's name, for messages.
-/// - `plan`: the plan's JSON.
+/// - `plan`: the plan.
 ///
 /// Outputs: the tables, or a message naming a tokenizer the prelude cannot run.
-fn read_tokenizer(model: &str, plan: &serde_json::Value) -> Result<Tokenizer, String> {
+fn read_tokenizer(model: &str, plan: &Plan) -> Result<Tokenizer, String> {
     let fail = |m: String| format!("model {model}: {m}");
-    let t = plan.get("tokenizer").filter(|t| !t.is_null()).ok_or_else(|| {
+    let t = plan.tokenizer.as_ref().ok_or_else(|| {
         fail("the plan carries no tokenizer; dovata 3.2 or later plans with one".into())
     })?;
-    if t["kind"] != "gpt2" {
+    if t.kind != "gpt2" {
         return Err(fail(format!(
-            "its tokenizer is {}, and a program runs byte-level BPE (gpt2) only so far",
-            t["kind"]
+            "its tokenizer is {:?}, and a program runs byte-level BPE (gpt2) only so far",
+            t.kind
         )));
     }
-    let def: serde_json::Value = serde_json::from_str(t["definition"].as_str().unwrap_or(""))
+    // The model's tokenizer.json, as Hugging Face writes it.
+    let def: serde_json::Value = serde_json::from_str(&t.definition)
         .map_err(|e| fail(format!("its tokenizer.json does not read ({e})")))?;
 
     let mut by_id: BTreeMap<i64, String> = BTreeMap::new();
@@ -492,10 +642,7 @@ fn read_tokenizer(model: &str, plan: &serde_json::Value) -> Result<Tokenizer, St
         fail("its tokenizer splits text with a pattern the prelude does not know".into())
     })?;
 
-    let mut stops: Vec<i64> = t["stop"]
-        .as_array()
-        .map(|s| s.iter().filter_map(|x| x.as_i64()).collect())
-        .unwrap_or_default();
+    let mut stops: Vec<i64> = t.stop.iter().map(|&id| i64::from(id)).collect();
     // A raw completion ends at `<|endoftext|>`, which the GGUF does not list.
     if let Some(id) = endoftext
         && !stops.contains(&id)

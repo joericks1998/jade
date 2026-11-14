@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::address::{place, Plan, PlanError, PlanTensor, Role};
 use crate::layout::{BindOptions, BoundGraph, Layout, Param, TensorKind};
@@ -15,7 +15,7 @@ use crate::tokenize::TokenizerPlan;
 
 /// Purpose: This struct holds the forward step a plan's tensors belong to: its ops in
 /// run order, by tensor name, so the Jade compiler can generate one kernel per op.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     /// `general.architecture`.
     pub arch: String,
@@ -31,7 +31,7 @@ pub struct Step {
 
 /// Purpose: This struct holds one ggml op of a planned step, with its tensors named as in
 /// the plan's address table.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepOp {
     /// The ggml op in lower case, such as `mul_mat`.
     pub op: String,

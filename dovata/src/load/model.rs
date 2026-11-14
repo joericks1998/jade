@@ -38,7 +38,7 @@ pub struct Model {
 
 /// Purpose: This struct holds what identifies one GGUF part file: its header hash and
 /// expected size.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartIdentity {
     /// SHA-256 of the file's first `data_offset` bytes, the metadata and the tensor
     /// index, in lowercase hex. Any change to a tensor's name, type, shape or offset

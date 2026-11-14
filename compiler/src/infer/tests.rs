@@ -25,14 +25,13 @@ fn model_file() -> Option<PathBuf> {
             return None;
         }
     }
-    let status = match super::dovata::ask(serde_json::json!({ "op": "status" })) {
-        Ok(s) => s,
+    let models = match dovata::host::connect().and_then(|p| p.models()) {
+        Ok(m) => m,
         Err(e) => {
             eprintln!("skipped: {e}");
             return None;
         }
     };
-    let models = status["status"]["models"].as_array().cloned().unwrap_or_default();
     if models.len() != 1 {
         eprintln!(
             "skipped: dovata holds {} models, and these checks use exactly one",
@@ -40,8 +39,7 @@ fn model_file() -> Option<PathBuf> {
         );
         return None;
     }
-    let path = models[0]["files"][0]["path"].as_str()?;
-    Some(PathBuf::from(path))
+    Some(models[0].files.first()?.path.clone())
 }
 
 /// Purpose: This function builds a program and runs it.

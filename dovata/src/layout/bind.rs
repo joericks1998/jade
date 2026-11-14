@@ -164,7 +164,7 @@ pub struct BoundTensor {
 }
 
 /// Purpose: This enum holds one op parameter's concrete value.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Param {
     Int(i64),

@@ -1,6 +1,6 @@
 [package]
 name = "dovata"
-version = "3.2.1"
+version = "3.2.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -74,17 +74,22 @@ machine = ["dep:objc2-metal"]
 # plan's tokenizer section is still a type every build has.
 tokenize = ["dep:tokenizers"]
 
-# Running a model's process: `host::serve` holds a model's memory and answers requests on
-# a Unix socket, and `host::start`, `attach` and `Hosted` start, map and stop it from
-# another program. It maps memory and passes file descriptors between processes, which
+# Running the dovata process: `host::serve` holds models' memory, keeps a record of it in
+# its run directory, and takes requests a signal says are waiting; `host::start` and a
+# `Process`'s calls start it, add and remove models, map their memory and stop it from
+# another program. It maps memory, makes named shared memory and handles signals, which
 # takes libc. It reads this machine to plan for it, and checks each model's tokenizer
-# for its plan, so it turns on `machine` and `tokenize`. Unix only.
-# Off, every call returns an error naming this feature.
+# for its plan, so it turns on `machine` and `tokenize`. Unix only. Off, every call that
+# starts, signals or maps returns an error naming this feature; reading the run
+# directory's records, which is all the Jade compiler does, works in every build.
 host = ["machine", "tokenize", "dep:libc"]
 
 [dependencies]
-serde_json = { version = "1", features = ["std"] }
-# Layout files are TOML, and the plan serializes to JSON for the compiler.
+# `float_roundtrip` reads every float back exactly as it was written: the process writes
+# each model's plan to its run directory, and a program reading it must get the same
+# attention scale and norm epsilon the planner computed, not one a bit off.
+serde_json = { version = "1", features = ["std", "float_roundtrip"] }
+# Layout files are TOML, and the plan and the run directory's records are JSON.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # The plan records a SHA-256 of each GGUF part's header, so the program can refuse a
@@ -107,8 +112,8 @@ ureq = { version = "2", optional = true }
 # dovata-chat-template, so a build with both has one copy.
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 
-# mmap, shared memory, mincore, and passing file descriptors over a Unix socket, for
-# the `host` capability. Already in the build through other crates.
+# mmap, named shared memory, mincore and signal handlers, for the `host` capability.
+# Already in the build through other crates.
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
 

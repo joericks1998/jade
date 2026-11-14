@@ -765,15 +765,8 @@ impl<'a> Checker<'a> {
                     "config" => (vec![Ty::Int], Ty::Int),
                     "char_class" => (vec![Ty::Char], Ty::Int),
                     "taint" => (vec![Ty::Str], Ty::Str),
-                    "ready" | "setup" | "dovata_map" => (
-                        Vec::new(),
-                        match name {
-                            "ready" => Ty::Bool,
-                            "setup" => Ty::Nil,
-                            _ => Ty::Str,
-                        },
-                    ),
-                    "map_region" => (vec![Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Bool], Ty::Nil),
+                    "ready" => (Vec::new(), Ty::Bool),
+                    "setup" | "map" => (Vec::new(), Ty::Nil),
                     "generate" => {
                         (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int], Ty::Array(Box::new(Ty::Int)))
                     }

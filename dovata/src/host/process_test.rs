@@ -9,9 +9,10 @@ use std::process::Command;
 
 use dovata::gguf::write::Writer;
 use dovata::gguf::Value;
-use dovata::host::{self, AddOptions, HostError, StartOptions, State};
+use dovata::host::{self, AddOptions, HostError, Open, StartOptions, State};
 use dovata::layout::BindOptions;
 use dovata::load::KvType;
+use dovata::memplan::Source;
 
 #[path = "fixture.rs"]
 mod fixture;
@@ -65,15 +66,16 @@ fn a_program_starts_dovata_adds_a_model_maps_it_and_kills_dovata()
     // Map it, and read one weight where the plan says it is.
     let mem = p.map("host-fixture", &m.table_hash).unwrap();
     let plan = p.plan("host-fixture").unwrap();
-    let e = plan["entries"].as_array().unwrap().iter().find(|e| e["tensor"] == "blk.1.ffn_down.weight").unwrap();
-    let at = |k: &str| e[k].as_u64().unwrap() as usize;
-    let got = mem.region(at("region") as u16).unwrap().read(at("offset"), at("bytes")).unwrap();
+    let e = plan.entries.iter().find(|e| e.tensor == "blk.1.ffn_down.weight").unwrap();
+    let (region, offset, bytes) = (e.region, e.offset as usize, e.bytes as usize);
+    let got = mem.region(region).unwrap().read(offset, bytes).unwrap();
     let file = std::fs::read(&model).unwrap();
-    let off = e["source"]["file_offset"].as_u64().unwrap() as usize;
-    assert_eq!(got, &file[off..off + at("bytes")]);
+    let Source::File { file_offset, .. } = e.source else { panic!("{:?} is not from the file", e.source) };
+    let off = file_offset as usize;
+    assert_eq!(got, &file[off..off + bytes]);
 
-    // The tokenizer comes with the plan, from the process the program talks to.
-    assert_eq!(plan["schema_version"], 2);
+    // The tokenizer comes with the plan, from the process the program reads it from.
+    assert_eq!(plan.schema_version, 2);
     let tok = p.tokenizer("host-fixture", &m.table_hash).unwrap();
     assert_eq!(tok.encode("t7 t0 t31", false).unwrap(), [7, 0, 31]);
 
@@ -109,10 +111,10 @@ fn a_program_starts_dovata_adds_a_model_maps_it_and_kills_dovata()
     let (ok, _, err) = dovata(&dir.path, &["add", model.to_str().unwrap(), "--name", "bad", "--layout", bad.to_str().unwrap()]);
     assert!(!ok && err.contains("bad.toml"), "{err}");
 
-    // Stop it from code. Its socket goes, and the mapping stays readable.
+    // Stop it from code. Its records go, and the mapping stays readable.
     p.kill().unwrap();
     assert_eq!(host::connect(), Err(HostError::NotRunning));
-    assert_eq!(mem.region(at("region") as u16).unwrap().read(at("offset"), 4).unwrap(), &file[off..off + 4]);
+    assert_eq!(mem.region(region).unwrap().read(offset, 4).unwrap(), &file[off..off + 4]);
     let (ok, text, _) = dovata(&dir.path, &["status"]);
     assert!(ok && text.starts_with("dovata is not running"), "{text}");
 
@@ -126,4 +128,55 @@ fn a_program_starts_dovata_adds_a_model_maps_it_and_kills_dovata()
     assert_eq!(host::connect(), Err(HostError::NotRunning));
     let (ok, _, err) = dovata(&dir.path, &["kill"]);
     assert!(!ok && err.contains("not running"), "{err}");
+
+    // SIGTERM stops it too, and takes the names of its memory with it.
+    let (ok, text, err) = dovata(&dir.path, &["start"]);
+    assert!(ok, "{text}{err}");
+    let (ok, text, err) = dovata(&dir.path, &["add", model.to_str().unwrap(), "--ctx", "64", "--tokens", "8"]);
+    assert!(ok, "{text}{err}");
+    let p = host::connect().unwrap();
+    let names: Vec<String> = p
+        .model("host-fixture")
+        .unwrap()
+        .regions
+        .into_iter()
+        .filter_map(|r| match r.open {
+            Open::Shared { name } => Some(name),
+            Open::File { .. } => None,
+        })
+        .collect();
+    assert!(!names.is_empty() && names.iter().all(|n| shared_exists(n)), "{names:?}");
+    assert!(Command::new("kill").args(["-TERM", &p.pid().to_string()]).status().unwrap().success());
+    let start = std::time::Instant::now();
+    while host::connect() != Err(HostError::NotRunning) {
+        assert!(start.elapsed().as_secs() < 10, "dovata still runs after SIGTERM");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(names.iter().all(|n| !shared_exists(n)), "{names:?}");
+    assert!(!dir.path.join("models").exists() && !dir.path.join("process").exists());
+}
+
+/// Purpose: This function says whether a named shared memory object exists.
+///
+/// Inputs:
+/// - `name`: its name.
+///
+/// Outputs: `true` when it opens.
+fn shared_exists(
+    name: &str,
+) -> bool
+{
+    let c = std::ffi::CString::new(name).unwrap();
+    // SAFETY: `c` is a NUL-terminated string that lives through the call. Opening for
+    // reading makes nothing, so the mode is not used; macOS declares shm_open variadic
+    // and Linux takes it as a third argument.
+    #[cfg(target_vendor = "apple")]
+    let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY) };
+    #[cfg(not(target_vendor = "apple"))]
+    let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0) };
+    if fd >= 0 {
+        // SAFETY: `fd` was just opened.
+        unsafe { libc::close(fd) };
+    }
+    fd >= 0
 }

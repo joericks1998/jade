@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::graph::Step;
@@ -42,7 +42,7 @@ pub struct PlanTensor {
 
 /// Purpose: This enum lists what a tensor can be for, which decides where the planner
 /// puts it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Role {
     /// Model weights, read from the GGUF.
@@ -96,7 +96,7 @@ impl Role {
 }
 
 /// Purpose: This enum lists how a memory region gets its memory when the program starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Backing {
     /// A window of a mapped part file: base is the part's mapping plus `file_start`.
@@ -111,7 +111,7 @@ pub enum Backing {
 }
 
 /// Purpose: This struct holds one block of memory the program sets up once at startup.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Region {
     /// Dense from 0, assigned in a fixed order: weights, then persistent state, then
     /// scratch.
@@ -127,7 +127,7 @@ pub struct Region {
 }
 
 /// Purpose: This enum lists where a tensor's starting bytes come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Source {
     /// Copied from, or found at, this offset in this part file.
@@ -143,7 +143,7 @@ pub enum Source {
 
 /// Purpose: This struct holds one tensor's address: its region, byte offset, size and
 /// type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddressEntry {
     /// The tensor's name.
     pub tensor: String,
@@ -169,7 +169,7 @@ pub struct AddressEntry {
 }
 
 /// Purpose: This struct holds which model a plan was made for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIdentity {
     /// `general.architecture`.
     pub architecture: String,
@@ -178,7 +178,7 @@ pub struct ModelIdentity {
 }
 
 /// Purpose: This struct holds one part file of the model a plan was made for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartFile {
     /// The file name, without its directory, which differs between machines.
     pub file_name: String,
@@ -188,7 +188,7 @@ pub struct PartFile {
 }
 
 /// Purpose: This struct holds the bytes a plan uses, by kind of memory.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Totals {
     /// Mapped GGUF bytes, counted once per file even where windows overlap.
     pub mapped: u64,
@@ -198,7 +198,7 @@ pub struct Totals {
 
 /// Purpose: This struct holds the plan: every tensor's region and byte offset on one
 /// target machine.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     /// [`SCHEMA_VERSION`].
     pub schema_version: u32,

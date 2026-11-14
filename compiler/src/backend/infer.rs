@@ -5,9 +5,10 @@
 //!
 //! - *The tables.* The tokenizer's pieces, merges and added tokens, as string
 //!   constants, and the Unicode classes its splitter asks about.
-//! - *Mapping.* `dovata_map` connects to the dovata process's socket, asks for
-//!   the model's memory with the plan's table hash, and keeps the file
-//!   descriptors that come with the answer; `map_region` maps one of them.
+//! - *Mapping.* `map` opens each region of the model's memory by the name
+//!   dovata's record gave at build time, a part file by its path or a shared
+//!   memory object with `shm_open`, and maps it. No message goes to dovata:
+//!   the names are constants of the program.
 //! - *Metal.* `setup` builds a Metal device, compiles `kernels.metal`, makes a
 //!   pipeline per kernel and a buffer over each region without copying it. Metal
 //!   is an Objective-C API, so every call is `objc_msgSend` with the selector's
@@ -42,8 +43,20 @@ const KERNELS_SOURCE: &str = include_str!("../infer/kernels.metal");
 /// How many tokens a reply runs to unless `set_max_tokens` says otherwise.
 const DEFAULT_MAX_TOKENS: i64 = 256;
 
-/// The most file descriptors a map reply carries, as dovata limits it.
-const MAX_FDS: u32 = 64;
+/// Where macOS's `struct stat` keeps a file's modification time, seconds then
+/// nanoseconds, and its size. Inference compiles for Apple Silicon only.
+const STAT_MTIME_SEC: i64 = 48;
+const STAT_MTIME_NSEC: i64 = 56;
+const STAT_SIZE: i64 = 96;
+
+/// macOS's open flags: read-only, read-write, write-only, create, append and
+/// close-on-exec.
+const O_RDONLY: i64 = 0;
+const O_RDWR: i64 = 2;
+const O_WRONLY: i64 = 1;
+const O_CREAT: i64 = 0x200;
+const O_APPEND: i64 = 0x8;
+const O_CLOEXEC: i64 = 0x0100_0000;
 
 /// The size of the record each kernel takes as buffer 5: five tensors of twelve
 /// words, eight floats and eight ints.
@@ -65,12 +78,12 @@ impl<'ctx> Cx<'ctx> {
         args: &[BasicValueEnum<'ctx>],
     ) -> (BasicValueEnum<'ctx>, Ty) {
         let t = match m {
-            InferFn::Data | InferFn::Taint | InferFn::Text | InferFn::DovataMap => Ty::Str,
+            InferFn::Data | InferFn::Taint | InferFn::Text => Ty::Str,
             InferFn::Config | InferFn::CharClass | InferFn::MaxTokens | InferFn::SetMaxTokens => {
                 Ty::Int
             }
             InferFn::Ready => Ty::Bool,
-            InferFn::MapRegion | InferFn::Setup => Ty::Nil,
+            InferFn::Map | InferFn::Setup => Ty::Nil,
             InferFn::Generate => Ty::Array(Box::new(Ty::Int)),
         };
         // The reply's length is the one setting a program without a model has.
@@ -116,21 +129,12 @@ impl<'ctx> Cx<'ctx> {
                 }),
                 args,
             ),
-            InferFn::DovataMap => f.callv(
-                self.infer_locked_fn("dovata_map", Some(self.ptrt().into()), &[], |f, _| {
-                    let s = f.call_ptr(f.cx.infer_dovata_map_fn(), &[]);
-                    f.ret(s);
-                }),
-                args,
-            ),
-            InferFn::MapRegion => {
-                let i64t = self.i64t().into();
-                let params = [i64t, i64t, i64t, i64t, self.i1t().into()];
-                let fun = self.infer_locked_fn("map_region", None, &params, |f, ps| {
-                    f.call(f.cx.infer_map_region_fn(), ps);
+            InferFn::Map => {
+                let fun = self.infer_locked_fn("map", None, &[], |f, _| {
+                    f.call(f.cx.infer_map_fn(), &[]);
                     f.ret_void();
                 });
-                f.call(fun, args);
+                f.call(fun, &[]);
                 f.i8(0).into()
             }
             InferFn::Setup => {
@@ -186,7 +190,7 @@ impl<'ctx> Cx<'ctx> {
     /// address of each region's byte 0; `map` and `maplen`, the page-aligned
     /// mapping; `delta`, how far `base` is past `map`; `buf`, its Metal buffer.
     fn infer_regions(&self, what: &str) -> PointerValue<'ctx> {
-        let n = self.plan().regions.max(1) as u32;
+        let n = self.plan().regions.len().max(1) as u32;
         let elem: BasicTypeEnum = match what {
             "maplen" | "delta" => self.i64t().into(),
             _ => self.ptrt().into(),
@@ -211,15 +215,14 @@ impl<'ctx> Cx<'ctx> {
             "sel_registerName" | "objc_getClass" => ptr.fn_type(&[ptr.into()], false),
             "objc_autoreleasePoolPush" | "MTLCreateSystemDefaultDevice" => ptr.fn_type(&[], false),
             "objc_autoreleasePoolPop" => void.fn_type(&[ptr.into()], false),
-            "socket" => i32t.fn_type(&[i32t.into(), i32t.into(), i32t.into()], false),
-            "connect" => i32t.fn_type(&[i32t.into(), ptr.into(), i32t.into()], false),
-            "recvmsg" => i64t.fn_type(&[i32t.into(), ptr.into(), i32t.into()], false),
+            // Both take a mode after the flags, which macOS declares variadic.
+            "open" | "shm_open" => i32t.fn_type(&[ptr.into(), i32t.into()], true),
+            "fstat" => i32t.fn_type(&[i32t.into(), ptr.into()], false),
             "mmap" => ptr.fn_type(
                 &[ptr.into(), i64t.into(), i32t.into(), i32t.into(), i32t.into(), i64t.into()],
                 false,
             ),
             "getpagesize" => i32t.fn_type(&[], false),
-            "memchr" => ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
             other => panic!("inference declares no function named {other}"),
         };
         self.ext(name, ty)
@@ -412,225 +415,125 @@ impl<'ctx> Cx<'ctx> {
 
     // ── mapping the model's memory ───────────────────────────────────────
 
-    /// Purpose: This function returns `jade.infer.dovata_map() -> str`, the
-    /// body of `__infer.dovata_map`, called with the lock held.
-    fn infer_dovata_map_fn(&self) -> FunctionValue<'ctx> {
-        self.support("jade.infer.dovata_map.body", Some(self.ptrt().into()), &[], |f| {
+    /// Purpose: This function returns the body of `__infer.map()`, called with
+    /// the lock held: it opens and maps every region of the model's memory, a
+    /// region already mapped staying as it is, then registers the program with
+    /// dovata, so `dovata status` lists it.
+    fn infer_map_fn(&self) -> FunctionValue<'ctx> {
+        self.support("jade.infer.map.body", None, &[], |f| {
             let cx = f.cx;
-            let (i32t, i64t, i8t) = (cx.i32t(), cx.i64t(), cx.i8t());
-            // Where the socket is: $DOVATA_RUN_DIR, else ~/.dovata/run.
-            let path = f.alloca(i8t.array_type(128));
-            let dir = f.call_ptr(cx.libc("getenv"), &[cx.cstr("DOVATA_RUN_DIR").into()]);
-            let use_dir = f.and(
-                f.not(f.is_null(dir)),
-                f.ne(f.zext(f.load_i8(dir_or(f, dir)), i64t), f.i64(0)),
-            );
-            let n = f.var(f.i32(0));
-            f.if_else(
-                use_dir,
-                |f| {
-                    let w = f.call_int(
-                        cx.libc("snprintf"),
-                        &[
-                            path.into(),
-                            f.i64(128).into(),
-                            cx.cstr("%s/dovata.sock").into(),
-                            dir.into(),
-                        ],
-                    );
-                    f.store(n, w);
-                },
-                |f| {
-                    let home = f.call_ptr(cx.libc("getenv"), &[cx.cstr("HOME").into()]);
-                    let home = f.select(f.is_null(home), cx.cstr(""), home).into_pointer_value();
-                    let w = f.call_int(
-                        cx.libc("snprintf"),
-                        &[
-                            path.into(),
-                            f.i64(128).into(),
-                            cx.cstr("%s/.dovata/run/dovata.sock").into(),
-                            home.into(),
-                        ],
-                    );
-                    f.store(n, w);
-                },
-            );
-            let n = f.sext(f.load_i32(n), i64t);
-            f.fail_if(
-                f.sge(n, f.i64(104)),
-                "the dovata socket's path is longer than a socket path may be; set DOVATA_RUN_DIR \
-                 to a shorter directory",
-            );
-            let fd = f.call_int(
-                cx.objc_fn("socket"),
-                &[f.i32(1).into(), f.i32(1).into(), f.i32(0).into()],
-            );
-            f.fail_if(f.slt(fd, f.i32(0)), "could not open a socket to reach dovata");
-            // sockaddr_un on macOS: length, family, then the path.
-            let addr = f.alloca(i8t.array_type(106));
-            f.b.build_memset(addr, 1, i8t.const_zero(), f.i64(106)).expect("positioned");
-            f.store(addr, f.i8(106));
-            f.store(f.at_c(addr, 1), f.i8(1));
-            f.memcpy(f.at_c(addr, 2), path, f.add(n, f.i64(1)));
-            let ok =
-                f.call_int(cx.objc_fn("connect"), &[fd.into(), addr.into(), f.i32(106).into()]);
-            f.if_(f.ne(ok, f.i32(0)), |f| {
-                f.call(cx.libc("close"), &[fd.into()]);
-                let p = f.call_ptr(cx.str_from_fn(), &[path.into(), n.into()]);
-                let msg = f.str_cat(&[
-                    cx.lit("cannot reach dovata at "),
-                    p,
-                    cx.lit(
-                        "; a program that dereferences a prompt runs a model the dovata process \
-                            holds, so start it with `dovata start` and add the model with \
-                            `dovata add <model>`",
-                    ),
-                ]);
-                f.release(&Ty::Str, p.into());
-                f.fail_str(msg);
-            });
-            // One line asks for the model's memory with this plan's table hash.
-            let request = serde_json::json!({
-                "protocol": crate::infer::dovata::PROTOCOL,
-                "op": "map",
-                "name": cx.plan().model,
-                "table_hash": cx.plan().table_hash,
-            })
-            .to_string()
-                + "\n";
-            let req = cx.cstr(&request);
-            f.call(cx.libc("write"), &[fd.into(), req.into(), f.i64(request.len() as i64).into()]);
-            // The answer, and the descriptors that come with it.
-            let cap = 1 << 16;
-            let buf = f.call_ptr(cx.libc("malloc"), &[f.i64(cap).into()]);
-            let iov = f.alloca(i8t.array_type(16));
-            f.store(iov, buf);
-            f.store(f.at_c(iov, 8), f.i64(cap));
-            let control_len = 12 + 4 * MAX_FDS as i64;
-            let control = f.alloca(i8t.array_type(control_len as u32 + 8));
-            f.b.build_memset(control, 4, i8t.const_zero(), f.i64(control_len + 8))
-                .expect("positioned");
-            let msg = f.alloca(i8t.array_type(48));
-            f.b.build_memset(msg, 8, i8t.const_zero(), f.i64(48)).expect("positioned");
-            f.store(f.at_c(msg, 16), iov);
-            f.store(f.at_c(msg, 24), f.i32(1));
-            f.store(f.at_c(msg, 32), control);
-            f.store(f.at_c(msg, 40), f.i32(control_len));
-            let got = f.call_int(cx.objc_fn("recvmsg"), &[fd.into(), msg.into(), f.i32(0).into()]);
-            f.if_(f.sle(got, f.i64(0)), |f| {
-                f.call(cx.libc("close"), &[fd.into()]);
-                f.call(cx.libc("free"), &[buf.into()]);
-                f.fail("dovata closed the connection without answering");
-            });
-            // Descriptors from an earlier answer are replaced.
-            let fds = cx.infer_global("jade.infer.fds", i32t.array_type(MAX_FDS).into());
-            let count = cx.infer_global("jade.infer.nfds", i64t.into());
-            f.for_range(f.i64(0), f.load_i64(count), |f, i, _| {
-                f.call(cx.libc("close"), &[f.load_i32(f.elem(i32t, fds, i)).into()]);
-            });
-            f.store(count, f.i64(0));
-            let clen = f.zext(f.load_i32(f.at_c(msg, 40)), i64t);
-            let level = f.load_i32(f.at_c(control, 4));
-            let kind = f.load_i32(f.at_c(control, 8));
-            let has = f.and(
-                f.sge(clen, f.i64(12)),
-                f.and(f.eq(level, f.i32(0xffff)), f.eq(kind, f.i32(1))),
-            );
-            f.if_(has, |f| {
-                let cmsg_len = f.zext(f.load_i32(control), i64t);
-                let n = f.sdiv(f.sub(cmsg_len, f.i64(12)), f.i64(4));
-                let n = f.select_int(f.sgt(n, f.i64(MAX_FDS as i64)), f.i64(MAX_FDS as i64), n);
-                f.for_range(f.i64(0), n, |f, i, _| {
-                    let v = f.load_i32(f.elem(i32t, f.at_c(control, 12), i));
-                    f.store(f.elem(i32t, fds, i), v);
-                });
-                f.store(count, n);
-            });
-            // The rest of the line, when it came in more than one piece.
-            let total = f.var(got);
-            f.while_(
-                |f| {
-                    let t = f.load_i64(total);
-                    let nl =
-                        f.call_ptr(cx.objc_fn("memchr"), &[buf.into(), f.i32(10).into(), t.into()]);
-                    f.and(f.is_null(nl), f.slt(t, f.i64(cap)))
-                },
-                |f, exit| {
-                    let t = f.load_i64(total);
-                    let r = f.call_int(
-                        cx.libc("read"),
-                        &[fd.into(), f.at(buf, t).into(), f.sub(f.i64(cap), t).into()],
-                    );
-                    f.if_(f.sle(r, f.i64(0)), |f| f.br(exit));
-                    f.store(total, f.add(t, r));
-                },
-            );
-            f.call(cx.libc("close"), &[fd.into()]);
-            let t = f.load_i64(total);
-            let nl = f.call_ptr(cx.objc_fn("memchr"), &[buf.into(), f.i32(10).into(), t.into()]);
-            let end = f.select_int(
-                f.is_null(nl),
-                t,
-                f.sub(
-                    f.b.build_ptr_to_int(nl, i64t, "").expect("positioned"),
-                    f.b.build_ptr_to_int(buf, i64t, "").expect("positioned"),
-                ),
-            );
-            let s = f.call_ptr(cx.str_from_fn(), &[buf.into(), end.into()]);
-            f.call(cx.libc("free"), &[buf.into()]);
-            f.ret(s);
-        })
-    }
-
-    /// Purpose: This function returns the body of `__infer.map_region(id, fd,
-    /// offset, bytes, writable)`, called with the lock held.
-    fn infer_map_region_fn(&self) -> FunctionValue<'ctx> {
-        let i64t = self.i64t();
-        let params = [i64t.into(), i64t.into(), i64t.into(), i64t.into(), self.i1t().into()];
-        self.support("jade.infer.map_region.body", None, &params, |f| {
-            let cx = f.cx;
-            let (id, fdi, offset, bytes) =
-                (f.param_int(0), f.param_int(1), f.param_int(2), f.param_int(3));
-            let writable = f.param_int(4);
-            let n = cx.plan().regions as i64;
-            f.fail_if(
-                f.or(f.slt(id, f.i64(0)), f.sge(id, f.i64(n))),
-                "dovata's answer names a region the plan does not have",
-            );
-            let ptr = cx.ptrt();
-            let base = f.elem(ptr, cx.infer_regions("base"), id);
-            // The first mapping stays; a second answer describes the same memory.
-            f.if_(f.not(f.is_null(f.load_ptr(base))), |f| f.ret_void());
-            let count = f.load_i64(cx.infer_global("jade.infer.nfds", i64t.into()));
-            f.fail_if(
-                f.sge(fdi, count),
-                "dovata sent fewer file descriptors than its answer names",
-            );
-            let fds = cx.infer_global("jade.infer.fds", cx.i32t().array_type(MAX_FDS).into());
-            let fd = f.load_i32(f.elem(cx.i32t(), fds, fdi));
+            let (i64t, i8t, ptr) = (cx.i64t(), cx.i8t(), cx.ptrt());
+            let plan = cx.plan();
+            let model = &plan.model;
+            let st = f.alloca(i8t.array_type(256));
             let page = f.sext(f.call_int(cx.objc_fn("getpagesize"), &[]), i64t);
-            let start = f.sub(offset, f.srem(offset, page));
-            let delta = f.sub(offset, start);
-            let len = f.add(delta, bytes);
-            let len = f.mul(f.sdiv(f.add(len, f.sub(page, f.i64(1))), page), page);
-            let prot = f.select_int(writable, f.i32(3), f.i32(1));
-            let p = f.call_ptr(
-                cx.objc_fn("mmap"),
-                &[
-                    f.null().into(),
-                    len.into(),
-                    prot.into(),
-                    f.i32(1).into(),
-                    fd.into(),
-                    start.into(),
-                ],
+            for (id, r) in plan.regions.iter().enumerate() {
+                let base = f.elem(ptr, cx.infer_regions("base"), f.i64(id as i64));
+                f.if_(f.is_null(f.load_ptr(base)), |f| {
+                    let name = cx.cstr(&r.name);
+                    let fd = if r.shared {
+                        let flags = if r.writable { O_RDWR } else { O_RDONLY };
+                        f.call_int(
+                            cx.objc_fn("shm_open"),
+                            &[name.into(), f.i32(flags).into(), f.i32(0).into()],
+                        )
+                    } else {
+                        f.call_int(
+                            cx.objc_fn("open"),
+                            &[name.into(), f.i32(O_RDONLY | O_CLOEXEC).into(), f.i32(0).into()],
+                        )
+                    };
+                    f.fail_if(
+                        f.slt(fd, f.i32(0)),
+                        &if r.shared {
+                            format!(
+                                "dovata does not hold the memory this program was built for \
+                                 ({}): add the model {model} to dovata with the options the \
+                                 program was built against, or build the program again",
+                                r.name
+                            )
+                        } else {
+                            format!("cannot open the model file {}", r.name)
+                        },
+                    );
+                    let stat_ok = f.call_int(cx.objc_fn("fstat"), &[fd.into(), st.into()]);
+                    let size = f.load_i64(f.at_c(st, STAT_SIZE));
+                    let bad = if r.shared {
+                        f.or(f.ne(stat_ok, f.i32(0)), f.slt(size, f.i64(r.offset + r.bytes)))
+                    } else {
+                        let sec = f.load_i64(f.at_c(st, STAT_MTIME_SEC));
+                        let nsec = f.load_i64(f.at_c(st, STAT_MTIME_NSEC));
+                        let same = f.and(
+                            f.eq(size, f.i64(r.file_bytes)),
+                            f.and(f.eq(sec, f.i64(r.modified_sec)), f.eq(nsec, f.i64(r.modified_nsec))),
+                        );
+                        f.or(f.ne(stat_ok, f.i32(0)), f.not(same))
+                    };
+                    f.if_(bad, |f| {
+                        f.call(cx.libc("close"), &[fd.into()]);
+                        f.fail(&if r.shared {
+                            format!(
+                                "dovata's memory for {model} ({}) is not the size this program \
+                                 was built for; build the program again",
+                                r.name
+                            )
+                        } else {
+                            format!(
+                                "{} changed on disk after dovata loaded it; remove the model with \
+                                 `dovata remove {model}`, add it again, and build the program again",
+                                r.name
+                            )
+                        });
+                    });
+                    // A mapping starts on a page; the region's base is as far past
+                    // that as its offset is past a page.
+                    let offset = f.i64(r.offset);
+                    let start = f.sub(offset, f.srem(offset, page));
+                    let delta = f.sub(offset, start);
+                    let len = f.add(delta, f.i64(r.bytes));
+                    let len = f.mul(f.sdiv(f.add(len, f.sub(page, f.i64(1))), page), page);
+                    let prot = if r.writable { 3 } else { 1 };
+                    let p = f.call_ptr(
+                        cx.objc_fn("mmap"),
+                        &[
+                            f.null().into(),
+                            len.into(),
+                            f.i32(prot).into(),
+                            f.i32(1).into(),
+                            fd.into(),
+                            start.into(),
+                        ],
+                    );
+                    // The mapping keeps the file or object; the descriptor is not needed.
+                    f.call(cx.libc("close"), &[fd.into()]);
+                    let failed =
+                        f.eq(f.b.build_ptr_to_int(p, i64t, "").expect("positioned"), f.i64(-1));
+                    f.fail_if(failed, &format!("could not map the model's memory ({})", r.name));
+                    f.store(f.elem(ptr, cx.infer_regions("map"), f.i64(id as i64)), p);
+                    f.store(f.elem(i64t, cx.infer_regions("maplen"), f.i64(id as i64)), len);
+                    f.store(f.elem(i64t, cx.infer_regions("delta"), f.i64(id as i64)), delta);
+                    f.store(base, f.at(p, delta));
+                });
+            }
+            // An empty file named for this process, in the directory dovata
+            // lists a model's programs from. A program that cannot make it
+            // still runs.
+            let path = f.alloca(i8t.array_type(1024));
+            let pid = f.call_int(cx.libc("getpid"), &[]);
+            let n = f.call_int(
+                cx.libc("snprintf"),
+                &[path.into(), f.i64(1024).into(), cx.cstr("%s/%d").into(), cx.cstr(&plan.clients).into(), pid.into()],
             );
-            let failed = f.eq(f.b.build_ptr_to_int(p, i64t, "").expect("positioned"), f.i64(-1));
-            f.fail_if(failed, "could not map the model's memory from dovata");
-            f.store(f.elem(ptr, cx.infer_regions("map"), id), p);
-            f.store(f.elem(i64t, cx.infer_regions("maplen"), id), len);
-            f.store(f.elem(i64t, cx.infer_regions("delta"), id), delta);
-            f.store(base, f.at(p, delta));
+            f.if_(f.and(f.sgt(n, f.i32(0)), f.slt(n, f.i32(1024))), |f| {
+                let flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC;
+                let fd = f.call_int(
+                    cx.objc_fn("open"),
+                    &[path.into(), f.i32(flags).into(), f.i32(0o600).into()],
+                );
+                f.if_(f.sge(fd, f.i32(0)), |f| {
+                    f.call(cx.libc("close"), &[fd.into()]);
+                });
+            });
             f.ret_void();
         })
     }
@@ -772,7 +675,7 @@ impl<'ctx> Cx<'ctx> {
                 });
                 f.store(f.elem(ptr, pipes, f.i64(k as i64)), p);
             }
-            let n = cx.plan().regions as i64;
+            let n = cx.plan().regions.len() as i64;
             f.for_range(f.i64(0), f.i64(n), |f, r, _| {
                 let map = f.load_ptr(f.elem(ptr, cx.infer_regions("map"), r));
                 f.fail_if(f.is_null(map), "a region of the model was not mapped before setup");
@@ -1072,10 +975,4 @@ impl<'ctx> Cx<'ctx> {
             f.ret(out);
         })
     }
-}
-
-/// Purpose: This function guards a load through a pointer that may be null:
-/// the pointer itself when it is not, else a pointer to a NUL byte.
-fn dir_or<'ctx>(f: &F<'_, 'ctx>, p: PointerValue<'ctx>) -> PointerValue<'ctx> {
-    f.select(f.is_null(p), f.cx.cstr(""), p).into_pointer_value()
 }
