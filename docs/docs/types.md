@@ -8,8 +8,10 @@ These are Jade's value types.
 
 | Type | Description |
 |------|-------------|
-| `int` | Signed integer, 64 bits wide |
-| `float` | 64-bit floating point (`f64`) |
+| `int` | Signed integer, 64 bits wide; also spelled `long` |
+| `float` | 64-bit floating point (`f64`); also spelled `double` |
+| `byte`, `short`, `ushort`, `int32`, `uint32`, `ulong` | Integers of a fixed width, signed or not; see [Sized numbers](#sized-numbers) |
+| `float32` | 32-bit floating point |
 | `bool` | Boolean `true` or `false` |
 | `char` | A single Unicode scalar; what indexing or iterating a string yields |
 | `str` | UTF-8 string with indexing, iteration, and concatenation |
@@ -50,6 +52,45 @@ try {
     print("overflow caught")
 }
 ```
+
+## Sized numbers
+
+Beside `int` and `float`, Jade has number types of a fixed width, for C libraries, file formats and kernels that use them.
+
+| Type | Width | Range |
+|------|-------|-------|
+| `byte` | 8 bits, unsigned | 0 to 255 |
+| `short` | 16 bits | -32768 to 32767 |
+| `ushort` | 16 bits, unsigned | 0 to 65535 |
+| `int32` | 32 bits | -2147483648 to 2147483647 |
+| `uint32` | 32 bits, unsigned | 0 to 4294967295 |
+| `int`, also `long` | 64 bits | the int's range |
+| `ulong` | 64 bits, unsigned | 0 to 18446744073709551615 |
+| `float32` | 32-bit float | single precision |
+| `float`, also `double` | 64-bit float | double precision |
+
+`long` and `double` are other names for `int` and `float`, not new types.
+
+Arithmetic follows the rules of assembly code:
+
+- *Both sides of an operator have one type, and so does the result.* A `short` plus an `int` is refused by the build, with the fix in the message: `toInt(s) + n`, or `s + toShort(n)`.
+- *A literal takes the type it meets.* With `b` a byte, `b + 1` adds the byte 1, and `@byte let b = 300` is refused, since 300 does not fit. A variable never changes type: `@uint32 let y = n` with `n` an int needs `toUint32(n)`.
+- *Overflow raises.* A byte holding 250 plus 10 raises `byte overflow`, and so does a byte holding 3 minus 5. Division by zero raises.
+- *Unsigned types divide, compare and shift right as unsigned.*
+- *Converting raises when the value does not fit.* `toByte(300)` raises `300 does not fit a byte, which holds 0 to 255`; `toByte(n & 0xff)` keeps the low bits. Converting to a wider type never fails.
+
+```jade
+@byte
+let b = 200
+print(b + 55)          // 255
+print(toInt(b) + 1000) // 1200
+
+@float32
+let f = 1.1
+print(f * 3)           // 3.3000002, in single precision
+```
+
+`int` and `float` keep one exception: they still mix, so `1 + 0.5` is 1.5. The sized types do not.
 
 ## Type Coercion Rules
 

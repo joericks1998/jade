@@ -16,11 +16,157 @@
 use std::collections::HashMap;
 use std::fmt;
 
+/// Purpose: This enum lists the sized number types, each with a fixed width.
+/// `int` and `float` are not here: they are `Ty::Int` and `Ty::Float`, also
+/// spelled `long` and `double`. See `design/v2-number-types.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SizedNum {
+    Byte,
+    Short,
+    UShort,
+    Int32,
+    UInt32,
+    ULong,
+    Float32,
+}
+
+impl SizedNum {
+    /// Every sized number type.
+    pub const ALL: [SizedNum; 7] = [
+        SizedNum::Byte,
+        SizedNum::Short,
+        SizedNum::UShort,
+        SizedNum::Int32,
+        SizedNum::UInt32,
+        SizedNum::ULong,
+        SizedNum::Float32,
+    ];
+
+    /// Purpose: This function gives the type's name, which is also its type
+    /// function's.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the name, such as `byte`.
+    pub fn name(self) -> &'static str {
+        match self {
+            SizedNum::Byte => "byte",
+            SizedNum::Short => "short",
+            SizedNum::UShort => "ushort",
+            SizedNum::Int32 => "int32",
+            SizedNum::UInt32 => "uint32",
+            SizedNum::ULong => "ulong",
+            SizedNum::Float32 => "float32",
+        }
+    }
+
+    /// Purpose: This function gives the type's converter's name.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the name, such as `toByte`.
+    pub fn converter(self) -> &'static str {
+        match self {
+            SizedNum::Byte => "toByte",
+            SizedNum::Short => "toShort",
+            SizedNum::UShort => "toUshort",
+            SizedNum::Int32 => "toInt32",
+            SizedNum::UInt32 => "toUint32",
+            SizedNum::ULong => "toUlong",
+            SizedNum::Float32 => "toFloat32",
+        }
+    }
+
+    /// Purpose: This function finds the sized type a type function names.
+    ///
+    /// Inputs:
+    /// - `name`: a name, such as `byte`.
+    ///
+    /// Outputs: the type, or `None` when the name is not a sized type's.
+    pub fn from_name(name: &str) -> Option<SizedNum> {
+        SizedNum::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    /// Purpose: This function finds the sized type a converter makes.
+    ///
+    /// Inputs:
+    /// - `name`: a name, such as `toByte`.
+    ///
+    /// Outputs: the type, or `None` when the name is not a sized converter.
+    pub fn from_converter(name: &str) -> Option<SizedNum> {
+        SizedNum::ALL.into_iter().find(|s| s.converter() == name)
+    }
+
+    /// Purpose: This function gives the type's width in bits.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: 8, 16, 32 or 64.
+    pub fn bits(self) -> u32 {
+        match self {
+            SizedNum::Byte => 8,
+            SizedNum::Short | SizedNum::UShort => 16,
+            SizedNum::Int32 | SizedNum::UInt32 | SizedNum::Float32 => 32,
+            SizedNum::ULong => 64,
+        }
+    }
+
+    /// Purpose: This function says whether the type is a float.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: true for `float32`.
+    pub fn is_float(self) -> bool {
+        self == SizedNum::Float32
+    }
+
+    /// Purpose: This function says whether the type is an unsigned integer.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: true for `byte`, `ushort`, `uint32` and `ulong`.
+    pub fn is_unsigned(self) -> bool {
+        matches!(self, SizedNum::Byte | SizedNum::UShort | SizedNum::UInt32 | SizedNum::ULong)
+    }
+
+    /// Purpose: This function gives an integer type's smallest and largest
+    /// values.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the range, or `None` for `float32`.
+    pub fn range(self) -> Option<(i128, i128)> {
+        if self.is_float() {
+            return None;
+        }
+        let bits = self.bits();
+        Some(if self.is_unsigned() {
+            (0, (1i128 << bits) - 1)
+        } else {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        })
+    }
+}
+
+/// Purpose: This function puts `a` or `an` before a type's name.
+///
+/// Inputs:
+/// - `name`: the name, such as `int32` or `byte`.
+///
+/// Outputs: the name with its article, such as `an int32` or `a byte`.
+pub fn with_article(name: &str) -> String {
+    let an = name.starts_with(['a', 'e', 'i', 'o']);
+    format!("{} {name}", if an { "an" } else { "a" })
+}
+
 /// Purpose: This enum lists the types the checker gives a value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Float,
+    /// A sized number type, such as `byte` or `float32`. Each is its own type:
+    /// none joins with another, or with `Int` or `Float`.
+    Sized(SizedNum),
     Bool,
     Char,
     Str,
@@ -544,6 +690,7 @@ impl fmt::Display for Ty {
         match self {
             Ty::Int => write!(f, "int"),
             Ty::Float => write!(f, "float"),
+            Ty::Sized(s) => write!(f, "{}", s.name()),
             Ty::Bool => write!(f, "bool"),
             Ty::Char => write!(f, "char"),
             Ty::Str => write!(f, "str"),

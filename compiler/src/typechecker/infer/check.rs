@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use super::ty::{FuncRef, Ty};
+use super::ty::{FuncRef, SizedNum, Ty, with_article};
 use super::{Checker, FnKey, InstKey, Target, addr, is_nil_literal};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::Span;
@@ -216,7 +216,7 @@ impl<'a> Checker<'a> {
                     }
                 };
                 self.clear_narrowing(f, name);
-                self.unify(&slot, &t, *span, &format!("assigning to '{name}'"));
+                self.accept(&slot, value, &t, *span, &format!("assigning to '{name}'"));
             }
             TStmt::PromptDecl { name, body, span } => {
                 let t = self.check_expr(body, f);
@@ -267,7 +267,12 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 let r = f.ret.clone();
-                self.unify(&r, &t, *span, "this function's return values");
+                match value {
+                    Some(v) => self.accept(&r, v, &t, *span, "this function's return values"),
+                    None => {
+                        self.unify(&r, &t, *span, "this function's return values");
+                    }
+                }
             }
             TStmt::Yield { value, span } => {
                 let t = self.check_expr(value, f);
@@ -331,7 +336,7 @@ impl<'a> Checker<'a> {
                             } else {
                                 slot
                             };
-                            self.unify(&slot, &v, *span, &format!("field '{field}'"));
+                            self.accept(&slot, value, &v, *span, &format!("field '{field}'"));
                         }
                         None => self.report(
                             *span,
@@ -369,11 +374,11 @@ impl<'a> Checker<'a> {
                 match tt {
                     Ty::Array(e) => {
                         self.unify(&i, &Ty::Int, *span, "an array index");
-                        self.unify(&e, &v, *span, &format!("an element of '{name}'"));
+                        self.accept(&e, value, &v, *span, &format!("an element of '{name}'"));
                     }
                     Ty::Map(e) => {
                         self.unify(&i, &Ty::Str, *span, "a dict key");
-                        self.unify(&e, &v, *span, &format!("a value of '{name}'"));
+                        self.accept(&e, value, &v, *span, &format!("a value of '{name}'"));
                     }
                     Ty::Bytes => {
                         self.unify(&i, &Ty::Int, *span, "a bytes index");
@@ -648,9 +653,20 @@ impl<'a> Checker<'a> {
                 let t = self.check_expr(operand, f);
                 match op {
                     UnaryOpKind::Not => self.unify(&t, &Ty::Bool, span, "'!'"),
-                    UnaryOpKind::BitNot => self.unify(&t, &Ty::Int, span, "'~'"),
+                    UnaryOpKind::BitNot => match self.store.shallow(&t) {
+                        Ty::Sized(s) if !s.is_float() => t,
+                        _ => self.unify(&t, &Ty::Int, span, "'~'"),
+                    },
                     UnaryOpKind::Neg => match self.store.shallow(&t) {
                         Ty::Int | Ty::Float | Ty::Var(_) => t,
+                        Ty::Sized(s) if !s.is_unsigned() => t,
+                        Ty::Sized(s) => {
+                            self.report(
+                                span,
+                                format!("cannot negate a {}, which is unsigned", s.name()),
+                            );
+                            t
+                        }
                         other => {
                             let other = self.store.resolve(&other);
                             self.report(span, format!("cannot negate {other}"));
@@ -668,9 +684,21 @@ impl<'a> Checker<'a> {
             TExprKind::Index { object, index } => self.check_index(object, index, span, f, addr(e)),
             TExprKind::Array { elements } => {
                 let elem = self.slot(f, addr(e));
-                for el in elements {
+                // The other elements first, so a literal meets their type: in
+                // `[b, 1]` with `b` a byte, the 1 is a byte.
+                let (lits, rest): (Vec<_>, Vec<_>) =
+                    elements.iter().partition(|el| num_literal(el).is_some());
+                for el in rest {
                     let t = self.check_expr(el, f);
                     self.unify(&elem, &t, el.span, "the elements of an array");
+                }
+                for el in lits {
+                    let t = self.check_expr(el, f);
+                    if matches!(self.store.shallow(&elem), Ty::Sized(_)) {
+                        self.accept(&elem, el, &t, el.span, "the elements of an array");
+                    } else {
+                        self.unify(&elem, &t, el.span, "the elements of an array");
+                    }
                 }
                 Ty::Array(Box::new(elem))
             }
@@ -1288,6 +1316,199 @@ impl<'a> Checker<'a> {
     /// - `f`: the frame.
     ///
     /// Outputs: the result type.
+    /// Purpose: This function joins a value into a slot, letting a number
+    /// literal take the slot's type when the slot is a sized number type.
+    ///
+    /// A literal meeting a slot nothing has filled yet waits: the slot may turn
+    /// out to be a `byte`, as in `if c { return 0 } return b`. If the passes
+    /// settle with the slot still empty, `Checker::run` gives it the literal's
+    /// own type.
+    ///
+    /// Inputs:
+    /// - `slot`: the slot, such as a variable's or a field's.
+    /// - `value`, `t`: the value and its type.
+    /// - `span`: where.
+    /// - `what`: what the slot is, for a mismatch.
+    ///
+    /// Outputs: none.
+    pub(super) fn accept(&mut self, slot: &Ty, value: &TExpr, t: &Ty, span: Span, what: &str) {
+        if let Some(lit) = num_literal(value) {
+            match self.store.shallow(slot) {
+                Ty::Sized(s) => {
+                    self.literal_fits(lit, s, span);
+                    return;
+                }
+                Ty::Var(_) if !self.final_pass => {
+                    let own = match lit {
+                        NumLit::Int(_) => Ty::Int,
+                        NumLit::Float(_) => Ty::Float,
+                    };
+                    self.pending_literals.push((slot.clone(), own));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.unify(slot, t, span, what);
+    }
+
+    /// Purpose: This function checks that a number literal fits a sized type,
+    /// and reports it when it does not.
+    ///
+    /// Inputs:
+    /// - `lit`: the literal's value.
+    /// - `s`: the sized type it meets.
+    /// - `span`: where.
+    ///
+    /// Outputs: true when it fits.
+    pub(super) fn literal_fits(&mut self, lit: NumLit, s: SizedNum, span: Span) -> bool {
+        match (lit, s.range()) {
+            (NumLit::Int(v), Some((lo, hi))) => {
+                if v < lo || v > hi {
+                    self.report(
+                        span,
+                        format!(
+                            "{v} does not fit {}, which holds {lo} to {hi}",
+                            with_article(s.name())
+                        ),
+                    );
+                    return false;
+                }
+                true
+            }
+            (NumLit::Float(x), Some(_)) => {
+                self.report(
+                    span,
+                    format!(
+                        "{} holds whole numbers, and {x} has a fraction; convert it with {}()",
+                        with_article(s.name()),
+                        s.converter()
+                    ),
+                );
+                false
+            }
+            (NumLit::Int(_), None) => true,
+            (NumLit::Float(x), None) => {
+                if x.is_finite() && x.abs() > f32::MAX as f64 {
+                    self.report(span, format!("{x} does not fit a float32"));
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    /// Purpose: This function types an operator with a sized number on either
+    /// side. Both sides must have the one type, as an instruction takes two
+    /// operands of one width; a literal takes the other side's type.
+    ///
+    /// Inputs:
+    /// - `op`: the operator.
+    /// - `left`, `right`: the operands.
+    /// - `l`, `r`: their types.
+    /// - `span`: where.
+    ///
+    /// Outputs: the result's type, or `None` when neither side is a sized
+    /// number, or the operator is one the other rules handle.
+    fn check_sized_binop(
+        &mut self,
+        op: &BinOpKind,
+        left: &TExpr,
+        right: &TExpr,
+        l: &Ty,
+        r: &Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        let (sl, sr) = (self.store.shallow(l), self.store.shallow(r));
+        let s = match (&sl, &sr) {
+            (Ty::Sized(s), _) | (_, Ty::Sized(s)) => *s,
+            _ => return None,
+        };
+        let sym = op_symbol(op);
+        let arith = matches!(
+            op,
+            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod
+        );
+        let bits = matches!(op, BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor);
+        let shift = matches!(op, BinOpKind::Shl | BinOpKind::Shr);
+        let cmp = matches!(
+            op,
+            BinOpKind::Eq
+                | BinOpKind::Ne
+                | BinOpKind::Lt
+                | BinOpKind::Le
+                | BinOpKind::Gt
+                | BinOpKind::Ge
+        );
+        if !(arith || bits || shift || cmp) {
+            return None;
+        }
+        if (bits || shift) && s.is_float() {
+            self.report(span, format!("'{sym}' works on integers, and this is a float32"));
+            return Some(Ty::Sized(s));
+        }
+        if shift {
+            // The value shifted is the sized side; the amount is an int.
+            let Ty::Sized(s) = sl else {
+                self.report(
+                    span,
+                    format!(
+                        "a shift amount is an int, and this is {}; convert it with toInt()",
+                        with_article(&sr.to_string())
+                    ),
+                );
+                return Some(l.clone());
+            };
+            match sr {
+                Ty::Int => {}
+                Ty::Var(_) => {
+                    self.unify(r, &Ty::Int, span, sym);
+                }
+                other => {
+                    let other = self.store.resolve(&other);
+                    self.report(
+                        span,
+                        format!(
+                            "a shift amount is an int, and this is {}; convert it with toInt()",
+                            with_article(&other.to_string())
+                        ),
+                    );
+                }
+            }
+            return Some(Ty::Sized(s));
+        }
+        for (side, st) in [(left, &sl), (right, &sr)] {
+            match st {
+                Ty::Sized(t) if *t == s => {}
+                Ty::Var(_) => {
+                    let t = if std::ptr::eq(side, left) { l } else { r };
+                    self.unify(t, &Ty::Sized(s), span, sym);
+                }
+                _ => {
+                    if let Some(lit) = num_literal(side) {
+                        self.literal_fits(lit, s, span);
+                        continue;
+                    }
+                    let (a, b) = (self.store.resolve(l), self.store.resolve(r));
+                    let fix = match (converter_of(&a), converter_of(&b)) {
+                        (Some(ca), Some(cb)) => format!("; convert one side with {cb}() or {ca}()"),
+                        _ => String::new(),
+                    };
+                    self.report(
+                        span,
+                        format!(
+                            "'{sym}' needs two values of one type, and these are {} and {}{fix}",
+                            with_article(&a.to_string()),
+                            with_article(&b.to_string())
+                        ),
+                    );
+                    return Some(if cmp { Ty::Bool } else { Ty::Sized(s) });
+                }
+            }
+        }
+        Some(if cmp { Ty::Bool } else { Ty::Sized(s) })
+    }
+
     fn check_binop(
         &mut self,
         op: &BinOpKind,
@@ -1307,6 +1528,9 @@ impl<'a> Checker<'a> {
         } else {
             self.check_expr(right, f)
         };
+        if let Some(t) = self.check_sized_binop(op, left, right, &l, &r, span) {
+            return t;
+        }
         let (sl, sr) = (self.store.shallow(&l), self.store.shallow(&r));
         let sym = op_symbol(op);
         match op {
@@ -1462,7 +1686,7 @@ impl<'a> Checker<'a> {
             }
             match self.field_slot(type_name, name) {
                 Some(slot) => {
-                    self.unify(&slot, &t, value.span, &format!("field '{name}'"));
+                    self.accept(&slot, value, &t, value.span, &format!("field '{name}'"));
                 }
                 None => self.report(
                     value.span,
@@ -2144,6 +2368,52 @@ fn literal_type(e: &TExpr) -> Ty {
 /// - `op`: the operator.
 ///
 /// Outputs: its symbol.
+/// Purpose: This enum holds a number literal's value, for a literal that takes
+/// the type it meets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum NumLit {
+    Int(i128),
+    Float(f64),
+}
+
+/// Purpose: This function reads a number literal, negated or not.
+///
+/// Inputs:
+/// - `e`: an expression.
+///
+/// Outputs: the literal's value, or `None` when `e` is not a number literal.
+pub(super) fn num_literal(e: &TExpr) -> Option<NumLit> {
+    match &e.kind {
+        TExprKind::Integer(v) => Some(NumLit::Int(*v as i128)),
+        TExprKind::Float(x) => Some(NumLit::Float(*x)),
+        TExprKind::UnaryOp { op: UnaryOpKind::Neg, operand } => match &operand.kind {
+            TExprKind::Integer(v) => Some(NumLit::Int(-(*v as i128))),
+            TExprKind::Float(x) => Some(NumLit::Float(-*x)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Purpose: This function names the converter that makes a value of a type.
+///
+/// Inputs:
+/// - `t`: the type.
+///
+/// Outputs: the converter's name, such as `toInt`, or `None` for a type with
+/// none.
+pub(super) fn converter_of(t: &Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Int => "toInt",
+        Ty::Float => "toFloat",
+        Ty::Str => "toString",
+        Ty::Bool => "toBool",
+        Ty::Char => "toChar",
+        Ty::Sized(s) => s.converter(),
+        _ => return None,
+    })
+}
+
 fn op_symbol(op: &BinOpKind) -> &'static str {
     match op {
         BinOpKind::Add => "+",

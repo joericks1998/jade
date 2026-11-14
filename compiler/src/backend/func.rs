@@ -130,6 +130,8 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Operand::Const(c) => match c {
                 Const::Int(_) => Ty::Int,
                 Const::Float(_) => Ty::Float,
+                Const::Sized(s, _) => Ty::Sized(*s),
+                Const::Float32(_) => Ty::Sized(crate::mir::SizedNum::Float32),
                 Const::Bool(_) => Ty::Bool,
                 Const::Char(_) => Ty::Char,
                 Const::Str(_) => Ty::Str,
@@ -158,6 +160,13 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Operand::Const(c) => match c {
                 Const::Int(i) => f.i64(*i).into(),
                 Const::Float(x) => f.f64(*x).into(),
+                Const::Sized(s, i) => self
+                    .cx()
+                    .llty(&Ty::Sized(*s))
+                    .into_int_type()
+                    .const_int(*i as u64, false)
+                    .into(),
+                Const::Float32(x) => self.cx().f32t().const_float(*x as f64).into(),
                 Const::Bool(b) => f.bool(*b).into(),
                 Const::Char(ch) => f.i32(*ch as i64).into(),
                 Const::Str(s) => self.cx().lit(s).into(),
@@ -377,8 +386,15 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                         (r.into(), Ty::Int)
                     }
                     UnOp::Neg(NumTy::Float) => (f.fneg(v.into_float_value()).into(), Ty::Float),
+                    UnOp::Neg(NumTy::Sized(s)) => (f.sized_neg(*s, v), Ty::Sized(*s)),
                     UnOp::Not => (f.not(v.into_int_value()).into(), Ty::Bool),
-                    UnOp::BitNot => (f.not(v.into_int_value()).into(), Ty::Int),
+                    UnOp::BitNot(n) => {
+                        let t = match n {
+                            NumTy::Sized(s) => Ty::Sized(*s),
+                            _ => Ty::Int,
+                        };
+                        (f.not(v.into_int_value()).into(), t)
+                    }
                 }
             }
             Rvalue::Call(id, args) => {
@@ -554,7 +570,12 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 };
                 (r.into(), Ty::Float)
             }
-            BinOp::Bit(o) => {
+            BinOp::Arith(o, NumTy::Sized(s)) => (f.sized_arith(*o, *s, x, y), Ty::Sized(*s)),
+            BinOp::Bit(o, NumTy::Sized(s)) => {
+                let r = f.sized_bit(*o, *s, x.into_int_value(), y.into_int_value());
+                (r.into(), Ty::Sized(*s))
+            }
+            BinOp::Bit(o, _) => {
                 let (x, y) = (x.into_int_value(), y.into_int_value());
                 let r = match o {
                     BitOp::And => f.and(x, y),
@@ -691,6 +712,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 (r.into(), Ty::Int)
             }
             Op::ToFloat(_) => (f.callv(cx.tofloat_str_fn(), &[arg(0)]), Ty::Float),
+            Op::Convert { to, from } => (f.convert(to, from, arg(0)), to.clone()),
             Op::ToBool(t) => {
                 let v = arg(0);
                 let r = match t {

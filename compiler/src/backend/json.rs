@@ -785,6 +785,31 @@ impl<'ctx> Cx<'ctx> {
                     f.release(&Ty::Str, s.into());
                 }
                 Ty::Float => f.json_write_float(sb, v.into_float_value()),
+                // A sized number is written as its digits, which `print` uses
+                // too; a float32 that is not finite is written as JSON null.
+                Ty::Sized(crate::mir::SizedNum::Float32) => {
+                    let x =
+                        f.b.build_float_ext(v.into_float_value(), f.cx.f64t(), "")
+                            .expect("positioned");
+                    let finite = f.and(
+                        f.fcmp(inkwell::FloatPredicate::OLT, x, f.f64(f64::INFINITY)),
+                        f.fcmp(inkwell::FloatPredicate::OGT, x, f.f64(f64::NEG_INFINITY)),
+                    );
+                    f.if_else(
+                        finite,
+                        |f| {
+                            let text = f.sized_text(crate::mir::SizedNum::Float32, v);
+                            f.sb_push_str(sb, text);
+                            f.release(&Ty::Str, text.into());
+                        },
+                        |f| f.json_write_float(sb, x),
+                    );
+                }
+                Ty::Sized(s) => {
+                    let text = f.sized_text(*s, v);
+                    f.sb_push_str(sb, text);
+                    f.release(&Ty::Str, text.into());
+                }
                 Ty::Bool => {
                     let s = f.select(v.into_int_value(), f.cx.lit("true"), f.cx.lit("false"));
                     f.sb_push_str(sb, s.into_pointer_value());
@@ -1192,7 +1217,7 @@ impl<'ctx> Cx<'ctx> {
                 f.f64(f64::INFINITY),
             );
             f.if_(f.not(finite), |f| f.ret(f.cx.lit("null")));
-            let (neg, digits, len, exp) = f.float_digits(x);
+            let (neg, digits, len, exp) = f.float_digits(x, false);
             let sb = f.sb_new();
             f.if_(neg, |f| f.sb_push_lit(sb, "-"));
             // `kk` is where the point falls after the first `kk` digits.

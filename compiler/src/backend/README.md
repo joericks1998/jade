@@ -50,6 +50,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`layout.rs`* maps types to LLVM types, holds the object offsets, and reads and makes optionals.
 - *`func.rs`* lowers one MIR function: locals as zeroed stack slots, statements with the ownership rules, terminators, every binary operator with its overflow and zero checks, and every support operation.
 - *`rc.rs`* emits retain and the per-type release and destroy functions.
+- *`sized.rs`* has the sized number types of `design/v2-number-types.md`: `+ - * / %` at each width with the signed or unsigned overflow intrinsic, unsigned division, remainder and right shift, shifts checked against the width, negation, and `convert`, which every converter where a sized type is on either side uses and which raises `300 does not fit a byte, which holds 0 to 255`. A sized value is held at its own width, `i8` to `i64` or `f32`, by `layout::llty`; `format.rs` prints a `ulong` past the int's range and a `float32` as the fewest digits that read back as the same float32.
 - *`text.rs`* has strings: allocation, UTF-8, comparison, every string method, and the string builder.
 - *`format.rs`* has printing, `input`, the text of every type, float formatting, and the conversions `int()`, `float()`, `bool()` and `char()`.
 - *`collections.rs`* has arrays and dicts.

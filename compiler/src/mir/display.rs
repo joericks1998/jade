@@ -126,6 +126,8 @@ impl Display for Const {
         match self {
             Const::Int(i) => write!(f, "{i}"),
             Const::Float(x) => write!(f, "{x:?}"),
+            Const::Sized(s, i) => write!(f, "{i}: {}", s.name()),
+            Const::Float32(x) => write!(f, "{x:?}: float32"),
             Const::Bool(b) => write!(f, "{b}"),
             Const::Char(c) => write!(f, "{c:?}"),
             Const::Str(s) => write!(f, "{s:?}"),
@@ -218,7 +220,7 @@ impl Display for Rvalue {
 fn bin_name(op: &BinOp) -> String {
     match op {
         BinOp::Arith(a, n) => format!("{a:?}.{n:?}").to_lowercase(),
-        BinOp::Bit(b) => format!("{b:?}").to_lowercase(),
+        BinOp::Bit(b, n) => format!("{b:?}.{n:?}").to_lowercase(),
         BinOp::Cmp(c, t) => format!("{}.{t}", format!("{c:?}").to_lowercase()),
         BinOp::Concat => "concat".to_string(),
     }

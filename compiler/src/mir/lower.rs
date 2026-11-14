@@ -907,6 +907,22 @@ impl<'a, 'l> Fx<'a, 'l> {
         if from == to {
             return Ok(op);
         }
+        // A number literal takes the sized type it meets; the checker made
+        // sure it fits.
+        if let Ty::Sized(s) = to {
+            match (&op, s.is_float()) {
+                (Operand::Const(Const::Int(i)), false) => {
+                    return Ok(Operand::Const(Const::Sized(*s, *i)));
+                }
+                (Operand::Const(Const::Int(i)), true) => {
+                    return Ok(Operand::Const(Const::Float32(*i as f32)));
+                }
+                (Operand::Const(Const::Float(x)), true) => {
+                    return Ok(Operand::Const(Const::Float32(*x as f32)));
+                }
+                _ => {}
+            }
+        }
         match (from, to) {
             // JSON null and a missing error are null pointers too.
             (Ty::Nil, Ty::Opt(_) | Ty::Json | Ty::Error) => {
@@ -1542,12 +1558,21 @@ impl<'a, 'l> Fx<'a, 'l> {
             TExprKind::BinOp { op, left, right } => self.binop(op, left, right, &et, span)?,
             TExprKind::UnaryOp { op, operand } => {
                 let (v, _) = self.expr(operand)?;
+                // A negated literal is a constant, so it can take the type it
+                // meets, as `@short let s = -5` needs.
+                match (op, &v) {
+                    (UnaryOpKind::Neg, Operand::Const(Const::Int(i))) if *i != i64::MIN => {
+                        return Ok((Operand::Const(Const::Int(-*i)), et));
+                    }
+                    (UnaryOpKind::Neg, Operand::Const(Const::Float(x))) => {
+                        return Ok((Operand::Const(Const::Float(-*x)), et));
+                    }
+                    _ => {}
+                }
                 let u = match op {
                     UnaryOpKind::Not => UnOp::Not,
-                    UnaryOpKind::BitNot => UnOp::BitNot,
-                    UnaryOpKind::Neg => {
-                        UnOp::Neg(if et == Ty::Float { NumTy::Float } else { NumTy::Int })
-                    }
+                    UnaryOpKind::BitNot => UnOp::BitNot(NumTy::of(&et)),
+                    UnaryOpKind::Neg => UnOp::Neg(NumTy::of(&et)),
                 };
                 self.assign_temp(et.clone(), Rvalue::Un(u, v))
             }
@@ -1849,6 +1874,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                     let r = self.as_float(r, &rt);
                     self.assign_temp(Ty::Float, Rvalue::Bin(BinOp::Arith(a, NumTy::Float), l, r))
                 }
+                // Both sides have the one sized type; a literal takes it here.
+                Ty::Sized(s) => {
+                    let l = self.coerce(l, &lt, et, span)?;
+                    let r = self.coerce(r, &rt, et, span)?;
+                    self.assign_temp(
+                        et.clone(),
+                        Rvalue::Bin(BinOp::Arith(a, NumTy::Sized(*s)), l, r),
+                    )
+                }
                 _ => self.assign_temp(Ty::Int, Rvalue::Bin(BinOp::Arith(a, NumTy::Int), l, r)),
             });
         }
@@ -1865,7 +1899,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let r = self.as_float(r, &rt);
                 return Ok(self.assign_temp(Ty::Bool, Rvalue::Bin(BinOp::Cmp(c, Ty::Float), l, r)));
             }
-            let ct = self.common(&lt, &rt);
+            let ct = match (&lt, &rt) {
+                (Ty::Sized(_), _) => lt.clone(),
+                (_, Ty::Sized(_)) => rt.clone(),
+                _ => self.common(&lt, &rt),
+            };
             let l = self.coerce(l, &lt, &ct, span)?;
             let r = self.coerce(r, &rt, &ct, span)?;
             return Ok(self.assign_temp(Ty::Bool, Rvalue::Bin(BinOp::Cmp(c, ct), l, r)));
@@ -1879,7 +1917,17 @@ impl<'a, 'l> Fx<'a, 'l> {
             _ => None,
         };
         if let Some(b) = bit {
-            return Ok(self.assign_temp(Ty::Int, Rvalue::Bin(BinOp::Bit(b), l, r)));
+            // A shift's amount stays an int; the other operators take both
+            // sides at the result's type, so a literal takes a sized one.
+            let l = self.coerce(l, &lt, et, span)?;
+            let r = if matches!(b, BitOp::Shl | BitOp::Shr) {
+                r
+            } else {
+                self.coerce(r, &rt, et, span)?
+            };
+            return Ok(
+                self.assign_temp(et.clone(), Rvalue::Bin(BinOp::Bit(b, NumTy::of(et)), l, r))
+            );
         }
         // `in` and `not in`.
         let found = match &rt {

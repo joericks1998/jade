@@ -294,6 +294,45 @@ fn type_functions_check_and_converters_convert() {
 }
 
 #[test]
+fn sized_numbers_follow_the_assembly_rules() {
+    use super::SizedNum;
+    let t = ok("@byte\nlet b = 200\nlet c = b + 1\n@short\nlet s = -5\nlet n = toInt(s)\n\
+                @float32\nlet f = 1.5\n@long\nlet l = 3\n@double\nlet d = 2\nlet xs = [b, 1]\n\
+                let big = b > 7\n");
+    assert_eq!(global(&t, "b"), Ty::Sized(SizedNum::Byte));
+    assert_eq!(global(&t, "c"), Ty::Sized(SizedNum::Byte));
+    assert_eq!(global(&t, "s"), Ty::Sized(SizedNum::Short));
+    assert_eq!(global(&t, "n"), Ty::Int);
+    assert_eq!(global(&t, "f"), Ty::Sized(SizedNum::Float32));
+    assert_eq!(global(&t, "l"), Ty::Int);
+    assert_eq!(global(&t, "d"), Ty::Float);
+    assert_eq!(global(&t, "xs"), Ty::Array(Box::new(Ty::Sized(SizedNum::Byte))));
+    assert_eq!(global(&t, "big"), Ty::Bool);
+    // A literal that meets a byte later, through a return, takes its type.
+    ok(
+        "fn pick(c, x) {\n    if c {\n        return 0\n    }\n    return x\n}\nprint(pick(true, byte(3)))\n",
+    );
+    rejects(
+        "@short\nlet s = 1\nlet n = 2\nprint(s + n)\n",
+        "these are a short and an int; convert one side with toInt() or toShort()",
+    );
+    rejects("@byte\nlet c = 300\n", "300 does not fit a byte, which holds 0 to 255");
+    rejects("@byte\nlet c = -1\n", "-1 does not fit a byte");
+    rejects("@int32\nlet c = 1.5\n", "an int32 holds whole numbers");
+    rejects(
+        "let n = 5\n@uint32\nlet y = n\n",
+        "uint32() needs a uint32, got int; convert one with toUint32()",
+    );
+    rejects("@byte\nlet b = 3\nprint(-b)\n", "cannot negate a byte, which is unsigned");
+    rejects("@float32\nlet f = 1.5\nprint(f & f)\n", "'&' works on integers");
+    rejects("@byte\nlet b = 3\nprint(1 << b)\n", "a shift amount is an int, and this is a byte");
+    rejects(
+        "@float32\nlet f = 1.5\nlet x = f + 2.5\nlet y = x + toFloat(1)\n",
+        "float32 and a float",
+    );
+}
+
+#[test]
 fn the_v1_soundness_holes_are_closed() {
     // An assignment in one branch.
     rejects("let x = \"s\"\nif true {\n    x = 1\n}\nprint(x)\n", "do not mix");

@@ -1557,8 +1557,8 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 if matches!(generic, JadeType::Unknown) {
                     match callee.as_ref() {
                         Expr::Identifier { name, .. } => match name.as_str() {
-                            "int" | "toInt" => JadeType::Int,
-                            "float" | "toFloat" => JadeType::Float,
+                            "int" | "toInt" | "long" | "toLong" => JadeType::Int,
+                            "float" | "toFloat" | "double" | "toDouble" => JadeType::Float,
                             "bool" | "toBool" => JadeType::Bool,
                             "str" | "toString" => JadeType::Str,
                             "char" | "toChar" => JadeType::Char,

@@ -1,0 +1,7 @@
+// A literal takes the type it meets only when it fits: a byte holds 0 to 255.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+@byte
+let c = 300
+print(c)

@@ -48,7 +48,7 @@ pub mod taskcheck;
 #[cfg(test)]
 mod tests;
 
-pub use crate::typechecker::infer::Ty;
+pub use crate::typechecker::infer::{SizedNum, Ty};
 pub use lower::{lower_program, lower_program_with};
 
 /// Purpose: This struct names a local of the current function.
@@ -222,6 +222,10 @@ pub enum Operand {
 pub enum Const {
     Int(i64),
     Float(f64),
+    /// A sized integer, its bits held in an `i64`: a `ulong` past the int's
+    /// range reads as negative here.
+    Sized(SizedNum, i64),
+    Float32(f32),
     Bool(bool),
     Char(char),
     Str(String),
@@ -306,6 +310,25 @@ pub enum Rvalue {
 pub enum NumTy {
     Int,
     Float,
+    /// A sized number type, such as `byte` or `float32`.
+    Sized(SizedNum),
+}
+
+impl NumTy {
+    /// Purpose: This function gives the number type a value's type computes in.
+    ///
+    /// Inputs:
+    /// - `t`: the value's type.
+    ///
+    /// Outputs: `Float` for a float, the sized kind for a sized type, and `Int`
+    /// for anything else.
+    pub fn of(t: &Ty) -> NumTy {
+        match t {
+            Ty::Float => NumTy::Float,
+            Ty::Sized(s) => NumTy::Sized(*s),
+            _ => NumTy::Int,
+        }
+    }
 }
 
 /// Purpose: This enum lists the arithmetic operators.
@@ -346,7 +369,8 @@ pub enum BinOp {
     /// Int arithmetic raises on overflow and on division by zero; float
     /// division raises on division by zero, as v1 did.
     Arith(ArithOp, NumTy),
-    Bit(BitOp),
+    /// A bitwise operator on an integer type; a shift's amount is an int.
+    Bit(BitOp, NumTy),
     /// Compares two values of the type given. Ordering exists for numbers,
     /// strings, chars and bools; equality for every type.
     Cmp(CmpOp, Ty),
@@ -360,7 +384,7 @@ pub enum UnOp {
     /// Int negation raises on overflow.
     Neg(NumTy),
     Not,
-    BitNot,
+    BitNot(NumTy),
 }
 
 /// Purpose: This enum lists the support operations: everything a program does
@@ -393,14 +417,19 @@ pub enum Op {
     Str(StrMethod),
 
     // ── conversions ──────────────────────────────────────────────────────
-    /// `(v: T) -> int`, for `int(v)`.
+    /// `(v: T) -> int`, for `toInt(v)`.
     ToInt(Ty),
-    /// `(v: T) -> float`, for `float(v)`.
+    /// `(v: T) -> float`, for `toFloat(v)`.
     ToFloat(Ty),
-    /// `(v: T) -> bool`, for `bool(v)`.
+    /// `(v: T) -> bool`, for `toBool(v)`.
     ToBool(Ty),
-    /// `(v: T) -> char`, for `char(v)`.
+    /// `(v: T) -> char`, for `toChar(v)`.
     ToChar(Ty),
+    /// `(v: from) -> to`: a converter where either side is a sized number
+    /// type, such as `toByte(v)` or `toInt(b)` with `b` a byte. `from` may also
+    /// be a str, bool, char or json value. Raises when the value does not fit
+    /// `to`, or the text is not a number.
+    Convert { to: Ty, from: Ty },
 
     // ── arrays (the element type is given) ───────────────────────────────
     /// `(a: [T]) -> int`.
@@ -891,6 +920,7 @@ impl Op {
         matches!(
             self,
             Op::StrIndex
+                | Op::Convert { .. }
                 | Op::ToInt(Ty::Str)
                 | Op::ToFloat(_)
                 | Op::ToChar(_)
@@ -950,8 +980,12 @@ impl Rvalue {
             Rvalue::Op(op, _) => op.may_raise(),
             Rvalue::Bin(BinOp::Arith(_, NumTy::Int), ..) => true,
             Rvalue::Bin(BinOp::Arith(ArithOp::Div | ArithOp::Rem, NumTy::Float), ..) => true,
-            Rvalue::Bin(BinOp::Bit(BitOp::Shl | BitOp::Shr), ..) => true,
+            Rvalue::Bin(BinOp::Arith(op, NumTy::Sized(s)), ..) => {
+                !s.is_float() || matches!(op, ArithOp::Div | ArithOp::Rem)
+            }
+            Rvalue::Bin(BinOp::Bit(BitOp::Shl | BitOp::Shr, _), ..) => true,
             Rvalue::Un(UnOp::Neg(NumTy::Int), _) => true,
+            Rvalue::Un(UnOp::Neg(NumTy::Sized(s)), _) => !s.is_float(),
             _ => false,
         }
     }

@@ -1,0 +1,70 @@
+// The sized number types: byte, short, ushort, int32, uint32, ulong and
+// float32, beside int and float, which are also spelled long and double.
+//
+// Arithmetic follows assembly. Both sides of an operator have one type, and so
+// does the result; sized_mix_error.jde shows a short and an int refused. A
+// literal takes the type it meets, so `b + 55` adds the byte 55, and a type
+// decorator such as @byte is the type function byte(), which checks. Widening
+// and narrowing are converters: toInt(b), toByte(n). design/v2-number-types.md
+// has the rules.
+
+@byte
+let b = 200
+print(b + 55)
+
+@short
+let s = -5
+print(s * 2)
+print(-s)
+
+@uint32
+let u = 4000000000
+print(u)
+
+// A ulong reaches past the int's range.
+@ulong
+let top = 9223372036854775807
+print(top * toUlong(2) + toUlong(1))
+
+// A float32 computes in single precision and prints its own shortest digits.
+@float32
+let f = 1.1
+print(f)
+print(f * 3)
+print(toFloat(f))
+
+// long and double are int and float.
+@long
+let l = 7
+@double
+let d = 2
+print(l + 1)
+print(d)
+
+// Converters widen and narrow; the type picks signed or unsigned.
+print(toInt(b) + 1000)
+print(toShort(-12.9))
+print(toUint32("42") + 1)
+print(toByte(300 & 0xff))
+print(b > 100)
+print(b >> 4)
+print(~b)
+
+// A literal meets the other elements, the return value and the field.
+print([b, 1, 2])
+
+fn pick(c, x) {
+    if c {
+        return 0
+    }
+    return x
+}
+print(pick(false, b))
+
+class Counter {
+    @public @uint32 count
+}
+let c = Counter { count: 4 }
+c.count = c.count + 9
+print(c.count)
+print(f"{b} and {f}")

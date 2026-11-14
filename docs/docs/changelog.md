@@ -21,6 +21,14 @@ sidebar_label: Changelog
 
 *Hex integer literals.* `0x11` is 17. A hex literal is `0x` or `0X` followed by the digits 0-9 and a-f in either case, and is an int with the int's range. A letter that is not a hex digit, as in `0x1g`, and `0x` with no digits are refused with a message saying so.
 
+*Sized number types, with arithmetic that follows assembly.* `design/v2-number-types.md` has the rules.
+
+- *Seven new number types:* `byte`, `short`, `ushort`, `int32`, `uint32`, `ulong` and `float32`. `int` and `float` keep their 64 bits, and `long` and `double` are other names for them. Each type has a type function, such as `byte(x)`, which checks, and a converter, such as `toByte(x)`; a type decorator such as `@byte` is the type function.
+- *Both sides of an operator have one type.* A `short` plus an `int` is refused, naming the fix: `toInt(s) + n` or `s + toShort(n)`. A literal takes the type it meets, so `b + 1` with `b` a byte adds the byte 1, and `@byte let b = 300` is refused. `int` and `float` still mix.
+- *Overflow raises at each width,* a signed type on signed overflow and an unsigned one on carry or borrow. Unsigned types divide, compare and shift right as unsigned. Converting raises when the value does not fit: `toByte(300)` raises `300 does not fit a byte, which holds 0 to 255`.
+- *Each value is held at its own width* and printed as itself: a `ulong` past the int's range prints all its digits, and a `float32` prints the fewest digits that read back as the same float32, so `1.1` prints as `1.1`.
+- *Converter messages name the converter,* since the type functions no longer convert: `toChar(): 1114112 is not a Unicode scalar`, and `cannot convert "abc" to an int`.
+
 ## dovata v3.2.2
 
 *dovata keeps a record of what it holds, and takes requests by signal.* There is no socket and no JSON protocol any more. This release goes with jade 2.0.3; jade 2.0.2 cannot use it.

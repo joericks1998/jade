@@ -138,6 +138,27 @@ impl<'a, 'l> Fx<'a, 'l> {
         span: Span,
     ) -> Result<(Operand, Ty)> {
         let nil = || (Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil);
+        let name = crate::typechecker::infer::canonical(name);
+        // A sized type function returns its argument, and a literal takes its
+        // type; a sized converter converts, raising when the value does not fit.
+        if let Some(s) = SizedNum::from_name(name) {
+            let (v, t) = one(argv, span)?;
+            let want = Ty::Sized(s);
+            let v = self.coerce(v, &t, &want, span)?;
+            return Ok((v, want));
+        }
+        if let Some(s) = SizedNum::from_converter(name) {
+            let (v, t) = one(argv, span)?;
+            let want = Ty::Sized(s);
+            if t == want {
+                return Ok((v, want));
+            }
+            let r = self.assign_temp(
+                want.clone(),
+                Rvalue::Op(Op::Convert { to: want.clone(), from: t }, vec![v]),
+            );
+            return Ok((r, want));
+        }
         match name {
             "print" | "write" => {
                 let mut it = argv.into_iter();
@@ -193,6 +214,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Json => {
                         self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::ToInt), vec![v]))
                     }
+                    Ty::Sized(_) => self.sized_to(Ty::Int, v, &t),
                     other => return Err(not_yet(format!("toInt() of {other}"), span)),
                 };
                 Ok((r, Ty::Int))
@@ -208,12 +230,17 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Json => {
                         self.assign_temp(Ty::Float, Rvalue::Op(Op::Json(JsonFn::ToFloat), vec![v]))
                     }
+                    Ty::Sized(_) => self.sized_to(Ty::Float, v, &t),
                     other => return Err(not_yet(format!("toFloat() of {other}"), span)),
                 };
                 Ok((r, Ty::Float))
             }
             "toBool" => {
                 let (v, t) = one(argv, span)?;
+                let (v, t) = match t {
+                    Ty::Sized(_) => (self.sized_to(Ty::Int, v, &t), Ty::Int),
+                    t => (v, t),
+                };
                 let r = match &t {
                     Ty::Bool => v,
                     Ty::Int | Ty::Str => {
@@ -228,6 +255,10 @@ impl<'a, 'l> Fx<'a, 'l> {
             }
             "toChar" => {
                 let (v, t) = one(argv, span)?;
+                let (v, t) = match t {
+                    Ty::Sized(_) => (self.sized_to(Ty::Int, v, &t), Ty::Int),
+                    t => (v, t),
+                };
                 let r = match &t {
                     Ty::Char => v,
                     Ty::Int | Ty::Str => {
@@ -261,6 +292,17 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Err(internal(format!("an unknown builtin '{other}'"), span))
             }
         }
+    }
+
+    /// Purpose: This function converts a sized number to an int or a float.
+    ///
+    /// Inputs:
+    /// - `to`: `Int` or `Float`.
+    /// - `v`, `t`: the value and its sized type.
+    ///
+    /// Outputs: the converted value.
+    fn sized_to(&mut self, to: Ty, v: Operand, t: &Ty) -> Operand {
+        self.assign_temp(to.clone(), Rvalue::Op(Op::Convert { to, from: t.clone() }, vec![v]))
     }
 
     /// Purpose: This function lowers a type function, which returns its
@@ -620,10 +662,16 @@ impl<'a, 'l> Fx<'a, 'l> {
 /// Outputs: the type it returns.
 fn builtin_result(name: &str) -> Ty {
     match name {
-        "len" | "int" | "toInt" | "max_tasks" | "set_max_tasks" | "max_tokens"
-        | "set_max_tokens" => Ty::Int,
+        n if SizedNum::from_name(n).is_some() => {
+            Ty::Sized(SizedNum::from_name(n).unwrap_or(SizedNum::Byte))
+        }
+        n if SizedNum::from_converter(n).is_some() => {
+            Ty::Sized(SizedNum::from_converter(n).unwrap_or(SizedNum::Byte))
+        }
+        "len" | "int" | "toInt" | "long" | "toLong" | "max_tasks" | "set_max_tasks"
+        | "max_tokens" | "set_max_tokens" => Ty::Int,
         "str" | "toString" | "input" => Ty::Str,
-        "float" | "toFloat" => Ty::Float,
+        "float" | "toFloat" | "double" | "toDouble" => Ty::Float,
         "bool" | "toBool" | "cancelled" => Ty::Bool,
         "char" | "toChar" => Ty::Char,
         _ => Ty::Nil,

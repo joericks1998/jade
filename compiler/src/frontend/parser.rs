@@ -60,13 +60,31 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 /// - `decorators`: the field's decorators.
 /// - `default`: the default as written.
 ///
-/// Outputs: the default, inside one call per `@int`, `@float`, `@str`, `@bool`
-/// or `@char`.
+/// Outputs: the default, inside one call per built-in type decorator, such as
+/// `@int` or `@byte`.
 fn type_checked_default(decorators: &Decorators, default: Expr) -> Expr {
     let span = Parser::expr_span(&default);
     decorators
         .iter()
-        .filter(|(n, _)| matches!(n.as_str(), "int" | "float" | "str" | "bool" | "char"))
+        .filter(|(n, _)| {
+            matches!(
+                n.as_str(),
+                "int"
+                    | "float"
+                    | "str"
+                    | "bool"
+                    | "char"
+                    | "byte"
+                    | "short"
+                    | "ushort"
+                    | "int32"
+                    | "uint32"
+                    | "long"
+                    | "ulong"
+                    | "float32"
+                    | "double"
+            )
+        })
         .fold(default, |acc, (n, _)| Expr::Call {
             callee: Box::new(Expr::Identifier { name: n.clone(), span }),
             args: vec![acc],

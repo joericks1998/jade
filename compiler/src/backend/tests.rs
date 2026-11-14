@@ -284,6 +284,24 @@ fn type_functions_check_a_json_value_when_the_program_runs() {
 }
 
 #[test]
+fn sized_numbers_compute_at_their_width_and_raise_past_it() {
+    let src = "@byte\nlet b = 250\nprint(b + 5)\ntry {\n    print(b + 6)\n} catch e {\n    print(e.message)\n}\n\
+               @short\nlet s = -300\nprint(s / 7)\nprint(s % 7)\n\
+               @uint32\nlet u = 4000000000\nprint(u / toUint32(3))\nprint(u > toUint32(1))\n\
+               @ulong\nlet top = toUlong(9223372036854775807) * toUlong(2)\nprint(top)\nprint(top >> 60)\n\
+               @float32\nlet f = 0.1\nprint(f)\nprint(f + f + f)\n\
+               print(toByte(255) & toByte(15))\nprint(toInt(s) * 1000000)\n\
+               try {\n    print(toByte(256))\n} catch e {\n    print(e.message)\n}\n";
+    let (out, _, code) = run(src);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "255\nbyte overflow\n-42\n-6\n1333333333\ntrue\n18446744073709551614\n15\n\
+         0.1\n0.3\n15\n-300000000\n256 does not fit a byte, which holds 0 to 255\n"
+    );
+}
+
+#[test]
 fn json_parses_and_writes_with_serdes_rules() {
     let src = "use std::json\nlet j = json.parse(\"{\\\"b\\\": [1, 2.5, null], \\\"a\\\": \\\"x\\\"}\")\n\
                print(j)\nprint(json.stringify(j))\nprint(int(j[\"b\"][0]) + 1)\n\

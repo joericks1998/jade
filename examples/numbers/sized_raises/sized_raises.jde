@@ -1,0 +1,24 @@
+// What raises with the sized number types.
+//
+// Overflow raises rather than wrapping: a signed type on signed overflow, an
+// unsigned one on carry or borrow, the flags an instruction sets. A narrowing
+// converter raises when the value does not fit. A program that wants the low
+// bits says so, as toByte(n & 0xff).
+
+@byte
+let b = 250
+try { print(b + 10) } catch e { print(e.message) }
+
+@byte
+let small = 3
+try { print(small - 5) } catch e { print(e.message) }
+
+@short
+let s = -32768
+try { print(-s) } catch e { print(e.message) }
+try { print(b / toByte(0)) } catch e { print(e.message) }
+try { print(toByte(300)) } catch e { print(e.message) }
+try { print(toUint32(-2.5)) } catch e { print(e.message) }
+try { print(toInt32(3000000000.0)) } catch e { print(e.message) }
+try { print(b << 8) } catch e { print(e.message) }
+try { print(toShort("abc")) } catch e { print(e.message) }
