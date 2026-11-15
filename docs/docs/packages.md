@@ -105,7 +105,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-jade-rs = { git = "https://github.com/joericks1998/jade", tag = "v2.0.4" }
+jade-rs = { git = "https://github.com/joericks1998/jade", tag = "v2.0.5" }
 ```
 
 ```rust
@@ -198,7 +198,7 @@ pub fn crc32(data: &[u8]) -> u32 {
 }
 ```
 
-Jade 2.0.3 and earlier bound C libraries directly, with symbol tables in `jade.toml` generated from the library's header. `abi = "c"` is now refused with a message pointing here.
+Jade 2.0.4 and earlier bound C libraries directly, with symbol tables in `jade.toml` generated from the library's header. `abi = "c"` is now refused with a message pointing here.
 
 ### Not yet
 

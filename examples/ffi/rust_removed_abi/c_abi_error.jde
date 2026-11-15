@@ -1,6 +1,6 @@
-// jade.toml beside this file names a C library with abi = "c", which 2.0.4
+// jade.toml beside this file names a C library with abi = "c", which 2.0.5
 // removed. The manifest is refused where it says so, naming the replacement:
-//   abi = "c" was removed in jade 2.0.4: a C library is reached through a Rust
+//   abi = "c" was removed in jade 2.0.5: a C library is reached through a Rust
 //   crate that wraps it, such as its -sys crate, named with abi = "rust"
 
 print("never runs")

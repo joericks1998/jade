@@ -117,7 +117,7 @@ fn a_dependency_with_no_abi_names_the_two_kinds() {
     assert!(err.contains("abi = \"source\"") && err.contains("abi = \"rust\""), "{err}");
 }
 
-/// The two kinds 2.0.4 removed are refused where the manifest is read, with the
+/// The two kinds 2.0.5 removed are refused where the manifest is read, with the
 /// replacement named, rather than as an unknown variant.
 #[test]
 fn a_removed_abi_points_at_its_replacement() {

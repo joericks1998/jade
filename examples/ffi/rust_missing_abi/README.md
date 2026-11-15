@@ -6,7 +6,7 @@ A project whose `jade.toml` names a dependency with no `abi`. A dependency is Ja
 
 ## Why it exists
 
-Until 2.0.4 an entry with no `abi` meant a prebuilt Jade-ABI library, which no longer exists. The fixture pins that such an entry is refused with the fix rather than read as one kind or the other.
+Until 2.0.5 an entry with no `abi` meant a prebuilt Jade-ABI library, which no longer exists. The fixture pins that such an entry is refused with the fix rather than read as one kind or the other.
 
 ## Who uses it
 

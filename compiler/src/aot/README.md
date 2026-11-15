@@ -34,7 +34,7 @@ Until phase 6 of `design/v2-static-values.md` this directory also drove v1's bac
 
 ## Gotchas
 
-*A mistyped native name has to be caught here.* Before 2.0.4, `gfx.jade_gfx_key_presed` could pass `jade check`, build, ship, and fail the first time that line ran, because nothing linked the name. A Rust package's library lists everything it exports, so `Renamer::ref_native_qual`, the one place `alias.field` becomes `__native$<pkgid>$<field>`, checks the field against that list and suggests the closest name. Its `.jde` sibling `ref_value_qual` checks whether a module exports the name in the same way. A struct's name is left to `ref_type`, which names its class.
+*A mistyped native name has to be caught here.* Before 2.0.5, `gfx.jade_gfx_key_presed` could pass `jade check`, build, ship, and fail the first time that line ran, because nothing linked the name. A Rust package's library lists everything it exports, so `Renamer::ref_native_qual`, the one place `alias.field` becomes `__native$<pkgid>$<field>`, checks the field against that list and suggests the closest name. Its `.jde` sibling `ref_value_qual` checks whether a module exports the name in the same way. A struct's name is left to `ref_type`, which names its class.
 
 *`would_build` has to tell an unresolved import apart from a wrong program.* It probes a build on behalf of `jade check`, and deliberately stays quiet about an import that does not resolve, because that means a dependency is not installed and `check_imports` says so in better words. That silence used to swallow *every* resolver error, which is why `check` once reported `ok` for a program with a bad FFI symbol. `ResolveError` splits the two: an `Unresolved` error is dropped, and a `Program` error is reported.
 

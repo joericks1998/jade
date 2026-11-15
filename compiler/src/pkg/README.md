@@ -23,7 +23,7 @@ zlib     = { path = "rust/zlib-jade", package = "zlib-jade", abi = "rust" }
 
 *A Rust package* is a crate that marks what Jade may call with `#[jade::export]`. Cargo fetches and builds it with the program, in `crate::rustpkg`, so this module has nothing to install for it: it validates the entry, leaves it out of the lock, since cargo pins it in the generated crate's `Cargo.lock`, and hands its name to import resolution. `jade pkg add` builds it on the spot to report what it exports, and to refuse one that does not compile.
 
-`abi` must be written; there is no default. Until 2.0.4 there were two more kinds, `jade` for a v1 package built with `jade build --lib` and `c` for a plain C library behind a generated shim, both prebuilt shared libraries the program opened with `dlopen`. `design/v2-rust-packages.md` says why Rust replaced both. A manifest naming either is refused where it says so, by `project::Abi`'s deserializer, with the replacement named.
+`abi` must be written; there is no default. Until 2.0.5 there were two more kinds, `jade` for a v1 package built with `jade build --lib` and `c` for a plain C library behind a generated shim, both prebuilt shared libraries the program opened with `dlopen`. `design/v2-rust-packages.md` says why Rust replaced both. A manifest naming either is refused where it says so, by `project::Abi`'s deserializer, with the replacement named.
 
 ## Why it was built this way
 

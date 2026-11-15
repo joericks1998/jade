@@ -295,7 +295,7 @@ jade pkg list
 | `--rust` | The dependency is a Rust package. Unneeded for a `--path` holding a `Cargo.toml`. |
 | `--package <NAME>` | A Rust package's own name, when it differs from the name a program writes, such as one with a `-`. |
 
-`jade pkg bind` and the `--header`, `--c-abi`, `--include` and `--define` flags of `add` were removed in 2.0.4, with the C bindings they generated. A C library is reached through a Rust crate that wraps it.
+`jade pkg bind` and the `--header`, `--c-abi`, `--include` and `--define` flags of `add` were removed in 2.0.5, with the C bindings they generated. A C library is reached through a Rust crate that wraps it.
 
 See [Packages](packages) for the full workflow.
 

@@ -24,7 +24,7 @@
 #      correct release from a leak, and cannot tell either from a crash that only
 #      shows up under sustained churn.
 #
-# Until 2.0.4 this gate bound glib's C header whole through the C shim; Rust
+# Until 2.0.5 this gate bound glib's C header whole through the C shim; Rust
 # packages replaced that path (design/v2-rust-packages.md).
 #
 # Both are skipped rather than failed when cargo is absent, so this is safe to

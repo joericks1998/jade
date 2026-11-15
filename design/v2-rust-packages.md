@@ -1,6 +1,6 @@
 # Rust packages
 
-Status: decided 2026-11-14 for jade 2.0.4, and built on branch `2.0.4`, tested on macOS
+Status: decided 2026-11-14 for jade 2.0.5, and built on branch `2.0.5`, tested on macOS
 on Apple Silicon. The Linux link path is written and unit-tested against a fake file
 system, but no program with a Rust package has been linked on Linux yet; CI will be the
 first to. Joe decided that
@@ -10,7 +10,7 @@ list at the end names them for review.
 
 ## The problem
 
-Until 2.0.3 a native package was a shared library the program opened with `dlopen` while
+Until 2.0.4 a native package was a shared library the program opened with `dlopen` while
 it ran. A Jade package built by v1 exported `jade_pkg_init`; a plain C library got one
 from a C shim that `jade pkg install` generated and compiled with `cc`. Either way every
 call traded 16-byte tagged `JadeVal`s, and nothing in the library said what a function

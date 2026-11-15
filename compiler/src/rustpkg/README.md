@@ -14,7 +14,7 @@ jade.toml [dependencies] abi = "rust"
 
 ## Why it was built
 
-Until 2.0.4 a native package was a C library behind a shim generated from its header, and its types came from tables in `jade.toml`. Rust keeps every fact the shim had to recover in its types, so `#[jade::export]` writes the bridge from the function's own signature, and a description of it into the built library. That description is this crate's header file: the compiler reads it rather than parsing source, so a type alias or a generated item is described as what rustc compiled. [`design/v2-rust-packages.md`](../../../design/v2-rust-packages.md) has the decisions and their reasons.
+Until 2.0.5 a native package was a C library behind a shim generated from its header, and its types came from tables in `jade.toml`. Rust keeps every fact the shim had to recover in its types, so `#[jade::export]` writes the bridge from the function's own signature, and a description of it into the built library. That description is this crate's header file: the compiler reads it rather than parsing source, so a type alias or a generated item is described as what rustc compiled. [`design/v2-rust-packages.md`](../../../design/v2-rust-packages.md) has the decisions and their reasons.
 
 ## How it works
 

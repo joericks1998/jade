@@ -10,11 +10,11 @@ Import resolution has to give the same answer every time a `use` is read. The AO
 
 The `[lib]` mechanism is why this module is more than a TOML parser. A `[lib.<name>]` section registers a directory and its modules under a name, anchored at the project root. So `use utils.math` works from anywhere in the tree, rather than only from a sibling directory.
 
-The `files` list carries the `.jde` extension, which separates modules from the other files in the directory. A `[lib]` holds Jade modules alone. Until 2.0.4 it could list a `.dylib` or `.so` loaded with `dlopen`; one listed now is refused with a message naming Rust packages, the replacement.
+The `files` list carries the `.jde` extension, which separates modules from the other files in the directory. A `[lib]` holds Jade modules alone. Until 2.0.5 it could list a `.dylib` or `.so` loaded with `dlopen`; one listed now is refused with a message naming Rust packages, the replacement.
 
 The package manager reuses that mechanism rather than adding a second one beside it. Resolved dependencies come back from `pkg/` as synthetic `LibraryEntry` values, which are merged into the `[lib]` map. A Rust package's entry carries its dependency's name in `rust`, which no manifest can write, and `resolve_library_import` answers it with `ImportKind::Rust`, so the build knows to read its functions out of the compiled crate (`rustpkg/`).
 
-A `[dependencies]` entry says what kind of package it is with `abi`, `"source"` or `"rust"`, and must say it. `Abi`'s deserializer refuses `"c"` and `"jade"`, the two prebuilt kinds 2.0.4 removed, on the manifest's own line, naming the replacement. A Rust entry comes from a `path`, a `git` repository or a crates.io `version`, and may give the Rust package's own name as `package`, since a Jade name is an identifier and a Rust package's name may hold a `-`.
+A `[dependencies]` entry says what kind of package it is with `abi`, `"source"` or `"rust"`, and must say it. `Abi`'s deserializer refuses `"c"` and `"jade"`, the two prebuilt kinds 2.0.5 removed, on the manifest's own line, naming the replacement. A Rust entry comes from a `path`, a `git` repository or a crates.io `version`, and may give the Rust package's own name as `package`, since a Jade name is an identifier and a Rust package's name may hold a `-`.
 
 A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resolves to, and `exports`, the entry module's names other projects may use. A source package's `[lib]` entry, which `pkg/` builds from its lock entry, carries both. A file inside a source package resolves its imports against the package's own `jade.toml` first, so the package's `[lib]` entries work wherever it is installed.
 

@@ -81,7 +81,7 @@ files = ["math.jde"]
 use ext::math       // -> lib/math.jde
 ```
 
-A `[lib]` holds Jade modules alone. Native code is a Rust package under `[dependencies]`; see [Packages](packages#rust-packages). Until 2.0.4 a `[lib]` could list a `.dylib` or `.so`, which the program opened with `dlopen`.
+A `[lib]` holds Jade modules alone. Native code is a Rust package under `[dependencies]`; see [Packages](packages#rust-packages). Until 2.0.5 a `[lib]` could list a `.dylib` or `.so`, which the program opened with `dlopen`.
 
 Then import the module with `::` notation from *any* file in the project. Jade resolves the path against the library's directory, anchored at the project root, rather than against the importing file. The import binds to its last segment automatically, with no `as` needed:
 

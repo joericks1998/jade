@@ -324,7 +324,7 @@ pub fn resolve_library_import(
             if stem == module && ext == "jde" {
                 return Ok(Some(ResolvedLib::open(base.join(f), ImportKind::Jade)));
             }
-            // A shared library was a module until 2.0.4; say what replaced it
+            // A shared library was a module until 2.0.5; say what replaced it
             // rather than calling the name unregistered.
             let native = Path::new(f)
                 .extension()
@@ -370,7 +370,7 @@ pub fn resolve_relative_import(dir: &Path, import_path: &str) -> ResolvedLib {
 /// What kind of package a dependency is.
 ///
 /// Written out in every entry, since neither kind is a sensible default. Until
-/// 2.0.4 there were two more, `jade` and `c`, for prebuilt shared libraries;
+/// 2.0.5 there were two more, `jade` and `c`, for prebuilt shared libraries;
 /// `design/v2-rust-packages.md` says why Rust replaced both, and reading one
 /// stops with a message pointing there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,7 +397,7 @@ impl Abi {
 }
 
 /// Reads `"source"` or `"rust"`, and names the replacement for the two kinds
-/// 2.0.4 removed, so the message lands on the manifest's own line.
+/// 2.0.5 removed, so the message lands on the manifest's own line.
 impl<'de> Deserialize<'de> for Abi {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
@@ -405,12 +405,12 @@ impl<'de> Deserialize<'de> for Abi {
             "source" => Ok(Abi::Source),
             "rust" => Ok(Abi::Rust),
             "c" => Err(serde::de::Error::custom(
-                "abi = \"c\" was removed in jade 2.0.4: a C library is reached through a Rust \
+                "abi = \"c\" was removed in jade 2.0.5: a C library is reached through a Rust \
                  crate that wraps it, such as its -sys crate, named with abi = \"rust\" (see \
                  design/v2-rust-packages.md)",
             )),
             "jade" => Err(serde::de::Error::custom(
-                "abi = \"jade\" was removed in jade 2.0.4: a Jade package is shared as source \
+                "abi = \"jade\" was removed in jade 2.0.5: a Jade package is shared as source \
                  with abi = \"source\", and native code is a Rust crate with abi = \"rust\" \
                  (see design/v2-rust-packages.md)",
             )),

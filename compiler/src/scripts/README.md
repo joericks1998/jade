@@ -16,7 +16,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
 - *`golden.sh`* builds every example, runs the binary, and compares its output and exit status to the `<name>.expected` and optional `<name>.expected-exit` beside it. An example with no `.expected` file fails rather than passes. It takes an optional path to a `jade` binary, and keeps a skip list: the network examples, the `*_error.jde` fixtures that `jade check` covers, and the examples that dereference a prompt, whose recorded output came from v1's mock provider; a prompt now runs a real model, which `src/infer/tests.rs` checks against llama.cpp. Read the header before assuming an example is covered. The examples under `examples/ffi/rust_*` call Rust packages, so building them runs cargo.
 
-  Until 2.0.4 it also built two C fixtures, a stand-in Jade-ABI package handing out handles and a C library passing structs through a generated shim. Both went with the C path; the Rust packages in `examples/ffi/` cover what crosses now, and they need no step of their own.
+  Until 2.0.5 it also built two C fixtures, a stand-in Jade-ABI package handing out handles and a C library passing structs through a generated shim. Both went with the C path; the Rust packages in `examples/ffi/` cover what crosses now, and they need no step of their own.
 - *`ffi-gate.sh`* and *`ffi-gate/`* are the FFI gate, described below. [`ffi-gate/README.md`](ffi-gate/README.md) says what each of its files is.
 
 ## Who uses it
@@ -56,4 +56,4 @@ A missing cargo produces a *skip*, reported rather than silent. The first run ne
 
 To drive the loop by hand at a different size, set `JADE_FFI_LOOP_ITERS` to the iteration count you want. The fixture defaults to 100,000 without it.
 
-Until 2.0.4 this gate bound glib's whole C header through the generated shim, and called one `alloc_str` binding in a loop; Rust packages replaced that path (`design/v2-rust-packages.md`).
+Until 2.0.5 this gate bound glib's whole C header through the generated shim, and called one `alloc_str` binding in a loop; Rust packages replaced that path (`design/v2-rust-packages.md`).

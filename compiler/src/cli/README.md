@@ -30,7 +30,7 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 
   `jade pkg add <name> --path <dir>` decides the kind of dependency from what is in the directory: a `Cargo.toml` makes it a Rust package, and a `jade.toml` a Jade source package. `--rust` says so for a `--git` repository or a crates.io `--version`, which cannot be looked inside first, and `--package` gives a Rust package's own name when it differs. A Rust package is built on the spot (`rustpkg::build`), so `add` reports how many functions and structs it exports and refuses one that does not compile. A `--git` repository or a `.tar.gz` `--url` without `--rust` is a Jade source package, which `src/pkg/source.rs` installs and pins.
 
-  `jade pkg bind` and `add`'s `--header`, `--c-abi`, `--include`, `--define` and `--only` went in 2.0.4 with the C bindings they generated (`design/v2-rust-packages.md`). A path to a `.dylib` or `.so` is refused with a message naming the replacement, a Rust crate that wraps the library.
+  `jade pkg bind` and `add`'s `--header`, `--c-abi`, `--include`, `--define` and `--only` went in 2.0.5 with the C bindings they generated (`design/v2-rust-packages.md`). A path to a `.dylib` or `.so` is refused with a message naming the replacement, a Rust crate that wraps the library.
 
   The manifest is the source of truth, and `jade.lock` is derived from it. With no registry to query, "update" means reconciling the lock with the manifest rather than discovering a newer version. `install` re-hashes local `path` dependencies before installing, since those point at directories the user edits. `--locked` reports that drift as an error instead.
 

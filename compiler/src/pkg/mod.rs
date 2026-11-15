@@ -27,7 +27,7 @@
 //! map, so the import resolver ([`crate::aot::imports`]) never learns what a
 //! dependency is.
 //!
-//! Until 2.0.4 a dependency could also be a prebuilt shared library: a Jade-ABI
+//! Until 2.0.5 a dependency could also be a prebuilt shared library: a Jade-ABI
 //! package, or a C library behind a shim generated from its header. Both are gone;
 //! `design/v2-rust-packages.md` says why.
 
@@ -139,7 +139,7 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
         let (_, artifact) = select_artifact(pkg, platform)?;
         if !is_source(pkg) {
             return Err(format!(
-                "jade.lock records '{}' as abi = \"{}\", a prebuilt library, which jade 2.0.4 \
+                "jade.lock records '{}' as abi = \"{}\", a prebuilt library, which jade 2.0.5 \
                  removed; run `jade pkg install` to lock the manifest again",
                 pkg.name, pkg.abi
             ));

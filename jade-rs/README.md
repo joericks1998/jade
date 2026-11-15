@@ -7,7 +7,7 @@ This is the crate a Rust library depends on to be called from a Jade program. It
 ```toml
 # the package's Cargo.toml
 [dependencies]
-jade-rs = { git = "https://github.com/joericks1998/jade", tag = "v2.0.4" }
+jade-rs = { git = "https://github.com/joericks1998/jade", tag = "v2.0.5" }
 ```
 
 ```rust
@@ -42,7 +42,7 @@ The library is named `jade` so a plain `jade-rs = ...` dependency gives `#[jade:
 
 ## Why it was built
 
-Until jade 2.0.4 a native package was a C library behind a generated C shim, typed from tables in `jade.toml` that were in turn generated from the library's header. Most of that machinery recovered facts C does not keep, such as who frees a string or how wide an integer is. Rust keeps them in its types, so the bridge can be written from the function's own signature, by the Rust compiler. [`design/v2-rust-packages.md`](../design/v2-rust-packages.md) has the whole design and the reasons for each choice.
+Until jade 2.0.5 a native package was a C library behind a generated C shim, typed from tables in `jade.toml` that were in turn generated from the library's header. Most of that machinery recovered facts C does not keep, such as who frees a string or how wide an integer is. Rust keeps them in its types, so the bridge can be written from the function's own signature, by the Rust compiler. [`design/v2-rust-packages.md`](../design/v2-rust-packages.md) has the whole design and the reasons for each choice.
 
 ## How it works
 
