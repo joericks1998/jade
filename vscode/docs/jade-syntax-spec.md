@@ -57,6 +57,7 @@ A decorator ends at its name, so it may share a line with what it decorates.
 | class member | `Account::new(…)`, `Parent::m()` | class `entity.name.type.jade` |
 | class view | `Animal(d)` | `entity.name.type.jade` |
 | class test | `x is Dog`, `x is shapes.Dog` | `keyword.operator.word.jade`, class `entity.name.type.jade` |
+| nil test, in the std library's code | `x is nil` | `keyword.operator.word.jade`, `nil` `constant.language.null.jade` |
 | implicit self | `.count = .count + 1` | plain |
 | typed catch | `catch ValueError e { }` | class `entity.name.type.jade` |
 | membership | `x in xs`, `x not in xs` | `in` control, `not` word operator |

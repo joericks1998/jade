@@ -90,6 +90,8 @@ module.exports = [
   ['let a = Animal(d)', [['Animal', 'entity.name.type.jade']]],
   ['if pet is Dog { }', [['is', 'keyword.operator.word.jade'], ['Dog', 'entity.name.type.jade']]],
   ['if pet is shapes.Dog { }', [['Dog', 'entity.name.type.jade']]],
+  // The std library's code tests a value's type, `x is nil` included.
+  ['if p is nil { }', [['is', 'keyword.operator.word.jade'], ['nil', 'constant.language.null.jade']]],
   ['let p = Point { x: 1, y: 2 }', [['Point', 'entity.name.type.jade']]],
   ['let p = shapes.Point { x: 1 }', [['Point', 'entity.name.type.jade']]],
   ['let q = Config { ...c, port: 9090 }', [['...', 'keyword.operator.spread.jade']]],

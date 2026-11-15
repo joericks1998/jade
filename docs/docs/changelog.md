@@ -114,6 +114,10 @@ print(city)                                // {"name": "Paris", "population": "2
 - *Status lists each program once,* however many times it mapped a model, and the run directory's path no longer has to fit a socket path's 104 bytes.
 - *The plan a program reads back is exact.* Every float in it, such as the attention scale, reads back exactly as dovata wrote it; serde_json's default parser could be off in the last bit.
 
+## vscode v1.1.4
+
+*`x is nil` colors `nil` as nil.* The std library, written in Jade since compiler 2.0.8, tests a value's type with `x is nil`, and the grammar colored `nil` there as a class name. This is an extension release alone.
+
 ## vscode v1.1.3
 
 *The VS Code extension colors Jade 2.0, and lives in the Jade repo.* This is an extension release alone; the compiler and dovata do not change.
