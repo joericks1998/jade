@@ -232,7 +232,7 @@ A function whose body contains a `yield` returns a *stream* rather than a single
 ```jade
 fn doubles(n) {
     let i = 0
-    while i < n {
+    while (i < n) {
         yield i * 2
         i = i + 1
     }

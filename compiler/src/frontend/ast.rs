@@ -122,7 +122,7 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `if condition { then_body } else { else_body }`
+    /// `if (condition) { then_body } else { else_body }`
     If {
         condition: Expr,
         then_body: Vec<Stmt>,
@@ -130,7 +130,7 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `while condition { body }`
+    /// `while (condition) { body }`
     While {
         condition: Expr,
         body: Vec<Stmt>,

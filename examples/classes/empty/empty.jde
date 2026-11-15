@@ -26,7 +26,7 @@ let count = len(units)
 
 // Empty classes work as exception types
 fn must_be_positive(n) {
-    if n < 0 {
+    if (n < 0) {
         raise MyError {}
     }
     return n

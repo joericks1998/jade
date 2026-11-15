@@ -17,9 +17,9 @@ The shape it enables:
 ```jade
 let pending = connect(ssid)
 let shown = false
-while running {
+while (running) {
     draw_frame()
-    if !shown && pending.ready() {
+    if (!shown && pending.ready()) {
         show_banner(await pending)
         shown = true
     }
@@ -64,6 +64,6 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 ## Gotchas
 
-*A polling loop is free inside something that was already looping.* A render loop wakes at frame rate whether or not it asks. It is not free for a program with nothing else to do — `while !f.ready() { }` burns a core. What that case wants is to block until *any* of several futures resolves, with a timeout, so the CPU can idle. That primitive is `wait()`, a bare global, with a `time.after(secs)` among the futures for the timeout, and this one is not a substitute for it.
+*A polling loop is free inside something that was already looping.* A render loop wakes at frame rate whether or not it asks. It is not free for a program with nothing else to do — `while (!f.ready()) { }` burns a core. What that case wants is to block until *any* of several futures resolves, with a timeout, so the CPU can idle. That primitive is `wait()`, a bare global, with a `time.after(secs)` among the futures for the timeout, and this one is not a substitute for it.
 
 *The receiver is checked before the program runs.* The static checker knows every value's type, so `n.ready()` on an int stops the build with `int has no method 'ready'`, from `typechecker/infer/builtins.rs`. Until phase 6, v1's backend emitted a run-time guard before the call and the runtime checked again; a v2 binary needs neither.

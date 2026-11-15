@@ -62,7 +62,7 @@ fn guarded() {
 }
 
 fn refuse_two(x) {
-    if x == 2 {
+    if (x == 2) {
         raise "no twos"
     }
     return x

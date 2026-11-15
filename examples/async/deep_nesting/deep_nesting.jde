@@ -8,7 +8,7 @@
 // agree far past where the old ceiling stood.
 
 async fn countdown(n) {
-    if n <= 0 {
+    if (n <= 0) {
         return 0
     }
     return 1 + await countdown(n - 1)
@@ -22,14 +22,14 @@ print(await countdown(2000))
 // come out of the recursion budget an individual task has to spend.
 
 async fn depth_probe(n) {
-    if n <= 0 {
+    if (n <= 0) {
         return countable(0)
     }
     return await depth_probe(n - 1)
 }
 
 fn countable(n) {
-    if n >= 200 {
+    if (n >= 200) {
         return n
     }
     return countable(n + 1)

@@ -83,7 +83,7 @@ mod format_bytes {
 
 mod fmt {
     use super::TempDir;
-    use crate::cli::fmt::{collect_jde_files, format_source, tokens_agree};
+    use crate::cli::fmt::{add_condition_parens, collect_jde_files, format_source, tokens_agree};
 
     // ── the basics ────────────────────────────────────────────────────────────
 
@@ -106,8 +106,8 @@ mod fmt {
 
     #[test]
     fn nested_braces_increase_indent() {
-        let src = "fn f() {\nif x {\ny()\n}\n}\n";
-        assert_eq!(format_source(src), "fn f() {\n    if x {\n        y()\n    }\n}\n");
+        let src = "fn f() {\nif (x) {\ny()\n}\n}\n";
+        assert_eq!(format_source(src), "fn f() {\n    if (x) {\n        y()\n    }\n}\n");
     }
 
     #[test]
@@ -132,17 +132,17 @@ mod fmt {
     fn a_closing_and_reopening_line_sits_at_the_outer_depth() {
         // `} else {` and `} catch e {` close one block and open another, so they
         // belong to the enclosing level, not the one they are closing.
-        let src = "fn f() {\nif x {\na()\n} else {\nb()\n}\n}\n";
+        let src = "fn f() {\nif (x) {\na()\n} else {\nb()\n}\n}\n";
         assert_eq!(
             format_source(src),
-            "fn f() {\n    if x {\n        a()\n    } else {\n        b()\n    }\n}\n"
+            "fn f() {\n    if (x) {\n        a()\n    } else {\n        b()\n    }\n}\n"
         );
     }
 
     #[test]
     fn two_closers_on_one_line_land_at_the_outermost_depth() {
-        let src = "fn f() {\nif x {\na()\n}}\n";
-        assert_eq!(format_source(src), "fn f() {\n    if x {\n        a()\n}}\n");
+        let src = "fn f() {\nif (x) {\na()\n}}\n";
+        assert_eq!(format_source(src), "fn f() {\n    if (x) {\n        a()\n}}\n");
     }
 
     // ── strings and comments ──────────────────────────────────────────────────
@@ -355,6 +355,72 @@ mod fmt {
     fn tokens_agree_leaves_a_file_that_does_not_lex_alone() {
         // A half-typed file is not the formatter's problem to refuse.
         assert!(tokens_agree("let s = \"unterminated\n", "anything at all\n"));
+    }
+
+    // ── conditions in parentheses (2.0.10) ───────────────────────────────────
+
+    #[test]
+    fn a_bare_condition_gets_its_parentheses() {
+        assert_eq!(add_condition_parens("if x > 0 {\n}\n"), "if (x > 0) {\n}\n");
+        assert_eq!(add_condition_parens("while running {\n}\n"), "while (running) {\n}\n");
+        assert_eq!(
+            add_condition_parens("if (x) {\n} elif y == 1 {\n} else {\n}\n"),
+            "if (x) {\n} elif (y == 1) {\n} else {\n}\n"
+        );
+    }
+
+    #[test]
+    fn parentheses_around_part_of_a_condition_get_a_pair_around_all_of_it() {
+        assert_eq!(add_condition_parens("if (a) and (b) {\n}\n"), "if ((a) and (b)) {\n}\n");
+    }
+
+    #[test]
+    fn a_condition_already_in_parentheses_is_left_alone() {
+        let src = "if (x > 0) {\n    while ((a) or b) {\n    }\n}\n";
+        assert_eq!(add_condition_parens(src), src);
+    }
+
+    #[test]
+    fn the_rest_of_the_line_and_strings_and_comments_stay_as_written() {
+        let src = "if  x  { // if y {\n    print(\"while z {\")\n}\n";
+        let want = "if  (x)  { // if y {\n    print(\"while z {\")\n}\n";
+        assert_eq!(add_condition_parens(src), want);
+    }
+
+    #[test]
+    fn a_dict_literal_in_a_condition_is_not_the_block() {
+        assert_eq!(
+            add_condition_parens("if k in {\"a\": 1} {\n}\n"),
+            "if (k in {\"a\": 1}) {\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_source_that_does_not_lex_is_left_alone() {
+        let src = "if x {\n    print(\"unterminated\n}\n";
+        assert_eq!(add_condition_parens(src), src);
+    }
+
+    #[test]
+    fn every_example_already_has_its_parentheses() {
+        // A program that compiles comes back unchanged, which is what keeps
+        // `jade fmt` from turning a valid program into anything else. The
+        // fixtures in control_flow/conditions/ named *_error.jde hold a bare
+        // condition on purpose.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        let mut files = Vec::new();
+        collect_jde_files(&root, &mut files);
+        let on_purpose = Path::new("control_flow").join("conditions");
+        for file in &files {
+            let name = file.to_string_lossy();
+            if file.parent().is_some_and(|d| d.ends_with(&on_purpose))
+                && name.ends_with("_error.jde")
+            {
+                continue;
+            }
+            let src = std::fs::read_to_string(file).expect("read fixture");
+            assert_eq!(add_condition_parens(&src), src, "{}", file.display());
+        }
     }
 
     // ── file discovery ────────────────────────────────────────────────────────

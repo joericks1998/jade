@@ -68,7 +68,7 @@ try {
 struct ValueError { message }
 
 fn parse_age(n) {
-    if n < 0 {
+    if (n < 0) {
         raise ValueError { message: "age cannot be negative" }
     }
     return n

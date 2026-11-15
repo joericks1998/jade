@@ -70,6 +70,9 @@
           "include": "#removed-keywords"
         },
         {
+          "include": "#removed-bare-condition"
+        },
+        {
           "include": "#keywords"
         },
         {
@@ -514,6 +517,11 @@
       "comment": "struct, extend and interface were removed in favor of class, and the `as` import alias was removed. The lexer still reads them so the compiler can name the replacement; they are marked removed rather than colored as working keywords.",
       "name": "invalid.deprecated.removed.jade",
       "match": "\\b(struct|extend|interface|as)\\b"
+    },
+    "removed-bare-condition": {
+      "comment": "Since 2.0.10 an if, elif or while condition goes in parentheses: if (x > 0) {. The keyword of a bare condition, one followed on its line by anything but `(`, is marked removed. A keyword that ends its line is left alone, since its condition may start on the next.",
+      "name": "invalid.deprecated.removed.jade",
+      "match": "\\b(if|elif|while)\\b(?=\\s*[^\\s(])"
     },
     "keywords": {
       "patterns": [

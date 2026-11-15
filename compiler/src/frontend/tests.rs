@@ -557,14 +557,16 @@ mod lexer {
 
     #[test]
     fn test_while_no_semicolon_before_brace() {
-        // `while i < 5 {` — no semicolon between condition and opening brace
+        // `while (i < 5) {` — no semicolon between condition and opening brace
         assert_eq!(
-            kinds("while i < 5 {"),
+            kinds("while (i < 5) {"),
             vec![
                 TokenKind::While,
+                TokenKind::LParen,
                 TokenKind::Identifier("i".into()),
                 TokenKind::Lt,
                 TokenKind::Integer(5),
+                TokenKind::RParen,
                 TokenKind::LBrace,
                 TokenKind::Eof,
             ]
@@ -931,7 +933,7 @@ mod parser {
 
     #[test]
     fn test_parse_if_no_else() {
-        let p = parse_src("fn f(x) {\n    if x {\n        return 1\n    }\n    return 0\n}");
+        let p = parse_src("fn f(x) {\n    if (x) {\n        return 1\n    }\n    return 0\n}");
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         let Stmt::If { else_body, .. } = &body[0] else { panic!() };
         assert!(else_body.is_none());
@@ -940,7 +942,7 @@ mod parser {
     #[test]
     fn test_parse_if_with_else() {
         let p = parse_src(
-            "fn f(x) {\n    if x {\n        return 1\n    } else {\n        return 0\n    }\n}",
+            "fn f(x) {\n    if (x) {\n        return 1\n    } else {\n        return 0\n    }\n}",
         );
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         let Stmt::If { then_body, else_body, .. } = &body[0] else { panic!() };
@@ -1023,7 +1025,7 @@ mod parser {
 
     #[test]
     fn test_parse_while_basic() {
-        let p = parse_src("let i = 0\nwhile i < 5 {\n    let i = i + 1\n}");
+        let p = parse_src("let i = 0\nwhile (i < 5) {\n    let i = i + 1\n}");
         assert_eq!(p.stmts.len(), 2);
         let Stmt::While { condition, body, .. } = &p.stmts[1] else { panic!() };
         assert!(matches!(condition, Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, .. }, .. }));
@@ -1032,7 +1034,7 @@ mod parser {
 
     #[test]
     fn test_parse_while_empty_body() {
-        let p = parse_src("while false {\n}");
+        let p = parse_src("while (false) {\n}");
         assert_eq!(p.stmts.len(), 1);
         let Stmt::While { body, .. } = &p.stmts[0] else { panic!() };
         assert!(body.is_empty());
@@ -1041,10 +1043,98 @@ mod parser {
     #[test]
     fn test_parse_while_inside_fn() {
         let p = parse_src(
-            "fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}",
+            "fn f(n) {\n    while (n > 0) {\n        let n = n - 1\n    }\n    return n\n}",
         );
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         assert!(matches!(body[0], Stmt::While { .. }));
+    }
+
+    // ── conditions in parentheses (2.0.10) ───────────────────────────────────
+
+    /// A bare `if`, `elif` or `while` condition is refused at the condition,
+    /// with the statement's own keyword, so the message shows its fix.
+    #[test]
+    fn a_bare_condition_is_refused_with_its_keyword() {
+        for (src, keyword, line, col) in [
+            ("let x = 1\nif x > 0 {\n    print(x)\n}", "if", 2, 4),
+            (
+                "let x = 0\nif (x > 0) {\n    print(x)\n} elif x == 0 {\n    print(0)\n}",
+                "elif",
+                4,
+                8,
+            ),
+            ("let i = 0\nwhile i < 3 {\n    i = i + 1\n}", "while", 2, 7),
+        ] {
+            let e = parse_src_err(src);
+            let JadeError::ConditionNeedsParens { keyword: k, span } = &e else {
+                panic!("{src:?}: got {e}");
+            };
+            assert_eq!((*k, span.line, span.col), (keyword, line, col), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn the_message_shows_the_fix_and_names_jade_fmt() {
+        let msg = parse_src_err("if x > 0 {\n}").to_string();
+        assert!(msg.contains("an if condition goes in parentheses"), "{msg}");
+        assert!(msg.contains("write 'if (x > 0) {'"), "{msg}");
+        assert!(msg.contains("jade fmt"), "{msg}");
+        let msg = parse_src_err("while running {\n}").to_string();
+        assert!(msg.contains("a while condition goes in parentheses"), "{msg}");
+        assert!(msg.contains("write 'while (running) {'"), "{msg}");
+    }
+
+    /// Parentheses that close before the condition does are refused the same
+    /// way: `(a) and (b)` is a condition, but not one parenthesized expression.
+    #[test]
+    fn parentheses_must_wrap_the_whole_condition() {
+        for (src, col) in [
+            ("if (a) and (b) {\n}", 4),
+            ("if (a + b) * c > 0 {\n}", 4),
+            ("while (i) < 3 {\n}", 7),
+            ("if (f)(x) {\n}", 4),
+        ] {
+            let e = parse_src_err(src);
+            assert!(
+                matches!(e, JadeError::ConditionNeedsParens { span, .. } if span.col == col),
+                "{src:?}: got {e}"
+            );
+        }
+        parse_src("if ((a) and (b)) {\n}");
+        parse_src("if (a and b) {\n}");
+    }
+
+    /// After the `)`, anything that cannot continue the condition is a missing
+    /// `{`, not a condition out of its parentheses.
+    #[test]
+    fn a_missing_brace_after_the_parentheses_is_still_a_missing_brace() {
+        let e = parse_src_err("if (a) b {\n}");
+        assert!(
+            matches!(e, JadeError::UnexpectedToken { ref expected, .. } if expected == "`{`"),
+            "got {e}"
+        );
+    }
+
+    /// Inside the parentheses a class literal reads as one, since the block's
+    /// `{` comes after the `)`.
+    #[test]
+    fn a_class_literal_is_allowed_inside_the_parentheses() {
+        let p = parse_src("if (p == Point { x: 1 }) {\n    print(1)\n}");
+        let Stmt::If { condition, .. } = &p.stmts[0] else { panic!() };
+        let ExprKind::BinOp { right, .. } = &condition.kind else { panic!("{condition:?}") };
+        assert!(matches!(right.kind, ExprKind::StructLiteral { .. }), "{right:?}");
+        let p = parse_src("while (norm(Point { x: 3 }) > 1) {\n}");
+        assert!(matches!(p.stmts[0], Stmt::While { .. }));
+    }
+
+    /// `for` has no condition, so it takes no parentheses, and its iterable
+    /// still never reads `items {` as a class literal.
+    #[test]
+    fn a_for_loop_is_unchanged() {
+        let p = parse_src("for x in items {\n    print(x)\n}");
+        let Stmt::For { iterable, body, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(iterable.kind, ExprKind::Identifier(ref n) if n == "items"));
+        assert_eq!(body.len(), 1);
     }
 
     // ── struct / extend ───────────────────────────────────────────────────────
@@ -1151,7 +1241,7 @@ mod parser {
 
     #[test]
     fn a_class_inside_a_block_is_refused() {
-        let e = parse_src_err("if true {\n    class A { n }\n}");
+        let e = parse_src_err("if (true) {\n    class A { n }\n}");
         assert!(matches!(e, JadeError::ClassNotAtTopLevel { .. }), "got: {e}");
     }
 
@@ -1993,7 +2083,7 @@ mod parser {
         assert!(matches!(parse_err_on_a_real_stack(unary), JadeError::NestingTooDeep { .. }));
 
         // Blocks are the third re-entry point.
-        let blocks = format!("fn f() {{ {} {} }}", "if true {".repeat(n), "}".repeat(n));
+        let blocks = format!("fn f() {{ {} {} }}", "if (true) {".repeat(n), "}".repeat(n));
         assert!(matches!(parse_err_on_a_real_stack(blocks), JadeError::NestingTooDeep { .. }));
     }
 

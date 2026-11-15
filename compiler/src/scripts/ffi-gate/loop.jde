@@ -16,19 +16,19 @@ use gate
 
 let iters = 100000
 let from_env = env.get("JADE_FFI_LOOP_ITERS")
-if from_env != nil {
+if (from_env != nil) {
     iters = from_env |> toInt
 }
 
 let word = "jade"
 let i = 0
 let bad = 0
-while i < iters {
-    if gate.echo(word) != word {
+while (i < iters) {
+    if (gate.echo(word) != word) {
         bad = bad + 1
     }
     let ws = gate.words("one two three")
-    if len(ws) != 3 or ws[2] != "three" {
+    if (len(ws) != 3 or ws[2] != "three") {
         bad = bad + 1
     }
     i = i + 1

@@ -65,7 +65,7 @@ fn stream(url, handler, headers = nil) {
     argv.push("--")
     argv.push(t[1])
     let p = __sys.spawn(argv, false)
-    if __sys.os_error() != 0 {
+    if (__sys.os_error() != 0) {
         http._fail("stream", url, true, 127)
     }
     let stopped = false
@@ -77,12 +77,12 @@ fn stream(url, handler, headers = nil) {
         __sys.wait(p[0])
         raise e
     }
-    if stopped {
+    if (stopped) {
         __sys.kill(p[0])
     }
     __sys.close(p[2])
     let code = __sys.wait(p[0])
-    if not stopped and code != 0 {
+    if (not stopped and code != 0) {
         http._fail("stream", url, true, code)
     }
 }
@@ -93,22 +93,22 @@ fn stream(url, handler, headers = nil) {
 // Outputs: true when the handler stopped the stream.
 fn _lines(fd, handler) {
     let pending = bytes.zeros(0)
-    while true {
+    while (true) {
         let chunk = __sys.read_chunk(fd)
-        if len(chunk) == 0 {
-            if len(pending) > 0 {
+        if (len(chunk) == 0) {
+            if (len(pending) > 0) {
                 _deliver(handler, pending)
             }
             return false
         }
         let start = 0
         let i = 0
-        while i < len(chunk) {
-            if chunk[i] == 10 {
+        while (i < len(chunk)) {
+            if (chunk[i] == 10) {
                 let line = bytes.concat(pending, chunk.slice(start, i))
                 pending = bytes.zeros(0)
                 start = i + 1
-                if _deliver(handler, line) {
+                if (_deliver(handler, line)) {
                     return true
                 }
             }
@@ -125,7 +125,7 @@ fn _lines(fd, handler) {
 // Outputs: true when the handler returned false, which stops the stream.
 fn _deliver(handler, line) {
     let answer = handler(__sys.lossy(line))
-    if answer is bool {
+    if (answer is bool) {
         return not answer
     }
     return false

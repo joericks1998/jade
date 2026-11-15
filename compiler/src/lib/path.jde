@@ -21,10 +21,10 @@ use std::__sys
 fn join(a, b) {
     let head = _text(a)
     let tail = _text(b)
-    if tail.starts_with("/") {
+    if (tail.starts_with("/")) {
         return head.slice(0, 0) + tail
     }
-    if head == "" or head.ends_with("/") {
+    if (head == "" or head.ends_with("/")) {
         return head + tail
     }
     return head + "/" + tail
@@ -40,11 +40,11 @@ fn basename(p) {
 // or "." when nothing is.
 fn dirname(p) {
     let s = _trim(_text(p))
-    if s == "" or s == "/" {
+    if (s == "" or s == "/") {
         return "."
     }
     let parent = _trim(s.slice(0, s.last_index_of("/") + 1))
-    if parent == "" {
+    if (parent == "") {
         return "."
     }
     return parent
@@ -56,7 +56,7 @@ fn dirname(p) {
 fn ext(p) {
     let name = _name(_text(p))
     let dot = name.last_index_of(".")
-    if dot <= 0 {
+    if (dot <= 0) {
         return nil
     }
     return name.slice(dot, len(name))
@@ -66,7 +66,7 @@ fn ext(p) {
 fn stem(p) {
     let name = _name(_text(p))
     let dot = name.last_index_of(".")
-    if dot <= 0 {
+    if (dot <= 0) {
         return name
     }
     return name.slice(0, dot)
@@ -77,19 +77,19 @@ fn stem(p) {
 // `..`. An empty path stays empty.
 fn abs(p) {
     let s = _text(p)
-    if s == "" {
+    if (s == "") {
         return s
     }
     let out = s.slice(0, 0)
-    if not s.starts_with("/") {
+    if (not s.starts_with("/")) {
         out = out + __sys.cwd()
     }
     for part in s.split("/") {
-        if part != "" and part != "." {
+        if (part != "" and part != ".") {
             out = out + "/" + part
         }
     }
-    if out == "" or s.ends_with("/") {
+    if (out == "" or s.ends_with("/")) {
         out = out + "/"
     }
     return out
@@ -104,9 +104,9 @@ fn is_abs(p) {
 // is read as one, as it always was; a nil raises, and anything else is a
 // type error.
 fn _text(p) {
-    if p is str {
+    if (p is str) {
         return p
-    } elif p is nil {
+    } elif (p is nil) {
         // A `str?` that holds nil here. The raise leaves; the return after it
         // gives the branch a str's type, as the others have.
         raise "a path is nil; check a value that may be nil with 'if p != nil' before using it as a path"
@@ -119,7 +119,7 @@ fn _text(p) {
 // Purpose: This function drops a path's trailing slashes and trailing `.`
 // components, keeping a lone leading slash and a leading `.`.
 fn _trim(s) {
-    while len(s) > 1 and (s.ends_with("/") or s.ends_with("/.")) {
+    while (len(s) > 1 and (s.ends_with("/") or s.ends_with("/."))) {
         s = s.slice(0, len(s) - 1)
     }
     return s
@@ -130,7 +130,7 @@ fn _trim(s) {
 fn _name(p) {
     let s = _trim(p)
     let name = s.slice(s.last_index_of("/") + 1, len(s))
-    if name == "" or name == "." or name == ".." {
+    if (name == "" or name == "." or name == "..") {
         return ""
     }
     return name

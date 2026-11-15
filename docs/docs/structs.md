@@ -394,5 +394,5 @@ Struct instances are shared by reference. Assigning one to a new variable does n
 :::
 
 :::note
-Struct literals are not allowed inside an `if` or `while` condition. The parser sets `struct_literal_allowed = false` while reading a condition, so `while running { … }` does not get read as a struct literal named `running`.
+A struct literal is allowed inside the parentheses of an `if`, `elif` or `while` condition, as in `if (p == Point { x: 1 }) {`, since the block's `{` comes after the `)`. A `for` loop's iterable has no parentheses, so a struct literal is not allowed there: the parser sets `struct_literal_allowed = false` while reading it, so `for x in items { … }` does not get read as a struct literal named `items`.
 :::

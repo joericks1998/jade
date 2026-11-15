@@ -28,7 +28,7 @@ A cache written before format versioning existed has no `format_version` field. 
 
 ## Gotchas
 
-*Bump `CACHE_FORMAT_VERSION` whenever you change a serialized shape.* Adding a field to any type in the tree means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. When that test fails after your change, it is doing its job, not flaking. The constant's doc comment records what each past bump was for, so add a line when you bump it.
+*Bump `CACHE_FORMAT_VERSION` whenever you change a serialized shape.* Adding a field to any type in the tree means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. When that test fails after your change, it is doing its job, not flaking. The constant's doc comment records what each past bump was for, so add a line when you bump it. Bump it as well when the parser or the per-file pass starts refusing something it used to accept, even with no shape changed: a hit skips both, so a tree cached before the change would let the refused file through. 17 was that, in 2.0.4, and so was 21, when 2.0.10 required parentheses around a condition.
 
 *Do not use `std::env::set_var` in these tests.* `cargo test` is heavily parallel, so setting an environment variable races against every other thread calling `getenv`. That is a real data race, and it is why `set_var` is `unsafe` as of the 2024 edition. It made the cache tests fail intermittently for a while. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard, so cleanup survives a failing assertion.
 

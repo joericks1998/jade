@@ -17,7 +17,7 @@ let TABLE = {
 
 fn host_of(name) {
     let entry = TABLE.get(name)
-    if entry == nil {
+    if (entry == nil) {
         return "none"
     }
     return entry["host"]

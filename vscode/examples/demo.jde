@@ -45,7 +45,7 @@ rex.learn("sit")
 print(rex.speak())
 
 // A class test, a class view, and a copy with one field changed
-if rex is Dog and not (rex.legs == 2) {
+if (rex is Dog and not (rex.legs == 2)) {
     let pet = Animal(rex)
     print(pet.name)
 }
@@ -65,16 +65,16 @@ fn scale(x, by = 2, offset = math.floor(0.5)) {
 
 fn count_to(limit) {
     let i = 0
-    while i < limit {
+    while (i < limit) {
         i = i + 1
-        if i % 2 == 0 { continue }
+        if (i % 2 == 0) { continue }
         yield i
     }
 }
 
 let big = 5 |> scale(by = 10)
 for odd in count_to(9) {
-    if odd > 7 { break }
+    if (odd > 7) { break }
     print(odd)
 }
 

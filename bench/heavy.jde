@@ -1,19 +1,19 @@
 fn factorial(n) {
-    if n <= 1 {
+    if (n <= 1) {
         return 1
     }
     return n * factorial(n - 1)
 }
 
 fn fib(n) {
-    if n <= 1 {
+    if (n <= 1) {
         return n
     }
     return fib(n - 1) + fib(n - 2)
 }
 
 fn sum_to(n) {
-    if n <= 0 {
+    if (n <= 0) {
         return 0
     }
     return n + sum_to(n - 1)

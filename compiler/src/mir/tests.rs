@@ -47,7 +47,7 @@ fn main_is_function_zero_and_globals_are_named() {
 #[test]
 fn a_narrowed_read_unwraps_the_optional() {
     let t = text(
-        "fn f(n) {\n    let x = nil\n    if n > 0 { x = n }\n    if x != nil { print(x + 1) }\n}\nf(2)\n",
+        "fn f(n) {\n    let x = nil\n    if (n > 0) { x = n }\n    if (x != nil) { print(x + 1) }\n}\nf(2)\n",
     );
     assert!(t.contains("isnil"), "the nil test: {t}");
     assert!(t.contains("unwrap"), "the narrowed read: {t}");
@@ -81,7 +81,7 @@ fn writing_into_a_dict_is_a_dict_set() {
 
 #[test]
 fn a_function_that_can_fall_off_returns_nil() {
-    let t = text("fn f(n) {\n    if n > 0 { return n }\n}\nprint(f(1))\n");
+    let t = text("fn f(n) {\n    if (n > 0) { return n }\n}\nprint(f(1))\n");
     assert!(t.contains("return nil: int?"), "{t}");
 }
 

@@ -4,6 +4,37 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.10
+
+*A condition goes in parentheses.* The condition of an `if`, an `elif` or a `while` is one parenthesized expression, followed by the block's `{`. This is a breaking change: a program written for 2.0.9 with a bare condition no longer compiles, and `jade fmt` adds the parentheses for it.
+
+```jade
+if (x > 0) {
+    print("positive")
+} elif (x == 0) {
+    print("zero")
+} else {
+    print("negative")
+}
+
+while (count < 3) {
+    count = count + 1
+}
+```
+
+- *A bare condition is a compile error, at the condition.* `if x > 0 {` says `syntax error: an if condition goes in parentheses: write 'if (x > 0) {', or run 'jade fmt' to add them`, and a bare `elif` or `while` names its own keyword, with `elif (x == 0) {` or `while (running) {` as the fix.
+- *The parentheses wrap the whole condition.* `if (a) and (b) {` is refused the same way, since its first pair closes before the condition does; write `if ((a) and (b)) {` or `if (a and b) {`.
+- *`else` and `for x in xs` do not change.* Neither has a condition.
+- *A class literal works inside the parentheses,* as in `if (p == Point { x: 1 }) {`, since the block's `{` comes after the `)`. A bare condition could not hold one.
+- *To migrate, run `jade fmt` over the project,* such as `jade fmt .`. It puts each bare condition in parentheses, around the whole condition, and changes nothing else on the line; strings and comments are never touched. A condition already in one pair of parentheses is left alone, so a program that compiles comes back unchanged, and `jade fmt --check` reports a file with a bare condition as one it would reformat.
+- *Every example, the std library's Jade source, the inference prelude, the benchmarks and the docs use the new form,* and every example prints what it printed before. `control_flow/conditions` shows the forms, and four fixtures beside it pin the refusals.
+- *The AST cache's format version is 21,* so a tree cached by a build from before the rule, which would skip the parser, is never read.
+- *The VS Code extension, 1.1.5, strikes a bare condition's keyword through in red,* as it does other removed syntax.
+
+## vscode v1.1.5
+
+*A condition outside parentheses is struck through.* Compiler 2.0.10 requires an `if`, `elif` or `while` condition in parentheses, so the grammar marks the keyword of a bare one, such as the `if` of `if x > 0 {`, as removed syntax, struck through in red like `struct`. A keyword that ends its line is left alone, since its condition may start on the next. `if (a) and (b) {`, whose parentheses wrap only part of the condition, is not marked, since a TextMate rule cannot count parentheses; the compiler refuses it.
+
 ## v2.0.9
 
 *The std library is compiled once per machine, not once per build.* A build compiles each std library function a program uses, at each set of argument types, in a module of its own, keeps the object file under `~/.jade/lib/<version>/<target>/`, and links it with LLD; any later build of any program that needs the same function at the same types links that file instead of compiling it again. Part 4 of `design/v2-simplify.md` has the plan. Programs print what they printed, and run as fast.

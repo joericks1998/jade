@@ -8,4 +8,4 @@ abi = "source"
 
 [package.artifacts.any]
 file = "geometry.jde"
-sha256 = "dabaaebac213e2dd5211b80d70bbc1d48cc495d3ef71af7e16c74148a29a314a"
+sha256 = "0821836daf6dd72880de9dac387394730d471927daeeaf2a8dce92b886452bd1"

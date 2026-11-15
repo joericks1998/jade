@@ -1,0 +1,13 @@
+// The parentheses have to wrap the whole condition.
+//
+// `if (a) and (b) {` starts with a parenthesis, but the group closes before
+// `and`, so the condition is not one parenthesized expression. It is refused
+// like a bare condition; `if ((a) and (b)) {` or `if (a and b) {` is right.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let a = true
+let b = false
+if (a) and (b) {
+    print("both")
+}

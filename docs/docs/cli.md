@@ -130,14 +130,20 @@ jade fmt src/ --check
 
 ### What it changes
 
-It changes indentation and trailing whitespace, and nothing else. Blocks get four spaces. Three or more blank lines in a row collapse to two, and the file ends with exactly one newline. Operator spacing, line length, and where you break a long expression stay as you wrote them.
+It changes indentation and trailing whitespace, and puts a bare condition in parentheses; nothing else. Blocks get four spaces. Three or more blank lines in a row collapse to two, and the file ends with exactly one newline. Operator spacing, line length, and where you break a long expression stay as you wrote them.
 
 Two kinds of line keep the exact whitespace they came with:
 
 - *Inside a triple-quoted string.* That indentation is part of the text, so changing it would change what your program prints.
 - *A wrapped expression*, meaning the continuation lines of an argument list, an array, or a struct literal. The position of a `{` decides which case you are in. A `{` that ends the line opens a block, so `let cfg = {` indents what follows. A `{` with more on the same line, such as `Result { name: name,`, leaves your alignment alone.
 
-Formatting only moves whitespace, so the result must lex to the same tokens as the original. `jade fmt` checks that before writing, and leaves the file alone if the tokens differ. A file that does not lex at all is skipped without a report, so running the formatter mid-edit is safe.
+Since Jade 2.0.10 an `if`, `elif` or `while` condition goes in parentheses, and `jade fmt` adds them where a file has none: `if x > 0 {` becomes `if (x > 0) {`, and `if (a) and (b) {`, whose parentheses wrap only part of the condition, becomes `if ((a) and (b)) {`. Nothing else on the line moves, and strings and comments are never touched. A condition already in one pair of parentheses is left alone, so a program that compiles comes back unchanged. To move a project written for an older Jade to the new form, run it once over the project:
+
+```bash
+jade fmt .
+```
+
+Apart from those parentheses, formatting only moves whitespace, so the result must lex to the same tokens as the original. `jade fmt` checks that before writing, and leaves the file alone if the tokens differ. A file that does not lex at all is skipped without a report, so running the formatter mid-edit is safe.
 
 ## `jade register` / `jade use`
 

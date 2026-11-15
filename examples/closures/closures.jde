@@ -22,7 +22,7 @@ print(5 |> scale(multiplier))
 
 // A block body is an ordinary function body.
 fn abs_val(x) {
-    if x < 0 {
+    if (x < 0) {
         return -x
     }
     return x

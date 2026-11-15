@@ -28,7 +28,7 @@ try {
 }
 
 // null in a dict of strings is the text "null", which the program checks for.
-if city["mayor"] == "null" {
+if (city["mayor"] == "null") {
     print("no mayor on file")
 }
 

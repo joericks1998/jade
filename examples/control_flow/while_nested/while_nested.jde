@@ -3,9 +3,9 @@
 // 3x3 grid: count total iterations
 let total = 0
 let i = 0
-while i < 3 {
+while (i < 3) {
     let j = 0
-    while j < 3 {
+    while (j < 3) {
         total = total + 1
         j = j + 1
     }
@@ -24,10 +24,10 @@ let dp = dot3(1, 2, 3, 4, 5, 6)   // 4 + 10 + 18 = 32
 // Outer loop accumulates inner loop results
 let outer_sum = 0
 let a = 1
-while a <= 3 {
+while (a <= 3) {
     let inner_sum = 0
     let b = 1
-    while b <= a {
+    while (b <= a) {
         inner_sum = inner_sum + b
         b = b + 1
     }
@@ -43,7 +43,7 @@ while a <= 3 {
 fn mul_by_add(x, y) {
     let result = 0
     let i = 0
-    while i < y {
+    while (i < y) {
         result = result + x
         i = i + 1
     }

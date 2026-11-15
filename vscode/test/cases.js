@@ -6,15 +6,15 @@ module.exports = [
   ['let x = 1 // note', [['// note', 'comment.line.double-slash.jade']]],
 
   // Keywords
-  ['if a { } elif b { } else { }', [['if', 'keyword.control.jade'], ['elif', 'keyword.control.jade'], ['else', 'keyword.control.jade']]],
-  ['while a { break }', [['while', 'keyword.control.jade'], ['break', 'keyword.control.jade']]],
+  ['if (a) { } elif (b) { } else { }', [['if', 'keyword.control.jade'], ['elif', 'keyword.control.jade'], ['else', 'keyword.control.jade']]],
+  ['while (a) { break }', [['while', 'keyword.control.jade'], ['break', 'keyword.control.jade']]],
   ['for x in xs { continue }', [['for', 'keyword.control.jade'], ['in', 'keyword.control.jade'], ['continue', 'keyword.control.jade']]],
   ['yield x', [['yield', 'keyword.control.jade']]],
   ['return x', [['return', 'keyword.control.jade']]],
   ['raise ValueError { message: "x" }', [['raise', 'keyword.control.jade'], ['ValueError', 'entity.name.type.jade']]],
   ['let v = await f', [['let', 'keyword.declaration.jade'], ['await', 'keyword.control.jade']]],
-  ['if a and b or not c { }', [['and', 'keyword.operator.word.jade'], ['or', 'keyword.operator.word.jade'], ['not', 'keyword.operator.word.jade']]],
-  ['if x not in xs { }', [['not', 'keyword.operator.word.jade'], ['in', 'keyword.control.jade']]],
+  ['if (a and b or not c) { }', [['and', 'keyword.operator.word.jade'], ['or', 'keyword.operator.word.jade'], ['not', 'keyword.operator.word.jade']]],
+  ['if (x not in xs) { }', [['not', 'keyword.operator.word.jade'], ['in', 'keyword.control.jade']]],
   ['let v = self.name', [['self', 'keyword.other.jade']]],
 
   // Removed in 2.0.1: still words the lexer knows, refused by the parser
@@ -22,6 +22,19 @@ module.exports = [
   ['extend Point { }', [['extend', 'invalid.deprecated.removed.jade']]],
   ['interface Shape { }', [['interface', 'invalid.deprecated.removed.jade']]],
   ['let f = |x| x * 2', [['x', '!variable.parameter']]],
+
+  // Removed in 2.0.10: a condition outside parentheses. Only the keyword is
+  // marked; one that ends its line is left alone, as its condition may follow.
+  ['if x > 0 { }', [['if', 'invalid.deprecated.removed.jade'], ['if', '!keyword.control']]],
+  ['} elif x == 0 {', [['elif', 'invalid.deprecated.removed.jade']]],
+  ['while running {', [['while', 'invalid.deprecated.removed.jade']]],
+  ['if (x > 0) { } elif (x == 0) { }', [['if', 'keyword.control.jade'], ['if', '!invalid'], ['elif', '!invalid']]],
+  ['while (running) {', [['while', 'keyword.control.jade'], ['while', '!invalid']]],
+  ['if  (x) {', [['if', '!invalid']]],
+  ['if(x) {', [['if', 'keyword.control.jade']]],
+  ['if\n    (x) {', [['if', '!invalid']]],
+  ['if (p == Point { x: 1 }) {', [['if', '!invalid'], ['Point', 'entity.name.type.jade']]],
+  ['for x in xs {', [['for', 'keyword.control.jade'], ['for', '!invalid']]],
 
   // Constants and numbers
   ['let t = true', [['true', 'constant.language.boolean.jade']]],
@@ -63,7 +76,7 @@ module.exports = [
   ['wait(f)', [['wait', 'support.function.builtin.jade']]],
   ['route(x)', [['route', 'support.function.builtin.jade']]],
   ['let r = join(f1, f2, settle = true)', [['join', 'support.function.builtin.jade']]],
-  ['if cancelled() { }', [['cancelled', 'support.function.builtin.jade']]],
+  ['if (cancelled()) { }', [['cancelled', 'support.function.builtin.jade']]],
   ['set_max_tasks(max_tasks() * 2)', [['set_max_tasks', 'support.function.builtin.jade'], ['max_tasks', 'support.function.builtin.jade']]],
   ['set_max_tokens(max_tokens())', [['set_max_tokens', 'support.function.builtin.jade'], ['max_tokens', 'support.function.builtin.jade']]],
   ['let g = Grammar.new("[0-9]+")', [['Grammar', 'support.class.builtin.jade']]],
@@ -88,10 +101,10 @@ module.exports = [
   ['let a = shapes.Account::new("x")', [['Account', 'entity.name.type.jade']]],
   ['    return Animal::speak()', [['Animal', 'entity.name.type.jade'], ['speak', 'entity.name.function.call.jade']]],
   ['let a = Animal(d)', [['Animal', 'entity.name.type.jade']]],
-  ['if pet is Dog { }', [['is', 'keyword.operator.word.jade'], ['Dog', 'entity.name.type.jade']]],
-  ['if pet is shapes.Dog { }', [['Dog', 'entity.name.type.jade']]],
+  ['if (pet is Dog) { }', [['is', 'keyword.operator.word.jade'], ['Dog', 'entity.name.type.jade']]],
+  ['if (pet is shapes.Dog) { }', [['Dog', 'entity.name.type.jade']]],
   // The std library's code tests a value's type, `x is nil` included.
-  ['if p is nil { }', [['is', 'keyword.operator.word.jade'], ['nil', 'constant.language.null.jade']]],
+  ['if (p is nil) { }', [['is', 'keyword.operator.word.jade'], ['nil', 'constant.language.null.jade']]],
   ['let p = Point { x: 1, y: 2 }', [['Point', 'entity.name.type.jade']]],
   ['let p = shapes.Point { x: 1 }', [['Point', 'entity.name.type.jade']]],
   ['let q = Config { ...c, port: 9090 }', [['...', 'keyword.operator.spread.jade']]],

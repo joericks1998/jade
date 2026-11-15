@@ -55,7 +55,7 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 Since 2.0.8 every std package but the value types' own is Jade source, `src/lib/`, that the import pass adds to a program that uses it, so its functions lower like the program's own. Three things are particular to them.
 
-- *A built-in type test folds.* Library code may write `if x is int`, which the checker answers for each instance it checks. `Fx::static_answer` reads the type the checker recorded for `x` there, narrowing included, and lowers only the branch the checker checked; an `is` used as a value becomes a constant. A test on a `T?` is asked while the program runs, as a nil test, and the branch reads the value as a `T`.
+- *A built-in type test folds.* Library code may write `if (x is int)`, which the checker answers for each instance it checks. `Fx::static_answer` reads the type the checker recorded for `x` there, narrowing included, and lowers only the branch the checker checked; an `is` used as a value becomes a constant. A test on a `T?` is asked while the program runs, as a nil test, and the branch reads the value as a `T`.
 - *A library function does not count against the recursion limit.* `Func::library` says so, and the backend skips the count, as it never counted a built-in, so a one-instruction function such as `math.sqrt` inlines to that instruction.
 - *Hooks are `Op::Sys`*, as above. Only the four that refuse tainted text raise, `read_text`, `read_file`, `shell` and `spawn`, so only they are followed by an error check; every other failure is left in the thread's error slot for library code to raise.
 

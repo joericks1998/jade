@@ -48,7 +48,7 @@ print(matrix[1][0])   // 3
 fn sum(arr, n) {
     let i = 0
     let total = 0
-    while i < n {
+    while (i < n) {
         total = total + arr[i]
         i = i + 1
     }

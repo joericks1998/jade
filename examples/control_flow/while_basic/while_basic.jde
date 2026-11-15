@@ -1,20 +1,20 @@
 // Basic while loop: count up to a limit
 let i = 0
-while i < 5 {
+while (i < 5) {
     i = i + 1
 }
 // i == 5
 
 // Count down
 let countdown = 10
-while countdown > 0 {
+while (countdown > 0) {
     countdown = countdown - 2
 }
 // countdown == 0
 
 // Condition false from the start — body never executes
 let never = 99
-while never < 0 {
+while (never < 0) {
     never = never + 1
 }
 // never == 99
@@ -22,9 +22,9 @@ while never < 0 {
 // Boolean flag loop
 let flag = true
 let steps = 0
-while flag {
+while (flag) {
     steps = steps + 1
-    if steps == 3 {
+    if (steps == 3) {
         flag = false
     }
 }

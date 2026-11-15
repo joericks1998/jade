@@ -113,7 +113,7 @@ Calls nest freely. `square(2)` gives `4`, `square(3)` gives `9`, and `add(4, 9)`
 
 ```jade
 fn factorial(n) {
-    if n == 0 {
+    if (n == 0) {
         return 1
     }
     return n * factorial(n - 1)
@@ -151,7 +151,7 @@ Assigning `double` to `f` lets you call `f(5)`. `apply` takes a function as its 
 
 ```jade
 fn fib(n) {
-    if n <= 1 {
+    if (n <= 1) {
         return n
     }
     return fib(n - 1) + fib(n - 2)
@@ -287,7 +287,7 @@ print(add(5, 10))   // 15
 
 ```jade
 let abs_val = |x| {
-    if x < 0 {
+    if (x < 0) {
         return -x
     }
     return x
@@ -319,7 +319,7 @@ A function whose body contains `yield` returns a *stream* instead of a single va
 ```jade
 fn doubles(n) {
     let i = 0
-    while i < n {
+    while (i < n) {
         yield i * 2
         i = i + 1
     }
@@ -359,8 +359,8 @@ A bare `return` stops a generator early. It carries no value.
 ```jade
 fn upto(limit) {
     let i = 0
-    while true {
-        if i >= limit {
+    while (true) {
+        if (i >= limit) {
             return
         }
         yield i

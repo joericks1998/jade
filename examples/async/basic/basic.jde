@@ -79,7 +79,7 @@ class TaskError {
 }
 
 async fn risky(n) {
-    if n < 0 {
+    if (n < 0) {
         raise TaskError { message: "negative input" }
     }
     return n * 10

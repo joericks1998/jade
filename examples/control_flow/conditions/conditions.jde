@@ -1,0 +1,66 @@
+// Conditions go in parentheses, since 2.0.10.
+//
+// `if`, `elif` and `while` each take one parenthesized expression, then the
+// block's `{`. `else` has no condition and `for x in xs` has none either, so
+// neither takes parentheses. The `*_error.jde` files beside this one pin the
+// refusals: a bare `if`, `elif` and `while`, and parentheses that wrap only
+// part of a condition.
+
+class Point {
+    @public x
+    @public y
+}
+
+fn sign(n) {
+    if (n > 0) {
+        return "positive"
+    } elif (n == 0) {
+        return "zero"
+    } else {
+        return "negative"
+    }
+}
+
+print(sign(5))
+print(sign(0))
+print(sign(-2))
+
+// A condition can hold parentheses of its own.
+let a = 3
+let b = 4
+if ((a < b) and (b < 10)) {
+    print("both")
+}
+if (not (a > b)) {
+    print("not greater")
+}
+
+// A loop condition.
+let count = 0
+while (count < 3) {
+    count = count + 1
+}
+print(count)
+
+let steps = 0
+while (true) {
+    steps = steps + 1
+    if (steps == 2) {
+        break
+    }
+}
+print(steps)
+
+// Inside the parentheses a class literal is fine: its `{` cannot be read as
+// the start of the block, because the block's `{` comes after the `)`.
+fn norm(p) {
+    return p.x * p.x + p.y * p.y
+}
+if (norm(Point { x: 3, y: 4 }) == 25) {
+    print("five")
+}
+
+// `for` has no condition, so it takes no parentheses.
+for n in [1, 2] {
+    print(n)
+}

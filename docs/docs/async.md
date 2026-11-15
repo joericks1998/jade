@@ -302,7 +302,7 @@ An exception raised inside an async function travels out through `await`, and or
 struct TaskError { message }
 
 async fn risky(n) {
-    if n < 0 {
+    if (n < 0) {
         raise TaskError { message: "negative input" }
     }
     return n * 10

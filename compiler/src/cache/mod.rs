@@ -50,7 +50,11 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     `ast.bin`; `Expr` became a node of `kind` and `span`, with the typed
 ///     tree's expression shapes and a parser-only `RawPipe`. `tir.bin` is no
 ///     longer read or written.
-pub const CACHE_FORMAT_VERSION: u32 = 20;
+/// v21: no shape changed, but what the parser accepts did (2.0.10): an `if`,
+///     `elif` or `while` condition must be in parentheses. A v20 tree holds
+///     bare conditions parsed, and a hit skips the parser, so it would let a
+///     file the parser now refuses through.
+pub const CACHE_FORMAT_VERSION: u32 = 21;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

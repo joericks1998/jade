@@ -32,7 +32,7 @@ let f = slow(21)
 // about how many passes it gets is printed, because that is the machine's
 // business and not the language's.
 let passes = 0
-while !f.ready() {
+while (!f.ready()) {
     passes = passes + 1
 }
 
@@ -68,7 +68,7 @@ async fn breaks() {
 }
 
 let bad = breaks()
-while !bad.ready() {
+while (!bad.ready()) {
     passes = passes + 1
 }
 print(bad.ready())
@@ -84,7 +84,7 @@ try {
 // Futures kept in a collection answer the same way.
 
 let pending = [slow(1), slow(2)]
-while !(pending[0].ready() && pending[1].ready()) {
+while (!(pending[0].ready() && pending[1].ready())) {
     passes = passes + 1
 }
 print(join(pending[0], pending[1]))

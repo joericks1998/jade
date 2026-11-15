@@ -128,20 +128,22 @@ fn an_optional_must_be_checked_before_use() {
 
 #[test]
 fn checking_against_nil_narrows() {
-    ok("use std::env\nlet p = env.get(\"PORT\")\nif p != nil {\n    print(p.len())\n}\n");
-    ok("use std::env\nlet p = env.get(\"PORT\")\nif p != nil && p.len() > 0 {\n    print(p)\n}\n");
+    ok("use std::env\nlet p = env.get(\"PORT\")\nif (p != nil) {\n    print(p.len())\n}\n");
+    ok(
+        "use std::env\nlet p = env.get(\"PORT\")\nif (p != nil && p.len() > 0) {\n    print(p)\n}\n",
+    );
 }
 
 #[test]
 fn falling_off_the_end_returns_nil() {
-    let t = ok("fn maybe(x) {\n    if x > 0 {\n        return x\n    }\n}\nlet m = maybe(3)\n");
+    let t = ok("fn maybe(x) {\n    if (x > 0) {\n        return x\n    }\n}\nlet m = maybe(3)\n");
     assert_eq!(global(&t, "m"), Ty::Opt(Box::new(Ty::Int)));
 }
 
 #[test]
 fn returning_two_kinds_is_an_error() {
     rejects(
-        "fn pick(x) {\n    if x {\n        return \"s\"\n    }\n    return 1\n}\nprint(pick(true))\n",
+        "fn pick(x) {\n    if (x) {\n        return \"s\"\n    }\n    return 1\n}\nprint(pick(true))\n",
         "do not mix",
     );
 }
@@ -194,7 +196,7 @@ fn a_struct_field_is_typed_by_every_literal() {
 #[test]
 fn recursion_settles() {
     let t = ok(
-        "fn fact(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nlet f = fact(5)\n",
+        "fn fact(n) {\n    if (n <= 1) {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nlet f = fact(5)\n",
     );
     assert_eq!(global(&t, "f"), Ty::Int);
 }
@@ -328,7 +330,7 @@ fn to_dict_values_are_strings_unless_use_settles_them() {
     let t = ok("let d = toDict(\"{}\")\nprint(d[\"a\"].keys())\nprint(len(d[\"b\"]))\n");
     assert_eq!(global(&t, "d"), map(map(Ty::Str)));
     // Comparing with a bool settles them as bools.
-    let t = ok("let d = toDict(\"{}\")\nif d[\"on\"] == true {\n    print(1)\n}\n");
+    let t = ok("let d = toDict(\"{}\")\nif (d[\"on\"] == true) {\n    print(1)\n}\n");
     assert_eq!(global(&t, "d"), map(Ty::Bool));
     // Passed as a value, toDict reads a dict of strings.
     let t = ok("let ds = [\"{}\"].map(toDict)\n");
@@ -384,7 +386,7 @@ fn sized_numbers_follow_the_assembly_rules() {
     assert_eq!(global(&t, "big"), Ty::Bool);
     // A literal that meets a byte later, through a return, takes its type.
     ok(
-        "fn pick(c, x) {\n    if c {\n        return 0\n    }\n    return x\n}\nprint(pick(true, byte(3)))\n",
+        "fn pick(c, x) {\n    if (c) {\n        return 0\n    }\n    return x\n}\nprint(pick(true, byte(3)))\n",
     );
     rejects(
         "@short\nlet s = 1\nlet n = 2\nprint(s + n)\n",
@@ -409,7 +411,7 @@ fn sized_numbers_follow_the_assembly_rules() {
 #[test]
 fn the_v1_soundness_holes_are_closed() {
     // An assignment in one branch.
-    rejects("let x = \"s\"\nif true {\n    x = 1\n}\nprint(x)\n", "do not mix");
+    rejects("let x = \"s\"\nif (true) {\n    x = 1\n}\nprint(x)\n", "do not mix");
     // A push of another kind.
     rejects("let a = [1]\na.push(\"s\")\n", "do not mix");
 }
@@ -422,7 +424,7 @@ fn an_array_cannot_contain_itself() {
 #[test]
 fn an_early_exit_on_nil_narrows_the_rest_of_the_block() {
     ok(
-        "use std::env\nfn port() {\n    let p = env.get(\"PORT\")\n    if p == nil {\n        return \"none\"\n    }\n    return p\n}\nprint(port())\n",
+        "use std::env\nfn port() {\n    let p = env.get(\"PORT\")\n    if (p == nil) {\n        return \"none\"\n    }\n    return p\n}\nprint(port())\n",
     );
 }
 
@@ -614,7 +616,7 @@ fn a_parent_call_runs_the_parents_version() {
 fn is_narrows_to_the_class_it_tests() {
     ok(&format!(
         "{ANIMALS}let xs = [Dog {{ name: \"r\", breed: \"x\" }}, Cat {{ name: \"t\" }}]\n\
-         for x in xs {{\n    if x is Dog {{\n        print(x.breed)\n    }}\n}}\n"
+         for x in xs {{\n    if (x is Dog) {{\n        print(x.breed)\n    }}\n}}\n"
     ));
     refused(
         &format!("{ANIMALS}let d = Dog {{ name: \"r\", breed: \"x\" }}\nprint(d is Cat)\n"),

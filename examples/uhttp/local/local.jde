@@ -158,7 +158,7 @@ fn stop_at_two(line) {
 
 fn give_up_at_two(line) {
     print(f"got [{line}]")
-    if line == "two" {
+    if (line == "two") {
         raise "the handler gave up"
     }
 }

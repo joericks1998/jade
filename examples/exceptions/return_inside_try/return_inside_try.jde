@@ -56,7 +56,7 @@ fn leak(i) {
 
 try {
     let i = 0
-    while i < 200 {
+    while (i < 200) {
         leak(i)
         i = i + 1
     }

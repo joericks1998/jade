@@ -126,7 +126,7 @@ print(n + 1)          // 8
 ```jade
 prompt p = "Is 5 greater than 3? Respond with only: true or false"
 let result = toBool(?p)
-if result {
+if (result) {
     print("correct!")
 }
 ```

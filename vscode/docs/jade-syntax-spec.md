@@ -90,5 +90,8 @@ The lexer still reads these, so the compiler can name what replaced them. The gr
 | `use "file.jde"`, `from "file.jde" use …` | `use name`, `use sub::name` |
 | `use x as y` | an import binds its last path segment |
 | closures, `\|x\| x * 2` | a named function; the grammar no longer colors their parameters |
+| a bare condition, `if x > 0 {`, `} elif x == 0 {`, `while running {`, since 2.0.10 | the condition in parentheses, `if (x > 0) {`; `jade fmt` adds them |
+
+A bare condition is marked on its keyword, which is struck through when anything but `(` follows it on its line. A keyword that ends its line is left alone, since its condition may start on the next. `if (a) and (b) {`, whose parentheses wrap only part of the condition, is not marked: telling it apart from `if (a and b) {` takes counting parentheses, which a TextMate rule cannot do, and the compiler refuses it with the same message.
 
 Binary literals such as `0b1010` were never in the lexer and are not colored as numbers.

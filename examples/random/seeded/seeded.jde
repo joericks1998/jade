@@ -13,7 +13,7 @@ class Card {
 random.seed(42)
 let ints = []
 let i = 0
-while i < 12 {
+while (i < 12) {
     ints.push(random.int(1, 100))
     i = i + 1
 }
@@ -31,7 +31,7 @@ print(random.int(1, 6148914691236517206))
 
 let floats = []
 i = 0
-while i < 6 {
+while (i < 6) {
     floats.push(random.float())
     i = i + 1
 }

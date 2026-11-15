@@ -54,7 +54,7 @@ print(~b)
 print([b, 1, 2])
 
 fn pick(c, x) {
-    if c {
+    if (c) {
         return 0
     }
     return x
