@@ -1,0 +1,8 @@
+# A dependency that does not say what kind of package it is. There is no default
+# to fall back on, so checking any program here names the two kinds; see
+# missing_abi_error.jde.
+[project]
+name = "missing-abi-example"
+
+[dependencies.geo]
+path = "geo"

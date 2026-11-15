@@ -1,0 +1,8 @@
+# A manifest from before 2.0.4, binding a C library directly. Reading it stops on
+# the abi line, naming what replaced it; see c_abi_error.jde.
+[project]
+name = "removed-abi-example"
+
+[dependencies.zlib]
+path = "vendor/libz.so"
+abi = "c"

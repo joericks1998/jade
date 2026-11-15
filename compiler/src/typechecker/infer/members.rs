@@ -373,8 +373,9 @@ impl<'a> Pass<'a> {
             }
             let owner = self.field_owner(class, name);
             if self.is_public(&owner, name) {
-                // A public field's absence is the per-file pass's to report.
-                continue;
+                // The per-file pass reports this for a class its file defines;
+                // a class from elsewhere, such as a Rust struct's, arrives here.
+                return Err(JadeError::MissingField { field: name.clone(), span });
             }
             if !sees(&owner) {
                 return Err(type_error(

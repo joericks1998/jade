@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
 #
-# Bind a real C library and run it.
+# Build a real Rust package and run it.
 #
 # The FFI is the one part of the toolchain whose correctness depends on code we
-# do not write: someone else's header, someone else's macros, and a C compiler's
-# opinion of the shim we generate from them. Unit tests cover the shapes we
-# thought of. This covers the ones we did not.
+# do not write: someone else's crate, someone else's C library, and cargo's and
+# rustc's opinion of the bridge #[jade::export] generates. Unit tests and the
+# examples cover the shapes we thought of. This covers what an ordinary package
+# from crates.io brings with it.
 #
 # Two gates, and they catch different classes:
 #
-#   1. The end-to-end run. glib is the library because it is big and ordinary:
-#      1890 exported symbols written the way real libraries are written. Binding
-#      it turned up two bugs the seven-library survey never did — a callback
-#      parameter checked against the typedef's name instead of its category, and
-#      a function-like macro shadowing the symbol we bound. Each one refused the
-#      whole dependency, so glib bound 1357 symbols and could not be used at all.
+#   1. The end-to-end run. ffi-gate/ is a Rust package wrapping `regex`, a large
+#      crate from crates.io, and the machine's own zlib through `libz-sys`, which
+#      links it from the system rather than carrying it. So the run covers cargo
+#      fetching and building a dependency graph we did not write, a staticlib
+#      that imports a system library, and the link that finds it: Apple's SDK on
+#      macOS, a shared object beside the C library on Linux.
 #
-#   2. The long run. Step 1 calls each binding once, which proves the answer is
-#      right and nothing else. `alloc_str` is a claim about many calls — the
-#      shim copies the string out and hands the original to the library's free
-#      function, so a long run holds no more memory than a short one. One call
-#      cannot tell a correct release from a leak, and cannot tell either from a
-#      crash that only shows up under sustained churn. A user hit exactly that:
-#      SIGSEGV at roughly 300,000 iterations over `g_uri_escape_string`.
+#   2. The long run. Step 1 calls each function once, which proves the answer is
+#      right and nothing else. What a Rust function returns is Rust's memory, and
+#      the program frees it through the function's `__free` companion, so a long
+#      run should hold no more memory than a short one. One call cannot tell a
+#      correct release from a leak, and cannot tell either from a crash that only
+#      shows up under sustained churn.
 #
-# Until phase 6 of design/v2-static-values.md a third step compiled v1's C
-# runtime with glibc's fortify checks; that runtime is gone.
+# Until 2.0.4 this gate bound glib's C header whole through the C shim; Rust
+# packages replaced that path (design/v2-rust-packages.md).
 #
-# Both are skipped rather than failed when what they need is absent, so this
-# is safe to run anywhere. Skips are reported, never silent.
+# Both are skipped rather than failed when cargo is absent, so this is safe to
+# run anywhere. Skips are reported, never silent.
 #
 # Usage: compiler/src/scripts/ffi-gate.sh [path-to-jade-binary]
 
@@ -38,145 +38,71 @@ JADE="${1:-./target/debug/jade}"
 # Absolute, because every step below runs from a scratch directory.
 case "$JADE" in /*) ;; *) JADE="$PWD/${JADE#./}" ;; esac
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-FIXTURE="$ROOT/src/scripts/glib-fixture.jde"
-LOOP_FIXTURE="$ROOT/src/scripts/alloc-str-loop.jde"
+CRATE="$ROOT/src/scripts/ffi-gate"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 pass=0; skip=0; fail=0
 
-# ── 1. glib, bound and run ────────────────────────────────────
-#
-# pkg-config rather than a hard-coded path: the library sits in an
-# architecture-named directory on Linux and under the Homebrew prefix on macOS,
-# and neither is worth guessing.
-glib_lib=""; glib_hdr=""; incs=()
-# Set by step 1 once glib is installed, so step 2 can reuse the same project
-# rather than bind the header a second time. Binding glib is nearly all of this
-# script's runtime; doing it twice would roughly double it.
-loop_proj=""; loop_skip="glib not installed"
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glib-2.0 2>/dev/null; then
-  libdir="$(pkg-config --variable=libdir glib-2.0)"
-  for ext in so dylib; do
-    [ -e "$libdir/libglib-2.0.$ext" ] && glib_lib="$libdir/libglib-2.0.$ext" && break
-  done
-  glib_hdr="$(pkg-config --variable=includedir glib-2.0)/glib-2.0/glib.h"
-  for flag in $(pkg-config --cflags-only-I glib-2.0); do incs+=(--include "${flag#-I}"); done
-else
-  # Homebrew installs glib without necessarily installing pkg-config, and a
-  # developer's own machine is where this gate is most worth running.
-  for prefix in /opt/homebrew /usr/local; do
-    if [ -e "$prefix/lib/libglib-2.0.dylib" ] && [ -e "$prefix/include/glib-2.0/glib.h" ]; then
-      glib_lib="$prefix/lib/libglib-2.0.dylib"
-      glib_hdr="$prefix/include/glib-2.0/glib.h"
-      # glibconfig.h is generated per install and lives beside the library.
-      incs=(--include "$prefix/include/glib-2.0" --include "$prefix/lib/glib-2.0/include")
-      break
-    fi
-  done
-fi
+proj="$WORK/gate"
+loop_ready=0; loop_skip="cargo not installed"
 
-if [ -z "$glib_lib" ] || [ ! -e "$glib_hdr" ]; then
-  echo "  skip  glib bound and run                             (glib not installed)"
+# ── 1. A crates.io crate and a system library, built and run ──────────────────
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "  skip  Rust package built and run                     (cargo not installed)"
   skip=$((skip + 1))
 else
-  hdr="$glib_hdr"
-
-  proj="$WORK/glib"
   mkdir -p "$proj"
-  cp "$FIXTURE" "$proj/main.jde"
-  (
-    cd "$proj" || exit 1
-    "$JADE" init >/dev/null 2>&1
-    # The whole header, not a narrowed slice: a slice would bind only the
-    # shapes we already handle, which is the opposite of what this is for.
-    "$JADE" pkg add glib --path "$glib_lib" --header "$hdr" "${incs[@]}" > add.txt 2> add.err
-    status=$?
-    # A string the caller owns is the one shape a header cannot express:
-    # `g_basename` points into its argument and `g_strdup` mallocs, and both are
-    # written `gchar *`. So the generator refuses all 125 of them and names the
-    # spelling, and this is a user writing that spelling — by hand, in jade.toml,
-    # exactly as the message says to.
-    cat >> jade.toml <<'TOML'
+  cp "$CRATE/gate.jde" "$proj/main.jde"
+  cat > "$proj/jade.toml" <<TOML
+[project]
+name = "ffi-gate"
 
-[dependencies.glib.symbols.g_strdup]
-args = ["str"]
-ret = "alloc_str"
-frees_with = "g_free"
-
-[dependencies.glib.symbols.g_ascii_strup]
-args = ["str", "int"]
-ret = "alloc_str"
-frees_with = "g_free"
+[dependencies.gate]
+path = "$CRATE"
+abi = "rust"
 TOML
-    "$JADE" pkg install >> add.txt 2>> add.err || status=$?
-    echo $status > add.status
-  )
-  if [ "$(cat "$proj/add.status")" != 0 ]; then
-    echo "  FAIL  glib does not install:"
-    # The first line says what failed, and the C compiler's errors say why. A
-    # shim this size draws hundreds of warnings before its first error, so the
-    # first lines of stderr alone are warnings and never the cause.
-    { head -1 "$proj/add.err"; grep -m 10 ' error: ' "$proj/add.err"; } | sed 's/^/        /'
+  # Every run keeps its exit status, and that is not a detail. A process killed
+  # by a signal *after* it has printed everything leaves output that looks
+  # perfectly correct; the glib gate this replaced reported a SIGSEGV as `ok`
+  # for five releases that way. Each runs through an inner shell so the shell
+  # that waits on a signalled child does not print a line of its own.
+  bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
+  build_rc=$?
+  run_rc=0
+  if [ "$build_rc" -eq 0 ]; then
+    bash -c 'cd "$1" && ./app > run.txt 2>&1' _ "$proj" 2>/dev/null
+    run_rc=$?
+  fi
+  if [ "$build_rc" -ne 0 ]; then
+    echo "  FAIL  the Rust package would not build:"
+    tail -20 "$proj/build.txt" | sed 's/^/        /'
     fail=$((fail + 1))
-    loop_skip="glib does not install"
+    loop_skip="the package does not build"
+  elif [ "$run_rc" -ne 0 ] || ! diff -q "$proj/run.txt" "$CRATE/gate.expected" >/dev/null; then
+    echo "  FAIL  the program did not print what gate.expected records (exit $run_rc):"
+    diff "$proj/run.txt" "$CRATE/gate.expected" | head -10 | sed 's/^/        /'
+    fail=$((fail + 1))
+    loop_ready=1
   else
-    loop_proj="$proj"
-    bound="$(grep -m1 -oE '^[0-9]+ bound' "$proj/add.txt" || echo '? bound')"
-    # Every one of these keeps its exit status, and that is not a detail.
-    #
-    # A process killed by a signal *after* it has printed everything leaves an
-    # output file that looks perfectly correct. This step used to check only
-    # that the file was non-empty and free of the word "error", so a SIGSEGV was
-    # reported as `ok` from v1.3.19 until v1.3.24: the crash was visible in the
-    # CI log the whole time, as a line the *shell* printed, while the gate below
-    # it said 4 ok, 0 failed.
-    #
-    # Each runs through an inner shell for the reason `run_loop` documents: the
-    # shell that waits on a signalled child announces it, and that line is noise
-    # on top of a FAIL that already says the same thing.
-    bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
-    build_rc=$?
-    aot_rc=0
-    if [ "$build_rc" -eq 0 ]; then
-      bash -c 'cd "$1" && ./app > aot.txt 2>&1' _ "$proj" 2>/dev/null
-      aot_rc=$?
-    fi
-    if [ "$build_rc" -ne 0 ] || [ ! -f "$proj/aot.txt" ]; then
-      echo "  FAIL  glib would not compile:"
-      tail -5 "$proj/build.txt" | sed 's/^/        /'
-      fail=$((fail + 1))
-    elif [ "$aot_rc" -ne 0 ] || [ ! -s "$proj/aot.txt" ] || grep -q "error" "$proj/aot.txt"; then
-      # The *last* lines, not the first. When the failure is a crash, the one
-      # thing worth knowing is which call it got to, and `head` shows the calls
-      # that already succeeded instead: the fixture prints in call order, so
-      # the tail names the suspect and the head never can.
-      echo "  FAIL  the compiled glib program did not survive its own run (exit $aot_rc):"
-      tail -5 "$proj/aot.txt" | sed 's/^/        /'
-      fail=$((fail + 1))
-    else
-      echo "  ok    glib bound and run                             ($bound)"
-      pass=$((pass + 1))
-    fi
+    echo "  ok    Rust package built and run                     (regex, system zlib)"
+    pass=$((pass + 1))
+    loop_ready=1
   fi
 fi
 
-# ── 2. An alloc_str binding, called until something breaks ────────────────────
+# ── 2. Two functions, called until something breaks ───────────────────────────
 #
 # Two runs of the same program at different call counts. Surviving is the
 # assertion that matters and is checked always; comparing what the two runs held
 # needs a peak-RSS tool, and skips when there is none.
-#
-# The counts: the smaller is a baseline, the larger has to clear the ~300,000
-# from the user's report by enough to be worth calling a gate. 800,000 calls
-# between them run in about two seconds compiled.
 LOOP_BASE=200000
 LOOP_BIG=600000
-# A leaked string costs about 100 bytes: the v1.3.14 measurement was 62 MB held
-# before the release was added and 42 MB after, over 200,000 calls. So the
-# 400,000 extra calls in the big run cost roughly 40 MB if they leak. Ordinary
-# allocator churn over the same 400,000 is a few MB. 16 MB sits between the two
-# with room on both sides, which is why it is not a number tuned to one machine.
+# Each iteration returns a string and an array of three strings: four Rust
+# allocations of a few dozen bytes each, plus the array's own. Leaking them would
+# cost roughly 100 bytes an iteration, so the 400,000 extra iterations of the big
+# run would hold some 40 MB more. Ordinary allocator churn is a few MB. 16 MB sits
+# between the two with room on both sides.
 LOOP_MARGIN_KB=$((16 * 1024))
 
 # Peak RSS in KB from whichever /usr/bin/time this platform has, or nothing.
@@ -200,84 +126,71 @@ fi
 
 # Runs the loop binary at $1 calls, output to $2 and the timer's report to
 # $2.time. Exits with the binary's own status, which is the whole point.
-#
-# Through an inner shell because the crash being looked for kills the process
-# with a signal, and the shell that waits on it announces that with a
-# "Segmentation fault" line of its own. Down here that line is noise on top of a
-# FAIL that already says the same thing, so the inner shell absorbs it and hands
-# back a plain exit status.
 run_loop() {
   if [ -n "$time_flag" ]; then
     JADE_FFI_LOOP_ITERS="$1" bash -c \
       '/usr/bin/time "$1" "$2" > "$3" 2> "$4"' \
-      _ "$time_flag" "$loop_proj/looper" "$2" "$2.time" 2>/dev/null
+      _ "$time_flag" "$proj/looper" "$2" "$2.time" 2>/dev/null
   else
     JADE_FFI_LOOP_ITERS="$1" bash -c \
-      '"$1" > "$2" 2>&1' _ "$loop_proj/looper" "$2" 2>/dev/null
+      '"$1" > "$2" 2>&1' _ "$proj/looper" "$2" 2>/dev/null
   fi
 }
 
-if [ -z "$loop_proj" ]; then
-  printf '  skip  %-47s(%s)\n' "alloc_str called $LOOP_BIG times" "$loop_skip"
+if [ "$loop_ready" -eq 0 ]; then
+  printf '  skip  %-47s(%s)\n' "Rust calls, $LOOP_BIG times" "$loop_skip"
   skip=$((skip + 1))
-  printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "$loop_skip"
+  printf '  skip  %-47s(%s)\n' "Rust calls, memory held" "$loop_skip"
   skip=$((skip + 1))
 else
-  cp "$LOOP_FIXTURE" "$loop_proj/loop.jde"
-  ( cd "$loop_proj" && "$JADE" build loop.jde -o looper > loopbuild.txt 2>&1 )
-  if [ ! -x "$loop_proj/looper" ]; then
-    echo "  FAIL  the alloc_str loop would not compile:"
-    tail -5 "$loop_proj/loopbuild.txt" | sed 's/^/        /'
+  cp "$CRATE/loop.jde" "$proj/loop.jde"
+  ( cd "$proj" && "$JADE" build loop.jde -o looper > loopbuild.txt 2>&1 )
+  if [ ! -x "$proj/looper" ]; then
+    echo "  FAIL  the loop would not compile:"
+    tail -5 "$proj/loopbuild.txt" | sed 's/^/        /'
     fail=$((fail + 1))
-    printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "loop would not compile"
+    printf '  skip  %-47s(%s)\n' "Rust calls, memory held" "loop would not compile"
     skip=$((skip + 1))
   else
-    run_loop "$LOOP_BASE" "$loop_proj/loop-base.txt"; base_rc=$?
-    run_loop "$LOOP_BIG"  "$loop_proj/loop-big.txt";  big_rc=$?
+    run_loop "$LOOP_BASE" "$proj/loop-base.txt"; base_rc=$?
+    run_loop "$LOOP_BIG"  "$proj/loop-big.txt";  big_rc=$?
 
-    # A wrong answer is as much a failure as a crash: releasing the string
-    # before it is copied out gives back garbage of the right length, so the
-    # fixture compares every result and reports how many did not match.
     ok_out=1
-    grep -qE "^calls +=  *$LOOP_BIG\$" "$loop_proj/loop-big.txt" || ok_out=0
-    grep -qE "^mismatched +=  *0\$"    "$loop_proj/loop-big.txt" || ok_out=0
+    grep -qE "^calls +=  *$LOOP_BIG\$" "$proj/loop-big.txt" || ok_out=0
+    grep -qE "^mismatched +=  *0\$"    "$proj/loop-big.txt" || ok_out=0
 
     if [ "$base_rc" -ne 0 ] || [ "$big_rc" -ne 0 ]; then
-      bad=$LOOP_BIG; rc=$big_rc; out="$loop_proj/loop-big.txt"
+      bad=$LOOP_BIG; rc=$big_rc; out="$proj/loop-big.txt"
       if [ "$base_rc" -ne 0 ]; then
-        bad=$LOOP_BASE; rc=$base_rc; out="$loop_proj/loop-base.txt"
+        bad=$LOOP_BASE; rc=$base_rc; out="$proj/loop-base.txt"
       fi
-      echo "  FAIL  the compiled binary did not survive $bad alloc_str calls (exit $rc):"
+      echo "  FAIL  the compiled binary did not survive $bad iterations (exit $rc):"
       [ -s "$out" ] && tail -3 "$out" | sed 's/^/        /'
       fail=$((fail + 1))
-      printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "the loop did not survive"
+      printf '  skip  %-47s(%s)\n' "Rust calls, memory held" "the loop did not survive"
       skip=$((skip + 1))
     elif [ "$ok_out" -eq 0 ]; then
-      echo "  FAIL  alloc_str gave back the wrong string over $LOOP_BIG calls:"
-      head -3 "$loop_proj/loop-big.txt" | sed 's/^/        /'
+      echo "  FAIL  a Rust function gave back the wrong answer over $LOOP_BIG iterations:"
+      head -3 "$proj/loop-big.txt" | sed 's/^/        /'
       fail=$((fail + 1))
-      printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "the loop gave wrong answers"
+      printf '  skip  %-47s(%s)\n' "Rust calls, memory held" "the loop gave wrong answers"
       skip=$((skip + 1))
     else
-      printf '  ok    %-47s(%s)\n' "alloc_str called $LOOP_BIG times, compiled" "every answer correct"
+      echo "  ok    Rust calls, $LOOP_BIG times"
       pass=$((pass + 1))
-
       if [ -z "$time_flag" ]; then
-        printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" \
-          "no /usr/bin/time -l or -v"
+        printf '  skip  %-47s(%s)\n' "Rust calls, memory held" "no /usr/bin/time reports peak memory"
         skip=$((skip + 1))
       else
-        base_kb="$(peak_rss_kb "$loop_proj/loop-base.txt.time")"
-        big_kb="$(peak_rss_kb "$loop_proj/loop-big.txt.time")"
+        base_kb="$(peak_rss_kb "$proj/loop-base.txt.time")"
+        big_kb="$(peak_rss_kb "$proj/loop-big.txt.time")"
         grew=$((big_kb - base_kb))
         if [ "$grew" -gt "$LOOP_MARGIN_KB" ]; then
-          echo "  FAIL  alloc_str holds memory in proportion to the calls made:"
-          echo "        $LOOP_BASE calls held $((base_kb / 1024)) MB, $LOOP_BIG held $((big_kb / 1024)) MB"
-          echo "        $((grew / 1024)) MB more for $((LOOP_BIG - LOOP_BASE)) more calls, over the $((LOOP_MARGIN_KB / 1024)) MB allowed"
+          echo "  FAIL  memory grew with the call count: ${base_kb} KB at $LOOP_BASE, ${big_kb} KB at $LOOP_BIG"
+          echo "        what a Rust function returns is not being freed"
           fail=$((fail + 1))
         else
-          printf '  ok    %-47s(%s)\n' "alloc_str loop, memory held" \
-            "$((base_kb / 1024)) MB then $((big_kb / 1024)) MB"
+          echo "  ok    Rust calls, memory held                        (${base_kb} KB, then ${big_kb} KB)"
           pass=$((pass + 1))
         fi
       fi
@@ -285,5 +198,6 @@ else
   fi
 fi
 
-echo "ffi: $pass ok, $skip skipped, $fail failed"
-[ "$fail" -eq 0 ]
+echo
+echo "ffi gate: $pass ok, $skip skipped, $fail failed"
+(( fail == 0 ))

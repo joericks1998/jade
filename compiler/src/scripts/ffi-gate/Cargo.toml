@@ -1,0 +1,15 @@
+# The FFI gate's Rust package: code nobody here wrote, reached the way a user
+# reaches it. `regex` is a large, ordinary crate from crates.io, and `libz-sys`
+# with its default features links the machine's own zlib, so the gate covers a
+# -sys crate whose C library the program imports at run time rather than carries.
+# ffi-gate.sh builds a project around it in a scratch directory.
+[package]
+name = "gate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+jade-rs = { path = "../../../../jade-rs" }
+regex = "1"
+libz-sys = "1.1"

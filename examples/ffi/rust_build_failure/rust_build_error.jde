@@ -1,0 +1,9 @@
+// The Rust package in badpkg/ returns a HashMap, which cannot cross to Jade, so
+// it does not compile, and checking this program says so in rustc's words:
+//   the project's Rust packages did not build:
+//   error[E0277]: `HashMap<String, i64>` cannot be returned to Jade
+// with a note listing the types that do cross.
+
+use badpkg
+
+print(badpkg.counts(["a", "b", "a"]))

@@ -1,0 +1,8 @@
+# A Rust package that does not compile, because it exports a type with no Jade
+# form; see rust_build_error.jde.
+[project]
+name = "rust-build-failure-example"
+
+[dependencies.badpkg]
+path = "badpkg"
+abi = "rust"

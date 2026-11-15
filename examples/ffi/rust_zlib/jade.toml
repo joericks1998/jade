@@ -1,0 +1,11 @@
+# A C library, zlib, reached through a Rust crate that wraps it. `zlib/` depends on
+# libz-sys, which builds zlib, and on jade-rs, which exports the wrapper's functions.
+# The crate's name has a dash, which a program cannot write, so the dependency is
+# `zlib` and `package` names the crate.
+[project]
+name = "rust-zlib-example"
+
+[dependencies.zlib]
+path = "zlib"
+package = "zlib-jade"
+abi = "rust"

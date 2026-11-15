@@ -36,6 +36,13 @@ pub unsafe trait Type {
 }
 
 /// Purpose: This trait reads an argument from the C form the Jade program built.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be passed from Jade",
+    label = "Jade has no type for `{Self}`",
+    note = "a parameter takes i64, isize, f64, bool, char, u8, i16, u16, i32, u32, u64, usize, \
+            f32, &str, String, &[u8], Vec<u8>, Vec<T>, &[T], Option<T>, a struct marked \
+            #[jade::export], or a & of any of these"
+)]
 pub trait Lift<'a>: Type + Sized {
     /// Purpose: This function reads the value.
     ///
@@ -52,6 +59,15 @@ pub trait Lift<'a>: Type + Sized {
 }
 
 /// Purpose: This trait hands a result over in its C form.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned to Jade",
+    label = "Jade has no type for `{Self}`",
+    note = "a function returns i64, isize, f64, bool, char, u8, i16, u16, i32, u32, u64, usize, \
+            f32, &str, String, &[u8], Vec<u8>, Vec<T>, &[T], Option<T>, a struct marked \
+            #[jade::export], (), or Result<T, E> of one of these with E: Display",
+    note = "an iterator cannot be returned yet; return a Vec (iterators will connect to \
+            Jade's pipes)"
+)]
 pub trait Lower: Type + Sized {
     /// Purpose: This function makes the C form, allocating what it points at.
     ///

@@ -1,0 +1,38 @@
+// Two Rust functions, called until something breaks.
+//
+// gate.jde calls each function once, which proves the answer is right and
+// nothing else. What crosses back from Rust is Rust's memory: the program copies
+// it and hands it to the function's `__free` companion. One call cannot tell a
+// correct release from a leak, or either from a crash that only appears under
+// sustained churn. So this calls `echo`, one string, and `words`, an array of
+// strings, many times, and compares every answer, since memory released too early
+// gives back garbage of the right length rather than a short answer.
+//
+// The gate sets JADE_FFI_LOOP_ITERS and runs this twice at different counts, to
+// see whether held memory tracks the number of calls. The default keeps the file
+// runnable by hand.
+use std::env
+use gate
+
+let iters = 100000
+let from_env = env.get("JADE_FFI_LOOP_ITERS")
+if from_env != nil {
+    iters = from_env |> toInt
+}
+
+let word = "jade"
+let i = 0
+let bad = 0
+while i < iters {
+    if gate.echo(word) != word {
+        bad = bad + 1
+    }
+    let ws = gate.words("one two three")
+    if len(ws) != 3 or ws[2] != "three" {
+        bad = bad + 1
+    }
+    i = i + 1
+}
+
+print(f"calls      = {iters}")
+print(f"mismatched = {bad}")

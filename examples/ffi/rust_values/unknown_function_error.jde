@@ -1,0 +1,7 @@
+// A name the Rust package does not export is refused when the program is
+// checked, with the closest exported name suggested:
+//   the Rust package 'values' exports nothing named 'ad' — did you mean 'add'?
+
+use values
+
+print(values.ad(1, 2))
