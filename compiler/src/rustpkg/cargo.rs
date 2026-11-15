@@ -186,6 +186,33 @@ pub struct Built {
 /// Outputs: the staticlib and its system libraries, or cargo's account of what
 /// failed, as rustc rendered it.
 pub fn build(p: &Places) -> Result<Built, String> {
+    let built = build_once(p)?;
+    if !built.native_libs.is_empty() {
+        return Ok(built);
+    }
+    // rustc names the system libraries the staticlib needs only when it links the
+    // staticlib, and cargo replays that note for a fresh build only when it kept
+    // it. Without the list, a program links on macOS, where libSystem holds them
+    // all, but not on Linux, where Rust's unwinder is libgcc_s. Touching the
+    // generated crate's one source file makes rustc link it again, which takes a
+    // moment, since every dependency stays built.
+    let lib_rs = p.crate_dir.join("src").join("lib.rs");
+    std::fs::File::options()
+        .write(true)
+        .open(&lib_rs)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+        .map_err(|e| format!("cannot touch {} ({e})", lib_rs.display()))?;
+    build_once(p)
+}
+
+/// Purpose: This function runs cargo on the generated crate once.
+///
+/// Inputs:
+/// - `p`: where the crate and target directory are.
+///
+/// Outputs: the staticlib and the system libraries rustc's note named, if cargo
+/// printed or replayed it.
+fn build_once(p: &Places) -> Result<Built, String> {
     let cargo = cargo_program()?;
     let manifest = p.crate_dir.join("Cargo.toml");
     // A first build fetches and compiles every crate, which takes a while; a

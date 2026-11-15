@@ -362,7 +362,16 @@ fn link_elf(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
     ];
     if let Some(r) = rust {
         args.push(r.staticlib.display().to_string());
-        args.extend(rust_system_libs(&r.native_libs, Path::new("/"), &libc)?);
+        // Rust's standard library on glibc always needs these, its unwinder in
+        // libgcc_s first; they stand in when cargo did not hand back rustc's note.
+        const GLIBC_RUST_LIBS: [&str; 7] =
+            ["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+        let libs: Vec<String> = if r.native_libs.is_empty() && libc.loader.contains("ld-linux") {
+            GLIBC_RUST_LIBS.iter().map(|s| s.to_string()).collect()
+        } else {
+            r.native_libs.clone()
+        };
+        args.extend(rust_system_libs(&libs, Path::new("/"), &libc)?);
     }
     args.extend(libc.libs);
     run_lld(&args)
