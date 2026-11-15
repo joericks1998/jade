@@ -1,4 +1,4 @@
-[1, 22, 333]
+["1", "22", "333"]
 true
 jade:joe and rust:ann
 an invalid pattern raises

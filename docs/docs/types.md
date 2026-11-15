@@ -123,6 +123,7 @@ Each built-in type has two functions. The *type function*, named for the type, c
 | `str` | `str(x)` | `toString(x)` |
 | `bool` | `bool(x)` | `toBool(x)` |
 | `char` | `char(x)` | `toChar(x)` |
+| `dict` | none | `toDict(text)`, which reads JSON text |
 
 ```jade
 print(int(5))          // 5
@@ -132,7 +133,9 @@ print(toString(7))     // 7
 let n = int("42")      // refused by the build: int() needs an int, got str; convert one with toInt()
 ```
 
-A type function's check happens when the program is built, since every value's type is known then. A JSON value is the exception. Its kind is known only when the program runs, so `int(j)` raises then if `j` is not an int.
+A type function's check happens when the program is built, since every value's type is known then.
+
+`toString` writes any value as `print` shows it, so a dict comes out as JSON text, and `toDict` reads JSON text back into a dict. The pair is the whole of Jade's JSON support; see [Reading and writing JSON](#reading-and-writing-json).
 
 A type name as a decorator on a `let` is the same call. `@int let n = v` means `let n = int(v)`, so it checks the type, and a converter decorates the same way:
 
@@ -284,7 +287,7 @@ print(greet())  // nil
 ```
 
 :::note
-The three spellings are aliases, not distinct types. There is no separate `null` type. JSON `null` also decodes to the same `nil`.
+The three spellings are aliases, not distinct types. There is no separate `null` type. A JSON `null` is not `nil`: `toDict` reads it as the text `"null"` in a dict of strings, and refuses it in any other dict.
 :::
 
 ## Dict
@@ -321,8 +324,8 @@ d["stable"] = true     // add new key
 
 ```jade
 print(len(d))          // number of key-value pairs
-print(d.keys())        // [name, version]
-print(d.values())      // [jade, 1]
+print(d.keys())        // ["name", "version"]
+print(d.values())      // ["jade", 1]
 print(d.has("name"))   // true
 print(d.get("name"))   // jade
 print(d.get("nope"))   // nil. A missing key is not an error here.
@@ -338,6 +341,58 @@ for k in d.keys() {
     print(k)
 }
 ```
+
+### Printing a dict
+
+A dict prints as JSON. Its keys are sorted, and a string inside it, a key or a value, is quoted and escaped the way JSON writes it. The same goes for a string inside an array. A string on its own prints bare:
+
+```jade
+print({"ana": 3, "bo": 5})        // {"ana": 3, "bo": 5}
+print({"say": "she said \"hi\""}) // {"say": "she said \"hi\""}
+print(["a", "b"])                 // ["a", "b"]
+print("hi")                       // hi
+```
+
+`print`, `toString` and f-strings all show a value the same way.
+
+### Reading and writing JSON
+
+`toDict(text)` reads JSON text holding an object into a dict, nested levels included, and `toString(d)` writes a dict as JSON text. Reading a file is `fs.read`; nothing else about JSON lives in a package.
+
+```jade
+let city = toDict(fs.read("city.json"))   // {"name": "Paris", "population": 2100000}
+print(city["name"])                        // Paris
+let pop = toInt(city["population"])        // 2100000
+toInt(city["name"])                        // raises: cannot convert "Paris" to an int
+```
+
+A dict holds one type of value, and the program decides which. The type comes from how the program uses the dict, as every other type in Jade does, and it is `str` when nothing says otherwise:
+
+| The program uses the values as | The dict is | What `toDict` does with the text |
+|---|---|---|
+| ints, as in `scores["ana"] + 1` | a dict of ints | raises on a value that is not an int |
+| floats | a dict of floats | takes ints and floats |
+| bools | a dict of bools | raises on a value that is not `true` or `false` |
+| dicts, as in `d["a"]["x"]` | a dict of dicts | each nested level follows the same rule |
+| arrays, as in `d["tags"][0]` | a dict of arrays | each element follows the same rule |
+| strings, or nothing in particular | a dict of strings | every value fits |
+
+So mixed values never fail on their own. A dict of strings takes every value: a JSON string unescaped, and anything else as the exact text the file wrote, so a number, `true` or `null` is its spelling and a nested object or array is its JSON text, which `toDict` reads again: `toDict(city["location"])["lat"]`. A value fails only when the program converts it to something it does not fit. A converter such as `toInt(city["population"])` takes a str as well as a number, so it does not make the dict a dict of ints; the conversion happens at the call.
+
+`toDict` raises, with the line and column, on text that is not JSON, on text whose top level is not an object, and on a value that does not fit the dict's type. `null` fits only a dict of strings, where a program checks for `"null"`. A key written twice keeps its last value. Keys and values keep the trust of the text they came from, so a dict read from a command's output cannot reach `sh.run` (see [Standard Library](stdlib#stdsh)).
+
+```jade
+try {
+    let scores = toDict('{"ana": 3, "bo": "five"}')
+    print(scores["ana"] + 1)
+} catch e {
+    print(e.message)
+    // toDict: expected an int, found a string at line 1 column 18; to read mixed
+    // values, use the dict as strings and convert each with toInt()
+}
+```
+
+A dict of strings writes every value quoted, so a number read into one is written back as `"2100000"`. `toDict` and `toString` work on dicts, never on classes; a class that should be written out builds a dict.
 
 ### Value semantics
 

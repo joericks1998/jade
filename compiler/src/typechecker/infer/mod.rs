@@ -214,6 +214,11 @@ pub struct Checker<'a> {
     /// so it waits for the rest of the program to fill the slot first. Rebuilt
     /// each pass; see `Checker::accept`.
     pending_literals: Vec<(Ty, Ty)>,
+    /// The value slot of each dict `toDict` returns, and of each dict or array
+    /// nested in one. A use fills one, and once the passes settle, one nothing
+    /// filled is a str; see `builtins.rs`. Kept across passes, since each slot
+    /// is cached by its node.
+    todict_slots: Vec<Ty>,
     /// Whether a pass left an `==` between an unknown side and a string or
     /// char, in case the code that settles the side has not been checked yet.
     deferred_eq: bool,
@@ -282,6 +287,7 @@ impl<'a> Checker<'a> {
             pass: 0,
             final_pass: false,
             pending_literals: Vec::new(),
+            todict_slots: Vec::new(),
             deferred_eq: false,
             force_eq: false,
             error: None,
@@ -590,6 +596,10 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if filled {
+                    continue;
+                }
+                // A value `toDict` reads that nothing used is a str.
+                if self.default_todict_values() {
                     continue;
                 }
                 settled = true;

@@ -237,6 +237,11 @@ pub enum JadeError {
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
+    /// A `use` names a std package that was removed: `use std::json`, since
+    /// 2.0.7. `package` is how the program wrote it, `version` the release
+    /// that removed it, and `fix` what replaced it.
+    RemovedPackage { package: String, version: String, fix: String, span: Span },
+
     /// A program names something a Rust package does not export: no function
     /// or struct of that name is marked `#[jade::export]` in the crate. The
     /// package's library describes everything it exports, so the answer is
@@ -553,6 +558,11 @@ impl std::fmt::Display for JadeError {
                 f,
                 "[{}:{}] cannot find import '{}': file not found",
                 span.line, span.col, path
+            ),
+            JadeError::RemovedPackage { package, version, fix, span } => write!(
+                f,
+                "[{}:{}] {} was removed in {}; {}",
+                span.line, span.col, package, version, fix
             ),
             JadeError::NotExported { package, name, span } => write!(
                 f,

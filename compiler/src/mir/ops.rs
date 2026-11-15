@@ -188,9 +188,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Array(_) => self.assign_temp(Ty::Int, Rvalue::Op(Op::ArrayLen, vec![v])),
                     Ty::Map(_) => self.assign_temp(Ty::Int, Rvalue::Op(Op::DictLen, vec![v])),
                     Ty::Bytes => self.assign_temp(Ty::Int, Rvalue::Op(Op::BytesLen, vec![v])),
-                    Ty::Json => {
-                        self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::Len), vec![v]))
-                    }
                     other => return Err(not_yet(format!("len() of {other}"), span)),
                 };
                 Ok((r, Ty::Int))
@@ -203,15 +200,22 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let (v, t) = one(argv, span)?;
                 Ok((self.text_of(v, &t), Ty::Str))
             }
+            // The reader is generated per dict type, so the checker's choice of
+            // value type travels on the operation.
+            "toDict" => {
+                let (v, _) = one(argv, span)?;
+                if !matches!(et, Ty::Map(_)) {
+                    return Err(internal(format!("toDict that makes {et}"), span));
+                }
+                let r = self.assign_temp(et.clone(), Rvalue::Op(Op::ToDict(et.clone()), vec![v]));
+                Ok((r, et.clone()))
+            }
             "toInt" => {
                 let (v, t) = one(argv, span)?;
                 let r = match &t {
                     Ty::Int => v,
                     Ty::Float | Ty::Bool | Ty::Char | Ty::Str => {
                         self.assign_temp(Ty::Int, Rvalue::Op(Op::ToInt(t.clone()), vec![v]))
-                    }
-                    Ty::Json => {
-                        self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::ToInt), vec![v]))
                     }
                     Ty::Sized(_) => self.sized_to(Ty::Int, v, &t),
                     other => return Err(not_yet(format!("toInt() of {other}"), span)),
@@ -225,9 +229,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Int => self.assign_temp(Ty::Float, Rvalue::IntToFloat(v)),
                     Ty::Str => {
                         self.assign_temp(Ty::Float, Rvalue::Op(Op::ToFloat(Ty::Str), vec![v]))
-                    }
-                    Ty::Json => {
-                        self.assign_temp(Ty::Float, Rvalue::Op(Op::Json(JsonFn::ToFloat), vec![v]))
                     }
                     Ty::Sized(_) => self.sized_to(Ty::Float, v, &t),
                     other => return Err(not_yet(format!("toFloat() of {other}"), span)),
@@ -244,9 +245,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Bool => v,
                     Ty::Int | Ty::Str => {
                         self.assign_temp(Ty::Bool, Rvalue::Op(Op::ToBool(t.clone()), vec![v]))
-                    }
-                    Ty::Json => {
-                        self.assign_temp(Ty::Bool, Rvalue::Op(Op::Json(JsonFn::ToBool), vec![v]))
                     }
                     other => return Err(not_yet(format!("toBool() of {other}"), span)),
                 };
@@ -305,8 +303,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     }
 
     /// Purpose: This function lowers a type function, which returns its
-    /// argument unchanged once it has the type: an int widens to a float, and a
-    /// json value's kind is checked when the program runs.
+    /// argument unchanged once it has the type: an int widens to a float.
     ///
     /// Inputs:
     /// - `name`: `int`, `float`, `str`, `bool` or `char`.
@@ -331,16 +328,6 @@ impl<'a, 'l> Fx<'a, 'l> {
         let r = match t {
             t if *t == want => v,
             Ty::Int if want == Ty::Float => self.as_float(v, t),
-            Ty::Json => {
-                let m = match name {
-                    "int" => JsonFn::AsInt,
-                    "float" => JsonFn::AsFloat,
-                    "str" => JsonFn::AsStr,
-                    "bool" => JsonFn::AsBool,
-                    _ => return Err(internal("char() of a json value", span)),
-                };
-                self.assign_temp(want.clone(), Rvalue::Op(Op::Json(m), vec![v]))
-            }
             other => return Err(internal(format!("{name}() of {other}"), span)),
         };
         Ok((r, want))
@@ -506,12 +493,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ok(nil)
                 }
                 other => Err(internal(format!("an unknown future method '{other}'"), span)),
-            },
-            Ty::Json => match m {
-                "len" => {
-                    Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::Len), ops)), Ty::Int))
-                }
-                other => Err(internal(format!("an unknown json method '{other}'"), span)),
             },
             other => Err(internal(format!("a method '{m}' on {other}"), span)),
         }

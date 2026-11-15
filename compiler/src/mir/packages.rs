@@ -188,15 +188,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let ops = self.operands(args)?;
                 self.package_op(Op::Infer(m), ops, t)
             }
-            ("json", "parse") => {
-                let ops = self.operands(args)?;
-                self.package_op(Op::Json(JsonFn::Parse), ops, Ty::Json)
-            }
-            ("json", "stringify" | "stringify_pretty") => {
-                let m = if f == "stringify" { JsonFn::Stringify } else { JsonFn::StringifyPretty };
-                let ops = self.operands(args)?;
-                self.package_op(Op::Json(m), ops, Ty::Str)
-            }
             ("http" | "uhttp", "stream") => self.uhttp_stream(args, span),
             ("http" | "uhttp", _) => {
                 let m = match f {

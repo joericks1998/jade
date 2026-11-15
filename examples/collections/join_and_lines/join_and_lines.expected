@@ -3,12 +3,12 @@ a-b-c
 
 solo
 x+y
-[a, b, c]
-[a, b]
+["a", "b", "c"]
+["a", "b"]
 []
-[p, q]
-[a, b]
-[a, b, ]
-[one, two, three]
+["p", "q"]
+["a", "b"]
+["a", "b", ""]
+["one", "two", "three"]
 3
 alpha | beta

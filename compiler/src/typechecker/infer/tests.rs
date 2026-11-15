@@ -264,12 +264,46 @@ fn std_results_are_structs_that_read_both_ways() {
     ok("use std::sh\nlet r = sh.output(\"true\")\nprint(r.code)\nprint(r[\"stdout\"])\n");
 }
 
+/// The value type of the dict `toDict` returns comes from how the program uses
+/// it, and is str when nothing settles it: part 2 of `design/v2-simplify.md`.
 #[test]
-fn json_is_its_own_type() {
-    let t =
-        ok("use std::json\nlet v = json.parse(\"{}\")\nlet a = v[\"Action\"]\nlet s = str(a)\n");
-    assert_eq!(global(&t, "v"), Ty::Json);
-    assert_eq!(global(&t, "s"), Ty::Str);
+fn to_dict_values_are_strings_unless_use_settles_them() {
+    let map = |t: Ty| Ty::Map(Box::new(t));
+    // Nothing uses the values, and a converter accepts a str, so neither
+    // settles them.
+    let t = ok("let d = toDict(\"{}\")\nprint(d[\"a\"])\nlet n = toInt(d[\"a\"])\n");
+    assert_eq!(global(&t, "d"), map(Ty::Str));
+    assert_eq!(global(&t, "n"), Ty::Int);
+    // Arithmetic settles them as ints, and a float literal as floats.
+    let t = ok("let d = toDict(\"{}\")\nlet n = d[\"a\"] + 1\n");
+    assert_eq!(global(&t, "d"), map(Ty::Int));
+    let t = ok("let d = toDict(\"{}\")\nlet x = d[\"a\"] * 2.5\n");
+    assert_eq!(global(&t, "d"), map(Ty::Float));
+    // Indexing by a str makes a value a dict whose own values follow the rule,
+    // and indexing by an int makes it an array.
+    let t = ok("let d = toDict(\"{}\")\nlet n = d[\"a\"][\"x\"] + 1\nprint(d[\"b\"])\n");
+    assert_eq!(global(&t, "d"), map(map(Ty::Int)));
+    let t = ok("let d = toDict(\"{}\")\nprint(d[\"tags\"][0])\n");
+    assert_eq!(global(&t, "d"), map(Ty::Array(Box::new(Ty::Str))));
+    // A dict method makes a value a dict; `len`, which strings share, does not.
+    let t = ok("let d = toDict(\"{}\")\nprint(d[\"a\"].keys())\nprint(len(d[\"b\"]))\n");
+    assert_eq!(global(&t, "d"), map(map(Ty::Str)));
+    // Comparing with a bool settles them as bools.
+    let t = ok("let d = toDict(\"{}\")\nif d[\"on\"] == true {\n    print(1)\n}\n");
+    assert_eq!(global(&t, "d"), map(Ty::Bool));
+    // Passed as a value, toDict reads a dict of strings.
+    let t = ok("let ds = [\"{}\"].map(toDict)\n");
+    assert_eq!(global(&t, "ds"), Ty::Array(Box::new(map(Ty::Str))));
+}
+
+#[test]
+fn to_dict_takes_text_and_readable_values() {
+    rejects("let d = toDict(5)\n", "toDict() reads JSON text, so it takes a str, got int");
+    rejects("let d = toDict(\"{}\", 1)\n", "toDict() takes 1 argument, got 2");
+    rejects(
+        "let d = toDict(\"{}\")\nd[\"a\"] = nil\n",
+        "toDict reads each value as a str, int, float, bool, dict or array",
+    );
 }
 
 #[test]

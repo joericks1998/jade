@@ -862,6 +862,28 @@ fn import_is_opaque(path: &str) -> bool {
     builtins::find_package(path).is_none()
 }
 
+/// Purpose: This function refuses a `use` of a std package that was removed,
+/// naming what replaced it.
+///
+/// Inputs:
+/// - `path`: the path the `use` names, such as `std/json`.
+/// - `span`: where the `use` is.
+///
+/// Outputs: the error, or `None` for any other path.
+fn removed_package(path: &str, span: Span) -> Option<JadeError> {
+    match path {
+        "std/json" => Some(JadeError::RemovedPackage {
+            package: "std::json".to_string(),
+            version: "2.0.7".to_string(),
+            fix: "read JSON text into a dict with toDict(text), and write a dict as JSON with \
+                  toString(d)"
+                .to_string(),
+            span,
+        }),
+        _ => None,
+    }
+}
+
 // ── Statements ────────────────────────────────────────────────────────────────
 
 /// A function's parameters: each name, with its default when it has one.
@@ -1033,6 +1055,9 @@ fn resolve_stmt(stmt: Stmt, ctx: &mut Names) -> Result<Stmt> {
             if as_name.is_some() {
                 return Err(JadeError::ImportAlias { span });
             }
+            if let Some(e) = removed_package(&path, span) {
+                return Err(e);
+            }
             if let Some(pkg) = builtins::find_package(&path) {
                 // After `define`, which would otherwise clear the association.
                 ctx.define(pkg.global_name.to_string(), NameKind::Package);
@@ -1045,6 +1070,9 @@ fn resolve_stmt(stmt: Stmt, ctx: &mut Names) -> Result<Stmt> {
             ctx.opaque_imports = true;
             if path_is_string {
                 return Err(JadeError::QuotedImport { path, span });
+            }
+            if let Some(e) = removed_package(&path, span) {
+                return Err(e);
             }
             if let Some(pkg) = builtins::find_package(&path) {
                 ctx.define(pkg.global_name.to_string(), NameKind::Package);
@@ -1610,6 +1638,7 @@ fn whole_reply_stage(stage: &Expr, ctx: &Names) -> Option<(String, String)> {
     let fix = if let Some(conv) = type_fn_converter {
         conv.to_string()
     } else if converter_type(canon).is_some()
+        || canon == "toDict"
         || SizedNum::from_converter(canon).is_some()
         || is_collection_type(&name)
         || ctx.struct_defs.contains_key(&name)

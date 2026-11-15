@@ -19,9 +19,9 @@
 2
 {"x": 100, "y": 2, "z": 3}
 v
-{"map": {"inner": v}, "other": {"k": w}}
-{"k": a string}
-[a, b]
+{"map": {"inner": "v"}, "other": {"k": "w"}}
+{"k": "a string"}
+["a", "b"]
 1
 2
 {"": 1, "é": 2}

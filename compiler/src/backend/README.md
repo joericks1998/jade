@@ -52,7 +52,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`rc.rs`* emits retain and the per-type release and destroy functions.
 - *`sized.rs`* has the sized number types of `design/v2-number-types.md`: `+ - * / %` at each width with the signed or unsigned overflow intrinsic, unsigned division, remainder and right shift, shifts checked against the width, negation, and `convert`, which every converter where a sized type is on either side uses and which raises `300 does not fit a byte, which holds 0 to 255`. A sized value is held at its own width, `i8` to `i64` or `f32`, by `layout::llty`; `format.rs` prints a `ulong` past the int's range and a `float32` as the fewest digits that read back as the same float32.
 - *`text.rs`* has strings: allocation, UTF-8, comparison, every string method, and the string builder.
-- *`format.rs`* has printing, `input`, the text of every type, float formatting, and the conversions `int()`, `float()`, `bool()` and `char()`.
+- *`format.rs`* has printing, `input`, the text of every type, float formatting, and the conversions `int()`, `float()`, `bool()` and `char()`. Since 2.0.7 a string inside an array or a dict is written quoted and escaped as JSON writes it, by `jade.str.quote`, as dict keys are, so `print(d)` and `toString(d)` give JSON; a string on its own is its text.
 - *`collections.rs`* has arrays and dicts.
 - *`compare.rs`* has equality for every type and ordering for numbers, strings, chars and bools.
 - *`unicode.rs`* builds the case tables.
@@ -65,7 +65,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`sh.rs`* has `std::sh`, and `spawn`, which starts a program with chosen standard streams; `http.rs` uses it too.
 - *`env.rs`* has `std::env` and `std::path`, which follows Rust's `Path` on Unix as v1 did.
 - *`random.rs`* has `std::random`: v1's xoshiro256** generator, so a seeded program draws the same numbers.
-- *`json.rs`* has the `Json` value, `json.parse` with serde_json's grammar and messages, and `json.stringify`, generated per type.
+- *`todict.rs`* has `toDict(text)`: one reader per dict type a program reads, `jade.todict.<type>`, with a function below it for a value of each type the dict holds, nested to any depth, and one for an object or an array of each. A dict of strings takes every value, a JSON string unescaped and anything else as the exact text the input wrote, using `jade.todict.skip`, which reads past a value checking its grammar and building nothing. Any other value type raises on a value that does not fit, `null` included. The scanner is the one the JSON package had until 2.0.7, which followed serde_json: its grammar, numbers, escapes, depth limit of 128 and line and column positions. Keys and values take the text's trust. The checker picks the value type and MIR's `Op::ToDict` carries it here; part 2 of `design/v2-simplify.md` has the rules.
 - *`native.rs`* has calls into Rust packages: the C form of each type, building one from a Jade value and reading one back, the call through the wrapper, the companion that frees what Rust returned, and raising its error.
 - *`infer.rs`* has inference: the tokenizer's tables and Unicode classes, connecting to dovata and mapping the model's memory with the descriptors it sends, Metal through `objc_msgSend`, one forward step as one command buffer over the op table, and greedy generation one token per call, so a pipe can hand on each piece of a reply as it comes. `src/infer/README.md` describes the whole path.
 - *`http.rs`* has `std::http` and `std::uhttp`, both through `curl`, and `uhttp.stream`, which calls the handler through a function pointer once a line.
@@ -85,7 +85,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Popping an empty array is an error.* v1 returned `nil`, but an `[int]` cannot hold `nil`, so the static backend raises `pop from an empty array`. `random.choice` on an empty array raises for the same reason.
 
-*A few std answers differ from v1 on purpose.* `math.pow` of two ints with a negative exponent raises, since its result is an int. `http.head` runs `curl --head`, where v1's `-X HEAD` failed against any server that sends a length with no body. `json.stringify` keeps the taint of the strings it writes, where v1's result was trusted, and writes a class value as an object of its fields, where v1 wrote `null`.
+*A few std answers differ from v1 on purpose.* `math.pow` of two ints with a negative exponent raises, since its result is an int. `http.head` runs `curl --head`, where v1's `-X HEAD` failed against any server that sends a length with no body.
 
 *A new C function goes in `Cx::libc`'s table.* It panics on a name it does not know, so a missing signature shows up the first time a test builds the code that uses it. Add the name to the pinned list in `tests.rs` at the same time.
 

@@ -1,0 +1,6 @@
+// std::json was removed in 2.0.7: JSON is a text format, not a type.
+// toDict(text) reads JSON text into a dict, and toString(d) writes one.
+use std::json
+
+let v = json.parse("{\"a\": 1}")
+print(v)

@@ -4,6 +4,22 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.7
+
+*JSON is text you read into a dict and write out of one, not a type.* `std::json` and its `Json` value are gone; `toDict(text)` reads JSON and `toString(d)` writes it. Part 2 of `design/v2-simplify.md` has the rules.
+
+```jade
+let city = toDict(fs.read("city.json"))   // {"name": "Paris", "population": 2100000}
+print(city["name"])                        // Paris
+print(toInt(city["population"]) + 1)       // 2100001
+print(city)                                // {"name": "Paris", "population": "2100000"}
+```
+
+- *`toDict(text)` reads a JSON object into a dict, nested levels included.* The dict's value type comes from how the program uses it, and is `str` when nothing says otherwise: `scores["ana"] + 1` makes a dict of ints, and `d["a"]["x"]` a dict of dicts. A dict of strings takes every value, a string unescaped and anything else as the text the file wrote, a nested object or array included, so mixed values never fail; `toInt(city["population"])` converts at the call. A value that does not fit the dict's type raises with its line and column and the fix, and so does `null` outside a dict of strings, text that is not JSON, and text whose top level is not an object. A key written twice keeps its last value. Keys and values keep the trust of the text they came from.
+- *A string inside an array or a dict prints quoted and escaped, as JSON writes it,* so `print(d)` and `toString(d)` give JSON: `{"k": "v"}`, where 2.0.6 printed `{"k": v}`, and `["a"]` where it printed `[a]`. A string on its own still prints bare, and the layout is otherwise the same. Dict keys are escaped the JSON way too, so a control character in one is `\u001f` rather than `\u{1f}`.
+- *`use std::json` is refused* with a message naming `toDict` and `toString`. `json.stringify` of a class has no replacement: a class that should be written out builds a dict. `?p |> toDict` is refused in favor of `toDict(?p)`, which reads the whole reply.
+- *Examples:* `json/parse` is now `dicts/malformed`, `dicts/to_dict` shows the rules, and six examples print the quoted strings.
+
 ## v2.0.6
 
 *The compiler builds one tree instead of two.* No language change: every example prints what it printed before. `design/v2-simplify.md` has the plan.

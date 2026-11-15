@@ -7,17 +7,17 @@ sidebar_label: Standard Library
 Jade ships a standard library of built-in packages. Import one with `::` notation, written `use std::<name>`, and it becomes a global variable in scope for the rest of the file.
 
 ```jade
-use std::json
+use std::math
 use std::path
 use std::random
 
-let data = json.parse('{"x": 1}')
+let r = math.sqrt(16.0)
 let p = path.join("/home/user", "projects", "app")
 let n = random.int(1, 100)
 ```
 
 :::warning
-Every import names a module, using `::` notation or a bare name. There are no quoted file paths and no `as` alias. Jade rejects both `use "std/json"` and `use "lib.jde" as lib` at compile time, with a `QuotedImport` or `ImportAlias` error. See [Imports](imports).
+Every import names a module, using `::` notation or a bare name. There are no quoted file paths and no `as` alias. Jade rejects both `use "std/path"` and `use "lib.jde" as lib` at compile time, with a `QuotedImport` or `ImportAlias` error. See [Imports](imports).
 :::
 
 | Import | Global name | Description |
@@ -31,10 +31,11 @@ Every import names a module, using `::` notation or a bare name. There are no qu
 | `use std::http` | `http` | HTTP client |
 | `use std::uhttp` | `uhttp` | HTTP client over a Unix domain socket |
 | `use std::sh` | `sh` | Shell command execution |
-| `use std::json` | `json` | JSON encode / decode |
 | `use std::env` | `env` | Environment variables and process info |
 | `use std::path` | `path` | Path manipulation |
 | `use std::random` | `random` | Random number generation |
+
+JSON needs no package. `toDict(text)` reads JSON text into a dict, and `toString(d)` writes a dict as JSON; see [Types](types#reading-and-writing-json). Until 2.0.7 this was `std::json`, and a program that still writes `use std::json` is refused with a message naming the two functions.
 
 ---
 
@@ -404,7 +405,6 @@ Use `get_bytes` or `post_bytes` for those. `.body` is then a `bytes` value, whic
 
 ```jade
 use std::http
-use std::json
 
 // Simple GET
 let resp = http.get("https://api.example.com/status")
@@ -412,13 +412,13 @@ print(resp["status"])   // 200
 print(resp["body"])
 
 // POST with JSON body and headers
-let payload = json.stringify({"name": "jade"})
+let payload = toString({"name": "jade"})
 let resp2 = http.post(
     "https://api.example.com/items",
     payload,
     {"Content-Type": "application/json", "Authorization": "Bearer sk-..."}
 )
-let result = json.parse(resp2["body"])
+let result = toDict(resp2["body"])
 ```
 
 :::note
@@ -458,12 +458,12 @@ The socket path runs up to the *first* `:` after the `unix://` scheme. Everythin
 
 ```jade
 use std::uhttp
-use std::json
 
 // Query the Docker Engine API over its socket
-let resp = uhttp.get("unix:///var/run/docker.sock:/v1.43/containers/json")
+let resp = uhttp.get("unix:///var/run/docker.sock:/v1.43/info")
 print(resp["status"])   // 200
-let containers = json.parse(resp["body"])
+let info = toDict(resp["body"])
+print(info["Containers"])
 ```
 
 ### Streaming endpoints
@@ -474,11 +474,10 @@ A handler that returns `false` *stops* the stream early and closes the socket. A
 
 ```jade
 use std::uhttp
-use std::json
 
 // Follow the Docker event stream, printing each event's action
 fn on_event(line) {
-    let event = json.parse(line)
+    let event = toDict(line)
     print(event["Action"])
     // return false here to stop after the first event
 }
@@ -551,62 +550,6 @@ Either catch the error, or build the command from string literals and interpolat
 The output of a shell command is itself tainted, so you cannot clean a value by running it through `sh` and feeding the result back in.
 
 All three functions check, because all three reach the same `sh -c`. Until v1.3.3, `sh.output` did not check. That never limited what an untrusted command could do. It only meant the command had to be written as `sh.output(x).stdout`.
-
----
-
-## `std/json`
-
-```jade
-use std::json
-```
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `json.parse(s)` | value | Parse a JSON string into a Jade value |
-| `json.stringify(val)` | `str` | Serialize a Jade value to compact JSON |
-| `json.stringify_pretty(val)` | `str` | Serialize to indented (pretty-printed) JSON |
-
-*Type mapping:*
-
-| JSON type | Jade type |
-|-----------|-----------|
-| `null` | `nil` |
-| `true` / `false` | `bool` |
-| integer number | `int` |
-| floating-point number | `float` |
-| string | `str` |
-| array | `array` |
-| object | `dict` |
-
-```jade
-use std::json
-
-// Parse
-let data = json.parse('{"name": "jade", "version": 1, "stable": true}')
-print(data["name"])     // jade
-print(data["version"])  // 1
-
-// Serialize
-let compact = json.stringify(data)
-print(compact)          // {"name":"jade","stable":true,"version":1}
-
-let pretty = json.stringify_pretty(data)
-print(pretty)
-// {
-//   "name": "jade",
-//   "stable": true,
-//   "version": 1
-// }
-
-// Round-trip
-let arr = [1, 2, {"x": 3}]
-let back = json.parse(json.stringify(arr))
-print(back[2]["x"])     // 3
-```
-
-:::note
-`json.parse` raises an `IoError` if the input is not valid JSON. A number with a decimal point becomes a `float`, and a number without one becomes an `int`.
-:::
 
 ---
 

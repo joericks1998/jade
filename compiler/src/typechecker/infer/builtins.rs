@@ -124,6 +124,7 @@ pub(super) fn is_builtin_value(name: &str) -> bool {
                 | "toString"
                 | "toBool"
                 | "toChar"
+                | "toDict"
                 | "print"
                 | "write"
                 | "input"
@@ -176,6 +177,35 @@ fn type_fn_ty(name: &str) -> Ty {
 /// Outputs: true for int or float.
 fn is_num(t: &Ty) -> bool {
     matches!(t, Ty::Int | Ty::Float)
+}
+
+/// Purpose: This function gives the message for a `toDict` argument that is
+/// not text.
+///
+/// Inputs:
+/// - `t`: the argument's type.
+///
+/// Outputs: the message, naming what `toDict` takes.
+fn todict_text_error(t: &Ty) -> String {
+    format!(
+        "toDict() reads JSON text, so it takes a str, got {t}; a dict of values is written as a \
+         literal, such as {{\"k\": v}}"
+    )
+}
+
+/// Purpose: This function says whether `toDict` can read a value type: a
+/// str, int, float or bool, or a dict or array of those, nested any depth.
+///
+/// Inputs:
+/// - `t`: a resolved value type.
+///
+/// Outputs: true when the reader can build it.
+fn todict_readable(t: &Ty) -> bool {
+    match t {
+        Ty::Str | Ty::Int | Ty::Float | Ty::Bool => true,
+        Ty::Map(v) | Ty::Array(v) => todict_readable(v),
+        _ => false,
+    }
 }
 
 /// Purpose: This function works out a builtin's result from its argument
@@ -231,14 +261,12 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
                 | Ty::Map(_)
                 | Ty::Bytes
                 | Ty::Stream(_)
-                | Ty::Json
                 | Ty::Var(_) => Ok(Ty::Int),
                 t => Err(format!("len() has no answer for {t}")),
             }
         }
         // The type functions check that a value already has their type and
-        // return it unchanged; an int is also a float. A json value's kind is
-        // known only when the program runs, so it is checked then.
+        // return it unchanged; an int is also a float.
         "int" | "float" | "str" | "bool" | "char" => {
             arity(1)?;
             let want = type_fn_ty(name);
@@ -246,7 +274,6 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
                 t if *t == want => true,
                 Ty::Var(_) => true,
                 Ty::Int => want == Ty::Float,
-                Ty::Json => want != Ty::Char,
                 _ => false,
             };
             if fits {
@@ -282,30 +309,23 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
         "toInt" => {
             arity(1)?;
             match &tys[0] {
-                Ty::Int
-                | Ty::Float
-                | Ty::Sized(_)
-                | Ty::Str
-                | Ty::Bool
-                | Ty::Char
-                | Ty::Json
-                | Ty::Var(_) => Ok(Ty::Int),
+                Ty::Int | Ty::Float | Ty::Sized(_) | Ty::Str | Ty::Bool | Ty::Char | Ty::Var(_) => {
+                    Ok(Ty::Int)
+                }
                 t => Err(format!("toInt() cannot convert {t}")),
             }
         }
         "toFloat" => {
             arity(1)?;
             match &tys[0] {
-                Ty::Int | Ty::Float | Ty::Sized(_) | Ty::Str | Ty::Json | Ty::Var(_) => {
-                    Ok(Ty::Float)
-                }
+                Ty::Int | Ty::Float | Ty::Sized(_) | Ty::Str | Ty::Var(_) => Ok(Ty::Float),
                 t => Err(format!("toFloat() cannot convert {t}")),
             }
         }
         "toBool" => {
             arity(1)?;
             match &tys[0] {
-                Ty::Bool | Ty::Int | Ty::Str | Ty::Json | Ty::Var(_) => Ok(Ty::Bool),
+                Ty::Bool | Ty::Int | Ty::Str | Ty::Var(_) => Ok(Ty::Bool),
                 Ty::Sized(s) if !s.is_float() => Ok(Ty::Bool),
                 t => Err(format!("toBool() cannot convert {t}")),
             }
@@ -322,15 +342,20 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
             arity(1)?;
             let s = SizedNum::from_converter(n).unwrap_or(SizedNum::Byte);
             match &tys[0] {
-                Ty::Int
-                | Ty::Float
-                | Ty::Sized(_)
-                | Ty::Str
-                | Ty::Bool
-                | Ty::Char
-                | Ty::Json
-                | Ty::Var(_) => Ok(Ty::Sized(s)),
+                Ty::Int | Ty::Float | Ty::Sized(_) | Ty::Str | Ty::Bool | Ty::Char | Ty::Var(_) => {
+                    Ok(Ty::Sized(s))
+                }
                 t => Err(format!("{n}() cannot convert {t}")),
+            }
+        }
+        // `toDict` called by name gets a value type from how the program
+        // uses the dict, in `Checker::todict_call`; passed as a value, as in
+        // `texts.map(toDict)`, it reads a dict of strings.
+        "toDict" => {
+            arity(1)?;
+            match &tys[0] {
+                Ty::Str | Ty::Var(_) => Ok(Ty::Map(Box::new(Ty::Str))),
+                t => Err(todict_text_error(t)),
             }
         }
         "max_tasks" | "max_tokens" => arity(0).map(|_| Ty::Int),
@@ -417,9 +442,7 @@ pub(super) fn primitive_has_method(t: &Ty, name: &str) -> bool {
         Ty::Future(_) => crate::future::FUTURE_METHODS,
         _ => &[],
     };
-    table.contains(&name)
-        || (matches!(t, Ty::Map(_)) && name == "merge")
-        || (matches!(t, Ty::Json) && name == "len")
+    table.contains(&name) || (matches!(t, Ty::Map(_)) && name == "merge")
 }
 
 impl<'a> Checker<'a> {
@@ -444,7 +467,9 @@ impl<'a> Checker<'a> {
         f: &mut Frame,
         node: usize,
     ) -> Ty {
-        let _ = (f, node);
+        if name == "toDict" {
+            return self.todict_call(&tys, span, f, node);
+        }
         // A literal takes the type of the sized type function it meets, when it
         // fits: `byte(5)` is the byte 5.
         if let Some(s) = SizedNum::from_name(name)
@@ -802,20 +827,6 @@ impl<'a> Checker<'a> {
                 want!(0, Ty::Str, "command");
                 Ty::Struct("ShOutput".into())
             }
-            // ── json ─────────────────────────────────────────────────────────
-            ("json", "parse") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a str");
-                }
-                want!(0, Ty::Str, "input");
-                Ty::Json
-            }
-            ("json", "stringify" | "stringify_pretty") => {
-                if !count(1..=1) {
-                    return bad_count(self, "one value");
-                }
-                Ty::Str
-            }
             // ── env ──────────────────────────────────────────────────────────
             ("env", "get") => {
                 if !count(1..=1) {
@@ -1169,10 +1180,164 @@ pub(super) fn primitive_method(
             "cancel" => Ty::Nil,
             _ => Ty::Nil,
         },
-        Ty::Json => Ty::Int,
         _ => {
             let _ = FuncRef::Builtin(String::new());
             Ty::Nil
         }
+    }
+}
+
+// ── toDict ────────────────────────────────────────────────────────────────────
+//
+// `toDict(text)` returns a dict whose value type is a slot the program's use
+// fills, per part 2 of `design/v2-simplify.md`: `d["a"] + 1` makes it an int,
+// `d["a"]["x"]` a dict whose own value type follows the same rule, `d["a"][0]`
+// an array. Every such slot is kept in `Checker::todict_slots`, and once the
+// passes settle, `Checker::run` makes each one nothing filled a str. A call
+// that converts, such as `toInt(d["k"])`, accepts a str and fills nothing.
+
+impl<'a> Checker<'a> {
+    /// Purpose: This function types a call to `toDict` by name.
+    ///
+    /// Inputs:
+    /// - `tys`: the argument types.
+    /// - `span`: where.
+    /// - `f`: the frame.
+    /// - `node`: the call's address.
+    ///
+    /// Outputs: a dict whose value type is the call's own slot.
+    fn todict_call(&mut self, tys: &[Ty], span: Span, f: &mut Frame, node: usize) -> Ty {
+        // `+ 5`, past the offsets a call site keeps its own slots under: `map`
+        // calls its function value at `node + 1` and keeps its results at
+        // `node + 2`, and a method a `toDict` value takes uses `node + 3`.
+        let value = self.todict_slot(f, node + 5);
+        if tys.len() != 1 {
+            self.report(span, format!("toDict() takes 1 argument, got {}", tys.len()));
+            return Ty::Map(Box::new(value));
+        }
+        match self.store.shallow(&tys[0]) {
+            Ty::Str => {}
+            Ty::Var(_) => {
+                self.unify(&tys[0], &Ty::Str, span, "toDict's text");
+            }
+            other => {
+                let other = self.store.resolve(&other);
+                self.report(span, todict_text_error(&other));
+            }
+        }
+        if self.final_pass {
+            let t = self.store.resolve(&value);
+            if !todict_readable(&t) {
+                self.report(
+                    span,
+                    format!(
+                        "toDict reads each value as a str, int, float, bool, dict or array, but \
+                         this program uses the values as {t}; read them as strings and convert \
+                         at the use, such as toInt(d[\"k\"])"
+                    ),
+                );
+            }
+        }
+        Ty::Map(Box::new(value))
+    }
+
+    /// Purpose: This function returns a node's slot and records it as a value
+    /// `toDict` reads.
+    ///
+    /// Inputs:
+    /// - `f`: the frame.
+    /// - `node`: the address the slot is cached under.
+    ///
+    /// Outputs: the slot.
+    fn todict_slot(&mut self, f: &mut Frame, node: usize) -> Ty {
+        let slot = self.slot(f, node);
+        if !self.is_todict_slot(&slot) {
+            self.todict_slots.push(slot.clone());
+        }
+        slot
+    }
+
+    /// Purpose: This function says whether a type is a slot holding values
+    /// `toDict` reads.
+    ///
+    /// Inputs:
+    /// - `t`: a type.
+    ///
+    /// Outputs: true when `t` is one of `todict_slots`.
+    pub(super) fn is_todict_slot(&mut self, t: &Ty) -> bool {
+        for i in 0..self.todict_slots.len() {
+            let s = self.todict_slots[i].clone();
+            if self.store.same_slot(&s, t) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Purpose: This function gives an empty `toDict` slot the shape its use
+    /// asks for: a dict when it is indexed by a str or given a dict method, an
+    /// array when indexed by an int or given an array method.
+    ///
+    /// Inputs:
+    /// - `v`: the empty slot.
+    /// - `as_dict`: a dict when true, an array when false.
+    /// - `span`: where.
+    /// - `f`: the frame.
+    /// - `node`: the address the inner slot is cached under.
+    ///
+    /// Outputs: the inner slot: the dict's value type or the array's element
+    /// type, which follows the same rule.
+    pub(super) fn settle_todict(
+        &mut self,
+        v: &Ty,
+        as_dict: bool,
+        span: Span,
+        f: &mut Frame,
+        node: usize,
+    ) -> Ty {
+        let inner = self.todict_slot(f, node);
+        let shape = if as_dict {
+            Ty::Map(Box::new(inner.clone()))
+        } else {
+            Ty::Array(Box::new(inner.clone()))
+        };
+        self.unify(v, &shape, span, "a value toDict reads");
+        inner
+    }
+
+    /// Purpose: This function makes every `toDict` slot nothing filled a str,
+    /// once the passes have settled.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: true when it filled one, so the passes go on from that.
+    pub(super) fn default_todict_values(&mut self) -> bool {
+        let mut filled = false;
+        for slot in self.todict_slots.clone() {
+            if matches!(self.store.shallow(&slot), Ty::Var(_)) {
+                let _ = self.store.join(&slot, &Ty::Str);
+                filled = true;
+            }
+        }
+        filled
+    }
+}
+
+/// Purpose: This function says which shape a method asks of a `toDict` value
+/// whose type is not settled: a method only dicts have makes it a dict, one
+/// only arrays have an array, and one strings share, such as `len`, neither.
+///
+/// Inputs:
+/// - `name`: the method.
+///
+/// Outputs: `Some(true)` for a dict, `Some(false)` for an array, or `None`.
+pub(super) fn todict_method_shape(name: &str) -> Option<bool> {
+    let on_str = crate::string::STR_METHODS.contains(&name);
+    let on_dict = crate::dict::DICT_METHODS.contains(&name) || name == "merge";
+    let on_array = crate::array::ARRAY_METHODS.contains(&name);
+    match (on_dict, on_array, on_str) {
+        (true, false, false) => Some(true),
+        (false, true, false) => Some(false),
+        _ => None,
     }
 }

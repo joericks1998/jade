@@ -13,9 +13,9 @@ a-b
 tri
 3
 c
-[3 corners]
+["3 corners"]
 true
-[a, b, c]
+["a", "b", "c"]
 nil
 42
 0

@@ -56,7 +56,6 @@ pub mod env;
 pub mod fs;
 pub mod future;
 pub mod http;
-pub mod json;
 pub mod math;
 pub mod path;
 pub mod random;

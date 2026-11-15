@@ -137,21 +137,19 @@ So adding a helper to `geometry.jde` never quietly widens what users of `mathlib
 
 ## Standard Library Packages
 
-Import a standard-library package with `::` notation, such as `use std::json`, never with a quoted path. These packages are always available and need no installation.
+Import a standard-library package with `::` notation, such as `use std::path`, never with a quoted path. These packages are always available and need no installation.
 
 ```jade
 use std::math
-use std::json
 use std::path
 use std::random
 
 let n = math.sqrt(144.0)          // 12.0
-let data = json.parse('{"x": 1}')
 let p = path.join("src", "main.jde")
 let roll = random.int(1, 6)
 ```
 
-Importing a package binds it as a global variable named after the package, such as `math`, `json`, or `path`. The table below lists every available package.
+Importing a package binds it as a global variable named after the package, such as `math`, `fs`, or `path`. The table below lists every available package.
 
 :::warning
 Jade rejects quoted-string imports of every kind at compile time, with a `QuotedImport` error. That covers both `use "std/math"` and `use "lib.jde" as lib`. The `as` alias is rejected too, with `ImportAlias`. Always name a module with `::` notation, such as `use std::math` or `use utils`.
@@ -168,11 +166,12 @@ Jade rejects quoted-string imports of every kind at compile time, with a `Quoted
 | `use std::http` | `http` | `get`, `post`, `put`, `delete`, `head`, `get_bytes`, `post_bytes` |
 | `use std::uhttp` | `uhttp` | The same API over a Unix domain socket, plus `stream` |
 | `use std::sh` | `sh` | `exec`, `run`, `output` |
-| `use std::json` | `json` | `parse`, `stringify`, `stringify_pretty` |
 | `use std::env` | `env` | `get`, `set`, `args`, `cwd` |
 | `use std::path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
 | `use std::random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
 | `use std::bytes` | `bytes` | `zeros`, `from_ints`, `concat` |
+
+JSON needs no import: `toDict(text)` reads it and `toString(d)` writes it. `std::json` was removed in 2.0.7, and `use std::json` is refused with a message naming the two.
 
 See the [Standard Library](stdlib) reference for full API documentation.
 

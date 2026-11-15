@@ -1,0 +1,26 @@
+// toDict on text that is not a JSON object.
+//
+// Until 2.0.7 this was json/parse. The compiled backend once answered nil here
+// while the interpreter raised, so a program took the success branch on
+// malformed input and every try/catch written around a parse stopped running.
+// Nothing printed a warning.
+//
+// The error text is not printed here; to_dict/ prints the messages.
+
+fn attempt(label, s) {
+    try {
+        let v = toDict(s)
+        print(f"{label}: ok {v}")
+    } catch e {
+        print(f"{label}: raised")
+    }
+}
+
+attempt("object     ", "{\"a\": 1}")
+attempt("unterminated", "{\"typ")
+// A good read after a bad one: a stale failure would raise here.
+attempt("object again", "{\"a\": 1}")
+attempt("trailing junk", "{} oops")
+attempt("empty       ", "")
+// toDict reads an object; an array is refused.
+attempt("array       ", "[1, 2, 3]")
