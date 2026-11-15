@@ -30,7 +30,7 @@ let animals = [
 ]
 
 for x in animals {
-    if x is Dog {
+    if (x is Dog) {
         print(f"{x.name} is a dog, a {x.breed}")
     } else {
         print(f"{x.name} is not a dog")
@@ -39,7 +39,7 @@ for x in animals {
 
 // It combines with `&&`, which narrows its right side by its left.
 for x in animals {
-    if x is Cat && x.indoor {
+    if (x is Cat && x.indoor) {
         print(f"{x.name} stays in")
     }
 }

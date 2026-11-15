@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process};
 
-use crate::frontend::lexer::tokenize;
+use crate::frontend::lexer::{Token, TokenKind, tokenize};
 
 /// `jade fmt <path> [--check]`
 ///
@@ -11,7 +11,8 @@ use crate::frontend::lexer::tokenize;
 /// **Note:** Jade's lexer strips comments before the token stream is produced,
 /// so this formatter works directly on source text (line-based) to preserve
 /// comments.  Limitations: operator spacing is not normalised; only
-/// indentation and trailing whitespace are fixed.
+/// indentation and trailing whitespace are fixed, and a bare `if`, `elif` or
+/// `while` condition, which 2.0.10 refuses, is put in parentheses.
 pub fn run_fmt(path: &str, check: bool) {
     let p = Path::new(path);
     if !p.exists() {
@@ -47,7 +48,10 @@ pub fn run_fmt(path: &str, check: bool) {
             }
         };
 
-        let formatted = format_source(&source);
+        // Parentheses first, so the whitespace pass lays out the final text.
+        // `add_condition_parens` checks its own tokens.
+        let parened = add_condition_parens(&source);
+        let formatted = format_source(&parened);
         if formatted == source {
             continue;
         }
@@ -56,7 +60,7 @@ pub fn run_fmt(path: &str, check: bool) {
         // of.  A whitespace-only rewrite has to lex to the same tokens; if it
         // does not, that is a bug here and the user's file is the wrong place
         // to discover it.
-        if !tokens_agree(&source, &formatted) {
+        if !tokens_agree(&parened, &formatted) {
             eprintln!(
                 "error: formatting '{}' would change what it means; left unchanged \
                  (please report this)",
@@ -100,10 +104,154 @@ pub(crate) fn tokens_agree(before: &str, after: &str) -> bool {
     }
 }
 
+/// Put each bare `if`, `elif` and `while` condition in parentheses, which
+/// 2.0.10 requires: `if x > 0 {` becomes `if (x > 0) {`, and `if (a) and (b) {`,
+/// whose first group closes before the condition does, becomes
+/// `if ((a) and (b)) {`. This is what lets `jade fmt` move an older file to the
+/// new form in one command.
+///
+/// It works from the lexer's tokens, so nothing inside a string or a comment is
+/// touched, and it inserts the two characters into the source text, so the rest
+/// of the file is kept byte for byte. A condition already in one pair of
+/// parentheses is left alone, so a file that compiles comes back unchanged.
+///
+/// A source that does not lex comes back unchanged, as does any result whose
+/// tokens are not the source's plus the parentheses added.
+pub(crate) fn add_condition_parens(src: &str) -> String {
+    let Ok(tokens) = tokenize(src) else { return src.to_string() };
+    let chars: Vec<(usize, char)> = src.char_indices().collect();
+    // The char index each line starts at, since a span counts chars from 1.
+    let mut line_starts = vec![0];
+    line_starts.extend(chars.iter().enumerate().filter(|(_, c)| c.1 == '\n').map(|(i, _)| i + 1));
+    let char_at = |t: &Token| {
+        let line = line_starts.get(t.span.line.checked_sub(1)?)?;
+        Some(line + t.span.col.checked_sub(1)?).filter(|&i| i < chars.len())
+    };
+
+    // (byte offset, text) to insert, and the token indices they go before.
+    let mut inserts: Vec<(usize, &str)> = Vec::new();
+    let mut before: Vec<(usize, TokenKind)> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if !matches!(t.kind, TokenKind::If | TokenKind::Elif | TokenKind::While) {
+            continue;
+        }
+        let start = i + 1;
+        let Some(brace) = block_brace(&tokens, i) else { continue };
+        if tokens[start].kind == TokenKind::LParen && closing(&tokens, start) == Some(brace - 1) {
+            continue;
+        }
+        let (Some(open), Some(mut close)) = (char_at(&tokens[start]), char_at(&tokens[brace]))
+        else {
+            return src.to_string();
+        };
+        // The `)` goes right after the condition, before any space ahead of `{`.
+        while close > open && chars[close - 1].1.is_whitespace() {
+            close -= 1;
+        }
+        inserts.push((chars[open].0, "("));
+        inserts.push((chars[close].0, ")"));
+        before.push((start, TokenKind::LParen));
+        before.push((brace, TokenKind::RParen));
+    }
+    if inserts.is_empty() {
+        return src.to_string();
+    }
+
+    inserts.sort_by_key(|(at, _)| *at);
+    let mut out = String::with_capacity(src.len() + inserts.len());
+    let mut last = 0;
+    for (at, text) in inserts {
+        out.push_str(&src[last..at]);
+        out.push_str(text);
+        last = at;
+    }
+    out.push_str(&src[last..]);
+
+    // The result has to lex to the source's tokens with the parentheses in
+    // their places, or it is not written.
+    before.sort_by_key(|(at, _)| *at);
+    let mut want: Vec<&TokenKind> = Vec::with_capacity(tokens.len() + before.len());
+    let mut next = before.iter().peekable();
+    for (i, t) in tokens.iter().enumerate() {
+        while let Some((_, kind)) = next.next_if(|(at, _)| *at == i) {
+            want.push(kind);
+        }
+        want.push(&t.kind);
+    }
+    match tokenize(&out) {
+        Ok(got) if got.len() == want.len() && got.iter().zip(&want).all(|(g, w)| g.kind == **w) => {
+            out
+        }
+        _ => src.to_string(),
+    }
+}
+
+/// The index of the `{` that opens the block of the `if`, `elif` or `while` at
+/// `keyword`: the first one outside any bracket that follows the end of an
+/// operand. A `{` after an operator starts a dict literal inside the condition,
+/// as in `if key in {"a": 1} {`. `None` if the statement ends first.
+fn block_brace(tokens: &[Token], keyword: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in keyword + 1..tokens.len() {
+        match tokens[k].kind {
+            TokenKind::LParen | TokenKind::LBracket => depth += 1,
+            TokenKind::LBrace => {
+                if depth == 0 && k > keyword + 1 && ends_operand(&tokens[k - 1].kind) {
+                    return Some(k);
+                }
+                depth += 1;
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                depth = depth.checked_sub(1)?;
+            }
+            TokenKind::Semicolon if depth == 0 => return None,
+            TokenKind::Eof => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a token can end an operand, so that a `{` after it cannot be the
+/// start of one.
+fn ends_operand(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier(_)
+            | TokenKind::Integer(_)
+            | TokenKind::Float(_)
+            | TokenKind::Str(_)
+            | TokenKind::FStr(_)
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::RParen
+            | TokenKind::RBracket
+            | TokenKind::RBrace
+    )
+}
+
+/// The index of the bracket that closes the one at `open`.
+fn closing(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, t) in tokens.iter().enumerate().skip(open) {
+        match t.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// An open delimiter, and what it means for indentation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Open {
-    /// A `{` that ended its line, so it opens a block: `fn f() {`, `if x {`, a
+    /// A `{` that ended its line, so it opens a block: `fn f() {`, `if (x) {`, a
     /// dict literal written across lines.  Its contents indent one level.
     Block,
     /// A `(`, `[`, or a `{` with more of the same line after it — a single

@@ -52,7 +52,7 @@ print(values.marks([true, false, true]))
 
 // An optional comes back as nil or a value.
 let found = values.find(["apple", "banana"], "ban")
-if found != nil {
+if (found != nil) {
     print(found)
 }
 print(values.find(["apple"], "kiwi"))

@@ -61,8 +61,8 @@ try {
 // thing that actually stops work, and it is the task's choice.
 async fn polite() {
     let i = 0
-    while i < 100 {
-        if cancelled() {
+    while (i < 100) {
+        if (cancelled()) {
             return "stopped"
         }
         time.sleep(0.01)

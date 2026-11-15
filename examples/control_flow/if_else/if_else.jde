@@ -1,5 +1,5 @@
 fn max(a, b) {
-    if a > b {
+    if (a > b) {
         return a
     } else {
         return b
@@ -7,7 +7,7 @@ fn max(a, b) {
 }
 
 fn is_positive(x) {
-    if x > 0 {
+    if (x > 0) {
         return true
     } else {
         return false
@@ -15,10 +15,10 @@ fn is_positive(x) {
 }
 
 fn clamp(x, lo, hi) {
-    if x < lo {
+    if (x < lo) {
         return lo
     }
-    if x > hi {
+    if (x > hi) {
         return hi
     }
     return x

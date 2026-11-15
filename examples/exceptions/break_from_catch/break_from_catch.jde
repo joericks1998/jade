@@ -8,13 +8,13 @@
 // its own exceptions rather than landing in an arm this loop already left.
 
 fn step(n) {
-    if n > 3 { raise "EOF" }
+    if (n > 3) { raise "EOF" }
     return n * 10
 }
 
 let mut_i = 0
 let mut_seen = 0
-while true {
+while (true) {
     mut_i = mut_i + 1
     try {
         print(step(mut_i))
@@ -28,7 +28,7 @@ print(mut_seen)
 // Leaving from the `try` body itself pops the handler too.
 for i in [1, 2, 3] {
     try {
-        if i == 2 { break }
+        if (i == 2) { break }
         print(i)
     } catch e {
         print("not reached")

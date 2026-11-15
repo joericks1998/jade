@@ -79,7 +79,7 @@ fn utc(ts) {
 fn parts(ts) {
     let days = int(ts) / 86400
     let secs = int(ts) % 86400
-    if secs < 0 {
+    if (secs < 0) {
         days = days - 1
         secs = secs + 86400
     }
@@ -89,7 +89,7 @@ fn parts(ts) {
     p.second = secs % 60
     // 1970-01-01 was a Thursday, weekday 4.
     p.weekday = (days + 4) % 7
-    if p.weekday < 0 {
+    if (p.weekday < 0) {
         p.weekday = p.weekday + 7
     }
     p.yearday = days - _days_from_civil(p.year, 1, 1) + 1
@@ -105,7 +105,7 @@ fn stamp(year, month, day, hour = 0, minute = 0, second = 0) {
     let m = __sys.wrap_sub(int(month), 1)
     let carry = m / 12
     m = m % 12
-    if m < 0 {
+    if (m < 0) {
         carry = carry - 1
         m = m + 12
     }
@@ -121,11 +121,11 @@ fn stamp(year, month, day, hour = 0, minute = 0, second = 0) {
 // The steps a far-out year or day can overflow wrap, as v1's did; within the
 // calendar's range nothing does.
 fn _days_from_civil(y, m, d) {
-    if m <= 2 {
+    if (m <= 2) {
         y = __sys.wrap_sub(y, 1)
     }
     let era = y / 400
-    if y < 0 {
+    if (y < 0) {
         era = __sys.wrap_sub(y, 399) / 400
     }
     let yoe = __sys.wrap_sub(y, __sys.wrap_mul(era, 400))
@@ -140,7 +140,7 @@ fn _days_from_civil(y, m, d) {
 fn _civil_from_days(days) {
     let z = days + 719468
     let era = z / 146097
-    if z < 0 {
+    if (z < 0) {
         era = (z - 146096) / 146097
     }
     let doe = z - era * 146097
@@ -149,11 +149,11 @@ fn _civil_from_days(days) {
     let mp = (5 * doy + 2) / 153
     let d = doy - (153 * mp + 2) / 5 + 1
     let m = mp + 3
-    if mp >= 10 {
+    if (mp >= 10) {
         m = mp - 9
     }
     let y = yoe + era * 400
-    if m <= 2 {
+    if (m <= 2) {
         y = y + 1
     }
     return TimeParts {
@@ -176,7 +176,7 @@ fn _two(n) {
 // Purpose: This function writes a year as at least four characters, a minus
 // sign included, as C's `%04lld` does: `0042`, `-001`.
 fn _year(y) {
-    if y < 0 {
+    if (y < 0) {
         return "-" + toString(0 - y).pad_start(3, "0")
     }
     return toString(y).pad_start(4, "0")

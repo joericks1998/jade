@@ -27,8 +27,10 @@ struct Parser {
     /// Depth of nested `async fn` definitions. Allows `await` to know it is inside an async context.
     async_fn_depth: usize,
     /// When false, a bare identifier followed by `{` is NOT parsed as a struct
-    /// literal. Set to false while parsing `if`/`while` conditions so that
-    /// `while running { … }` does not try to read `running {…}` as a struct.
+    /// literal. Set to false while parsing a `for` loop's iterable so that
+    /// `for x in items { … }` does not try to read `items {…}` as a struct.
+    /// An `if` or `while` condition sits in parentheses since 2.0.10, so it
+    /// needs no such rule and turns it back on inside them.
     struct_literal_allowed: bool,
     /// How many nested expressions/blocks are currently open. Bounded by
     /// [`MAX_NESTING_DEPTH`] — see `enter`.
@@ -717,23 +719,65 @@ impl Parser {
         Ok(Stmt::Return { value: Some(value), span })
     }
 
-    /// Parse an expression that will be used as a control-flow condition.
-    /// Struct literals are disallowed here so that `while running { … }` does
-    /// not try to interpret `running {…}` as a struct literal.
-    fn parse_condition(&mut self) -> Result<Expr> {
+    /// Parse the condition of an `if`, `elif` or `while`: one parenthesized
+    /// expression, then the block's `{`, as in `if (x > 0) {`.
+    ///
+    /// Since 2.0.10 the parentheses are required. A bare condition, and one
+    /// whose parentheses close before it ends, as in `if (a) and (b) {`, are
+    /// refused with `ConditionNeedsParens`, which shows the fix. Inside the
+    /// parentheses a class literal is allowed: the block's `{` comes after the
+    /// `)`, so `if (p == Point { x: 1 }) {` cannot be misread.
+    fn parse_condition(&mut self, keyword: &'static str) -> Result<Expr> {
+        let span = self.peek().span;
+        if self.peek().kind != TokenKind::LParen {
+            return Err(JadeError::ConditionNeedsParens { keyword, span });
+        }
+        let start = self.pos;
+        self.advance(); // consume `(`
         let saved = self.struct_literal_allowed;
-        self.struct_literal_allowed = false;
-        let cond = self.parse_pipe()?;
+        self.struct_literal_allowed = true;
+        let cond = self.parse_pipe();
         self.struct_literal_allowed = saved;
+        let cond = cond?;
+        self.expect(&TokenKind::RParen)?;
+        if self.peek().kind != TokenKind::LBrace && self.bare_condition_at(start) {
+            return Err(JadeError::ConditionNeedsParens { keyword, span });
+        }
         Ok(cond)
     }
 
-    /// Parse `if <condition> { <then> }`, optional `elif` chain, optional `else`.
+    /// Whether the tokens from `start` read as a whole condition without
+    /// parentheses around it, followed by the block's `{`: true for
+    /// `(a) and (b) {`, whose first group closes before the condition does.
+    /// It only looks; the position is restored. Anything else after the `)`
+    /// is left for `parse_block` to report as a missing `{`.
+    fn bare_condition_at(&mut self, start: usize) -> bool {
+        let pos = self.pos;
+        let saved = self.struct_literal_allowed;
+        self.pos = start;
+        self.struct_literal_allowed = false;
+        let whole = self.parse_pipe().is_ok() && self.peek().kind == TokenKind::LBrace;
+        self.struct_literal_allowed = saved;
+        self.pos = pos;
+        whole
+    }
+
+    /// Parse the iterable of a `for`. Struct literals are disallowed here so
+    /// that `for x in items { … }` does not read `items {…}` as a struct literal.
+    fn parse_iterable(&mut self) -> Result<Expr> {
+        let saved = self.struct_literal_allowed;
+        self.struct_literal_allowed = false;
+        let iterable = self.parse_pipe();
+        self.struct_literal_allowed = saved;
+        iterable
+    }
+
+    /// Parse `if (<condition>) { <then> }`, optional `elif` chain, optional `else`.
     fn parse_if(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `if`
 
-        let condition = self.parse_condition()?;
+        let condition = self.parse_condition("if")?;
         let then_body = self.parse_block()?;
 
         // RBrace inserts an auto-semicolon; consume it before checking for elif/else.
@@ -742,7 +786,7 @@ impl Parser {
         }
 
         let else_body = if self.peek().kind == TokenKind::Elif {
-            // Desugar `elif cond { … }` into `else { if cond { … } … }`
+            // Desugar `elif (cond) { … }` into `else { if (cond) { … } … }`
             Some(vec![self.parse_elif()?])
         } else if self.peek().kind == TokenKind::Else {
             self.advance(); // consume `else`
@@ -754,13 +798,13 @@ impl Parser {
         Ok(Stmt::If { condition, then_body, else_body, span })
     }
 
-    /// Parse `elif <condition> { <then> }` (and any further elif/else chain).
+    /// Parse `elif (<condition>) { <then> }` (and any further elif/else chain).
     /// Returns a `Stmt::If` that represents the desugared else-branch.
     fn parse_elif(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `elif`
 
-        let condition = self.parse_condition()?;
+        let condition = self.parse_condition("elif")?;
         let then_body = self.parse_block()?;
 
         if self.peek().kind == TokenKind::Semicolon {
@@ -779,7 +823,6 @@ impl Parser {
         Ok(Stmt::If { condition, then_body, else_body, span })
     }
 
-    /// Parse `while <condition> { <body> }`
     /// `break` — leave the innermost loop.
     fn parse_break(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
@@ -802,11 +845,12 @@ impl Parser {
         Ok(Stmt::Continue { span })
     }
 
+    /// Parse `while (<condition>) { <body> }`
     fn parse_while(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `while`
 
-        let condition = self.parse_condition()?;
+        let condition = self.parse_condition("while")?;
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
@@ -836,7 +880,7 @@ impl Parser {
         };
 
         self.expect(&TokenKind::In)?;
-        let iterable = self.parse_condition()?;
+        let iterable = self.parse_iterable()?;
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;

@@ -32,7 +32,7 @@ print(writes_then_raises())
 fn heap_writes_then_raises() {
     let xs = [0]
     let i = 0
-    while i < 50 {
+    while (i < 50) {
         xs = [i, i]
         try {
             xs = [i, i, i]
@@ -55,7 +55,7 @@ class Payload {
 
 let round = 0
 let seen = 0
-while round < 200 {
+while (round < 200) {
     try {
         raise Payload { items: [round, round] }
     } catch Payload p {
@@ -84,7 +84,7 @@ fn level1(n) {
 
 let deep = 0
 let k = 0
-while k < 200 {
+while (k < 200) {
     try {
         level1(k)
     } catch Payload p {

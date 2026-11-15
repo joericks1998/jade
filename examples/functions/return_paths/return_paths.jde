@@ -19,7 +19,7 @@
 // Returning on only some paths: the others answer nil, so the result is an
 // optional int.
 fn maybe(c) {
-    if c {
+    if (c) {
         return 1
     }
 }
@@ -41,7 +41,7 @@ print(double(5) + 1)
 
 // Every path agreeing still gives a usable type.
 fn always_int(c) {
-    if c {
+    if (c) {
         return 1
     }
     return 2
@@ -53,7 +53,7 @@ print(always_int(true) + always_int(false))
 // A return through a catch arm counts as a path.
 fn caught(c) {
     try {
-        if c {
+        if (c) {
             raise "x"
         }
         return "1"

@@ -2,7 +2,7 @@
   "name": "jadelang-extension",
   "displayName": "Jade Language",
   "description": "Syntax highlighting for the Jade programming language (.jde files)",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "publisher": "joericks",
   "engines": {
     "vscode": "^1.75.0"

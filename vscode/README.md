@@ -2,7 +2,7 @@
 
 Syntax highlighting for the [Jade programming language](https://jadelang.org), in `.jde` files.
 
-The extension colors all of Jade 2.0.2: classes and their parents, `@public` and type decorators, methods defined as `fn Type::method`, functions and their parameters, calls, keywords, strings and f-string interpolation, and the prompt operators, with prompts in jade green. Syntax the compiler has removed, such as `struct` or `use x as y`, is struck through in red, and an escape the compiler would refuse is red. It also sets up comment toggling, bracket matching and auto-closing pairs for `.jde` files.
+The extension colors all of Jade 2.0.2: classes and their parents, `@public` and type decorators, methods defined as `fn Type::method`, functions and their parameters, calls, keywords, strings and f-string interpolation, and the prompt operators, with prompts in jade green. Syntax the compiler has removed, such as `struct`, `use x as y` or a condition outside parentheses, `if x > 0 {`, is struck through in red, and an escape the compiler would refuse is red. It also sets up comment toggling, bracket matching and auto-closing pairs for `.jde` files.
 
 Install it from the Visual Studio Marketplace by searching for *Jade Language*, or with:
 

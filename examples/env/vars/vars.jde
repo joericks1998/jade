@@ -12,12 +12,12 @@ use std::env
 use std::sh
 
 let args = env.args()
-if len(args) > 1 {
-    if args[1] == "args" {
+if (len(args) > 1) {
+    if (args[1] == "args") {
         print(len(args))
         print(args[2])
         print(args[3])
-    } elif args[1] == "env" {
+    } elif (args[1] == "env") {
         print(env.get("JADE_GOOD"))
         // A value that is not UTF-8 reads as nil, as Rust's env::var gave.
         print(env.get("JADE_BAD"))
@@ -30,7 +30,7 @@ if len(args) > 1 {
     env.set("JADE_FIXTURE_VAR", "echo from the environment")
     let v = env.get("JADE_FIXTURE_VAR")
     print(v)
-    if v != nil {
+    if (v != nil) {
         try {
             sh.exec(v)
             print("NOT REFUSED")

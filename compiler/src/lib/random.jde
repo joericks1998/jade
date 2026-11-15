@@ -16,7 +16,7 @@ use std::__sys
 fn int(lo, hi) {
     let a = long(lo)
     let b = long(hi)
-    if a > b {
+    if (a > b) {
         raise f"random.int: min ({a}) > max ({b})"
     }
     // How many values there are to draw from, which wraps to 0 for the whole
@@ -35,7 +35,7 @@ fn float() {
 // Purpose: This function picks one element of an array.
 fn choice(a) {
     let n = len(a)
-    if n == 0 {
+    if (n == 0) {
         raise "random.choice: the array is empty"
     }
     return a[__sys.rand_below(n)]
@@ -45,7 +45,7 @@ fn choice(a) {
 // last element down.
 fn shuffle(a) {
     let i = len(a) - 1
-    while i > 0 {
+    while (i > 0) {
         let j = __sys.rand_below(i + 1)
         let held = a[i]
         a[i] = a[j]

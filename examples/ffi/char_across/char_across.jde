@@ -20,7 +20,7 @@ print(toChar(20013))
 let field = [toChar("p"), toChar("u"), toChar("s"), toChar("h"), toChar(0), toChar(0), toChar(0)]
 let text = ""
 for ch in field {
-    if toInt(ch) == 0 {
+    if (toInt(ch) == 0) {
         break
     }
     text = text + ch

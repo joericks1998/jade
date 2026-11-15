@@ -8,7 +8,7 @@
 
 fn doubles(n) {
     let i = 0
-    while i < n {
+    while (i < n) {
         yield i * 2
         i = i + 1
     }
@@ -37,8 +37,8 @@ print(s)
 // be two things at once, and that is a compile error.
 fn upto(limit) {
     let i = 0
-    while true {
-        if i >= limit {
+    while (true) {
+        if (i >= limit) {
             return
         }
         yield i

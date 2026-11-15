@@ -19,7 +19,7 @@ fn scale(r, k) {
 fn largest(xs) {
     let best = xs[0]
     for x in xs {
-        if x > best { best = x }
+        if (x > best) { best = x }
     }
     return best
 }

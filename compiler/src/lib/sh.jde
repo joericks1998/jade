@@ -30,7 +30,7 @@ fn exec(cmd) {
     __sys.close(p[1])
     __sys.close(p[2])
     let code = __sys.wait(p[0])
-    if code != 0 {
+    if (code != 0) {
         let err = __sys.lossy(out[1]).trim_start().trim_end()
         raise f"I/O error: sh.exec: command exited with code {code}: {err}"
     }
@@ -38,7 +38,7 @@ fn exec(cmd) {
     // longer UTF-8 sequence, so they can go before decoding.
     let text = out[0]
     let end = len(text)
-    while end > 0 and text[end - 1] == 10 {
+    while (end > 0 and text[end - 1] == 10) {
         end = end - 1
     }
     return __sys.lossy(text.slice(0, end))
@@ -68,7 +68,7 @@ fn output(cmd) {
 fn _start(cmd, sink, capture) {
     let p = __sys.shell(cmd, sink, capture)
     let code = __sys.os_error()
-    if code != 0 {
+    if (code != 0) {
         raise f"I/O error: {sink}: could not spawn shell: {__sys.strerror(code)} (os error {code})"
     }
     return p

@@ -514,7 +514,7 @@ print(f"current branch: {branch}")
 
 // run sends the command's output straight to the terminal
 let code = sh.run("npm test")
-if code != 0 {
+if (code != 0) {
     raise "tests failed"
 }
 
@@ -571,7 +571,7 @@ use std::env
 
 // Read an env var with a fallback
 let key = env.get("API_KEY")
-if key == nil {
+if (key == nil) {
     raise "API_KEY is not set"
 }
 
@@ -581,7 +581,7 @@ env.set("DEBUG", "1")
 // Inspect command-line arguments
 let args = env.args()
 print(f"running: {args[0]}")
-if args.len() > 1 {
+if (args.len() > 1) {
     print(f"first arg: {args[1]}")
 }
 
@@ -732,7 +732,7 @@ use std::bytes
 
 fn fill(dst, value) {
     let i = 0
-    while i < len(dst) {
+    while (i < len(dst)) {
         dst[i] = value
         i = i + 1
     }

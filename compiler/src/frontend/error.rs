@@ -42,9 +42,19 @@ pub fn undefined_variable_hint(name: &str) -> &'static str {
     match name {
         "exit" => {
             "\n  Jade has no `exit`. An uncaught `raise` at the top level exits 1, \
-             so write `if code != 0 { raise \"failed\" }`."
+             so write `if (code != 0) { raise \"failed\" }`."
         }
         _ => "",
+    }
+}
+
+/// The article and an example for `ConditionNeedsParens`, so the message
+/// shows the fix in the words of the statement that was refused.
+fn condition_example(keyword: &str) -> (&'static str, &'static str) {
+    match keyword {
+        "elif" => ("an", "elif (x == 0) {"),
+        "while" => ("a", "while (running) {"),
+        _ => ("an", "if (x > 0) {"),
     }
 }
 
@@ -170,6 +180,12 @@ pub enum JadeError {
     /// `|x| expr` used a closure, which 2.0.1 removed. Named functions are
     /// values, and the pipe passes a value as a function's first argument.
     ClosureRemoved { span: Span },
+
+    /// An `if`, `elif` or `while` condition that is not one parenthesized
+    /// expression, which 2.0.10 requires: a bare `if x > 0 {`, or parentheses
+    /// that close before the condition does, as in `if (a) and (b) {`.
+    /// `keyword` is the statement's own keyword, so the fix reads in its words.
+    ConditionNeedsParens { keyword: &'static str, span: Span },
 
     /// Jade 2.0's static backend reached a feature it cannot compile yet. It
     /// lands phase by phase (see `design/v2-static-values.md`), so this names
@@ -469,6 +485,15 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] closures were removed in 2.0.1; write a named function and pass it by name, or pipe a value into one: `5 |> scale(3)` calls `scale(5, 3)`",
                 span.line, span.col
             ),
+            JadeError::ConditionNeedsParens { keyword, span } => {
+                let (article, example) = condition_example(keyword);
+                write!(
+                    f,
+                    "[{}:{}] syntax error: {} {} condition goes in parentheses: write '{}', \
+                     or run 'jade fmt' to add them",
+                    span.line, span.col, article, keyword, example
+                )
+            }
             JadeError::NotYetStatic { what, span } => {
                 write!(f, "[{}:{}] jade cannot compile {} yet", span.line, span.col, what)
             }

@@ -5,7 +5,7 @@
 //! next pass reuses it. Reading a variable gives its slot's type, and assigning
 //! one joins into it, so a variable has one type for its whole life. The only
 //! way a variable's type differs from its slot's is narrowing: inside
-//! `if x != nil { … }`, `x` is read as its non-optional type.
+//! `if (x != nil) { … }`, `x` is read as its non-optional type.
 
 use std::collections::HashMap;
 
@@ -291,7 +291,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::If { condition, then_body, else_body, span } => {
-                // Library code's `if x is int`: one branch per instance.
+                // Library code's `if (x is int)`: one branch per instance.
                 if super::is_library_fn(&f.key.func) {
                     let answer = self.static_answer(condition, f);
                     match answer {
@@ -325,7 +325,7 @@ impl<'a> Checker<'a> {
                 self.check_narrowed_block(then_body, f, then_narrow);
                 match else_body {
                     Some(e) => self.check_narrowed_block(e, f, else_narrow),
-                    // `if x == nil { return }` leaves `x` known to be there for
+                    // `if (x == nil) { return }` leaves `x` known to be there for
                     // the rest of the block.
                     None if exits(then_body) => {
                         let narrowed = f.narrowed.last_mut().expect("scope");
@@ -535,7 +535,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // Library code's `if x is str`, with `x` a `str?`, reads `x` as a
+            // Library code's `if (x is str)`, with `x` a `str?`, reads `x` as a
             // str inside and as nil outside; `x is nil` the other way round.
             ExprKind::Is { value, class }
                 if let Some(want) = super::builtin_test_type(class)
@@ -555,7 +555,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // `if a is Dog { … }` reads `a` as a Dog inside, when Dog is
+            // `if (a is Dog) { … }` reads `a` as a Dog inside, when Dog is
             // narrower than what `a` holds.
             ExprKind::Is { value, class } => {
                 if let ExprKind::Identifier(n) = &value.kind
@@ -1484,7 +1484,7 @@ impl<'a> Checker<'a> {
     /// literal take the slot's type when the slot is a sized number type.
     ///
     /// A literal meeting a slot nothing has filled yet waits: the slot may turn
-    /// out to be a `byte`, as in `if c { return 0 } return b`. If the passes
+    /// out to be a `byte`, as in `if (c) { return 0 } return b`. If the passes
     /// settle with the slot still empty, `Checker::run` gives it the literal's
     /// own type.
     ///
@@ -2467,7 +2467,7 @@ fn falls_off(body: &[Stmt]) -> bool {
             falls_off(body) || arms.iter().any(|a| falls_off(&a.body))
         }
         Some(Stmt::While { condition, body, .. }) => {
-            // `while true { … }` with no break never falls off.
+            // `while (true) { … }` with no break never falls off.
             !(matches!(condition.kind, ExprKind::Bool(true)) && !has_break(body))
         }
         _ => true,

@@ -10,13 +10,13 @@ use std::fs
 use std::sh
 
 let args = env.args()
-if len(args) > 1 {
+if (len(args) > 1) {
     let mode = args[1]
-    if mode == "echo" {
+    if (mode == "echo") {
         fs.write_stdout_bytes(fs.read_stdin_bytes())
-    } elif mode == "count" {
+    } elif (mode == "count") {
         print(len(fs.read_stdin_bytes()))
-    } elif mode == "taint" {
+    } elif (mode == "taint") {
         let text = fs.read_stdin_bytes().decode()
         try {
             sh.exec(text)

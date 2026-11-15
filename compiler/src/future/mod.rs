@@ -10,9 +10,9 @@
 //! ```jade
 //! let pending = connect(ssid)
 //! let shown = false
-//! while running {
+//! while (running) {
 //!     draw_frame()
-//!     if !shown && pending.ready() {
+//!     if (!shown && pending.ready()) {
 //!         show_banner(await pending)
 //!         shown = true
 //!     }

@@ -258,7 +258,7 @@ fn map_and_filter_pass_extra_arguments() {
 
 #[test]
 fn tasks_join_in_order_and_settle_their_errors() {
-    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + toString(n)\n    }\n    return n / 2\n}\n\
+    let src = "async fn half(n) {\n    if (n % 2 == 1) {\n        raise \"odd \" + toString(n)\n    }\n    return n / 2\n}\n\
                print(join(half(4), half(8)))\n\
                for r in join(half(2), half(3), settle = true) {\n    print(r.ok)\n}\n\
                try {\n    join(half(1), half(2))\n} catch e {\n    print(e.message)\n}\n\
@@ -328,7 +328,7 @@ print(i["b"])
 let f = toDict('{"a": 2, "b": 0.5}')
 print(f["a"] + f["b"] * 1.0)
 let b = toDict('{"on": true, "off": false}')
-if b["on"] == true {
+if (b["on"] == true) {
     print(b)
 }
 let n = toDict('{"a": {"x": [1, 2]}, "b": {}}')
@@ -459,9 +459,9 @@ fn a_pipe_calls_its_stages_as_each_value_is_yielded() {
         "let held = two()\n",
         "print(held |> add(5))\n",
         "fn guarded() {\n    try {\n        yield 1\n        yield 2\n    } catch e {\n        print(\"inner\")\n    }\n}\n",
-        "fn no_two(x) {\n    if x == 2 {\n        raise \"two\"\n    }\n    return x\n}\n",
+        "fn no_two(x) {\n    if (x == 2) {\n        raise \"two\"\n    }\n    return x\n}\n",
         "try {\n    guarded() |> no_two |> print\n} catch e {\n    print(f\"outer {e}\")\n}\n",
-        "fn down(k) {\n    if k > 0 {\n        down(k - 1) |> print\n    }\n    yield k\n}\n",
+        "fn down(k) {\n    if (k > 0) {\n        down(k - 1) |> print\n    }\n    yield k\n}\n",
         "print(down(2))\n",
     ));
     assert_eq!(err, "");

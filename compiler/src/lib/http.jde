@@ -74,7 +74,7 @@ fn head(url, headers = nil) {
 // - `unix`: true for uhttp, which reaches the server through a Unix socket.
 fn _fetch(method, url, body, headers, unix) {
     let argv = ["curl", "-sS"]
-    if method == "HEAD" {
+    if (method == "HEAD") {
         // `--head` rather than v1's `-X HEAD`, which left curl waiting for the
         // body a HEAD response's length promised, and failing.
         argv.push("--head")
@@ -85,7 +85,7 @@ fn _fetch(method, url, body, headers, unix) {
         argv.push(method)
     }
     let target = url
-    if unix {
+    if (unix) {
         let t = _unix_target(url, f"uhttp {method}")
         argv.push("--unix-socket")
         argv.push(t[0])
@@ -94,7 +94,7 @@ fn _fetch(method, url, body, headers, unix) {
     _header_args(argv, headers)
     // A body, which must be bytes, goes to curl's standard input.
     let input = not (body is nil)
-    if input {
+    if (input) {
         argv.push("--data-binary")
         argv.push("@-")
     }
@@ -104,10 +104,10 @@ fn _fetch(method, url, body, headers, unix) {
     argv.push("--")
     argv.push(target)
     let p = __sys.spawn(argv, input)
-    if __sys.os_error() != 0 {
+    if (__sys.os_error() != 0) {
         _fail(method, url, unix, 127)
     }
-    if body is nil {
+    if (body is nil) {
     } else {
         __sys.write_child(p[1], body)
         __sys.close(p[1])
@@ -115,7 +115,7 @@ fn _fetch(method, url, body, headers, unix) {
     let raw = __sys.read_all(p[2])
     __sys.close(p[2])
     let code = __sys.wait(p[0])
-    if code != 0 {
+    if (code != 0) {
         _fail(method, url, unix, code)
     }
     return raw
@@ -127,21 +127,21 @@ fn _fetch(method, url, body, headers, unix) {
 //
 // Outputs: the socket, and the URL curl asks it for.
 fn _unix_target(url, label) {
-    if not url.starts_with("unix://") {
+    if (not url.starts_with("unix://")) {
         raise f"I/O error: {label}: url must start with unix://"
     }
     let rest = url.slice(7, len(url))
     let colon = rest.index_of(":")
     let socket = rest
     let path = ""
-    if colon >= 0 {
+    if (colon >= 0) {
         socket = rest.slice(0, colon)
         path = rest.slice(colon + 1, len(rest))
     }
-    if socket == "" {
+    if (socket == "") {
         raise f"I/O error: {label}: empty socket path"
     }
-    if path == "" {
+    if (path == "") {
         path = "/"
     }
     return [socket, "http://localhost" + path]
@@ -150,7 +150,7 @@ fn _unix_target(url, label) {
 // Purpose: This function adds a `-H` argument for each header, in the order
 // the program wrote them.
 fn _header_args(argv, headers) {
-    if headers is nil {
+    if (headers is nil) {
     } else {
         // Every header is text. Checking it here first makes a program's
         // `{str: int}` an error that names the fix, rather than the hook's
@@ -171,7 +171,7 @@ fn _text(raw) {
     let at = _status_at(raw)
     let body = raw.slice(0, _body_end(raw, at))
     let nul = 0
-    while nul < len(body) and body[nul] != 0 {
+    while (nul < len(body) and body[nul] != 0) {
         nul = nul + 1
     }
     return HttpResponse { status: _status(raw, at), body: __sys.lossy(body.slice(0, nul)) }
@@ -190,12 +190,12 @@ fn _octets(raw) {
 fn _status_at(raw) {
     let mark = "\nJADE_STATUS:".encode()
     let i = len(raw) - len(mark)
-    while i >= 0 {
+    while (i >= 0) {
         let k = 0
-        while k < len(mark) and raw[i + k] == mark[k] {
+        while (k < len(mark) and raw[i + k] == mark[k]) {
             k = k + 1
         }
-        if k == len(mark) {
+        if (k == len(mark)) {
             return i
         }
         i = i - 1
@@ -207,9 +207,9 @@ fn _status_at(raw) {
 // 0 when there is no mark.
 fn _status(raw, at) {
     let status = 0
-    if at >= 0 {
+    if (at >= 0) {
         let i = at + 13
-        while i < len(raw) and raw[i] >= 48 and raw[i] <= 57 {
+        while (i < len(raw) and raw[i] >= 48 and raw[i] <= 57) {
             status = __sys.wrap_add(__sys.wrap_mul(status, 10), raw[i] - 48)
             i = i + 1
         }
@@ -220,7 +220,7 @@ fn _status(raw, at) {
 // Purpose: This function returns where the body ends: at the mark, or at the
 // end when there is none.
 fn _body_end(raw, at) {
-    if at < 0 {
+    if (at < 0) {
         return len(raw)
     }
     return at
@@ -235,20 +235,20 @@ fn _body_end(raw, at) {
 // - `code`: curl's exit code, 127 when curl could not start.
 fn _fail(what, url, unix, code) {
     let reason = "request failed"
-    if code == 6 {
+    if (code == 6) {
         reason = "could not resolve host"
-    } elif code == 7 and unix {
+    } elif (code == 7 and unix) {
         reason = "could not connect to the socket"
-    } elif code == 7 {
+    } elif (code == 7) {
         reason = "could not connect to host"
-    } elif code == 28 {
+    } elif (code == 28) {
         reason = "request timed out"
-    } elif code == 35 {
+    } elif (code == 35) {
         reason = "TLS handshake failed"
-    } elif code == 127 {
+    } elif (code == 127) {
         reason = "curl executable not found"
     }
-    if unix {
+    if (unix) {
         raise f"I/O error: uhttp {what}: {reason}"
     }
     raise f"I/O error: http {what} '{url}': {reason} (curl exit {code})"

@@ -29,7 +29,7 @@ print(await f)
 
 // Passed into and returned from an ordinary (non-async) function.
 fn pick(a, b, first) {
-    if first {
+    if (first) {
         return a
     }
     return b

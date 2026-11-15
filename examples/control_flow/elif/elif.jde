@@ -1,7 +1,7 @@
 fn classify(x) {
-    if x > 0 {
+    if (x > 0) {
         return 1
-    } elif x < 0 {
+    } elif (x < 0) {
         return -1
     } else {
         return 0
@@ -9,13 +9,13 @@ fn classify(x) {
 }
 
 fn grade(score) {
-    if score >= 90 {
+    if (score >= 90) {
         return 4
-    } elif score >= 80 {
+    } elif (score >= 80) {
         return 3
-    } elif score >= 70 {
+    } elif (score >= 70) {
         return 2
-    } elif score >= 60 {
+    } elif (score >= 60) {
         return 1
     } else {
         return 0

@@ -1331,7 +1331,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Ok(())
             }
             ast::Stmt::If { condition, then_body, else_body, .. } => {
-                // Library code's `if x is int`, which the checker answered for
+                // Library code's `if (x is int)`, which the checker answered for
                 // this instance: only the branch it checked is lowered.
                 if let StaticTest::Known(taken) = self.static_answer(condition) {
                     return match (taken, else_body) {

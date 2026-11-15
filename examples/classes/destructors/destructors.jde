@@ -45,10 +45,10 @@ print("after work")
 
 // A loop's variable is freed at the end of each pass, and when `break` leaves.
 let i = 0
-while i < 3 {
+while (i < 3) {
     let t = Resource::new(f"pass {i}")
     i = i + 1
-    if i == 2 {
+    if (i == 2) {
         break
     }
 }

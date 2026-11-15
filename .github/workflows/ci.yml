@@ -129,8 +129,19 @@ jobs:
       # strings — changing what a program printed, in place, on a tree nobody
       # ran it over. Holding the fixture suite formatted keeps the formatter
       # honest against 70-odd real files on every push.
+      #
+      # Since 2.0.10 `jade fmt` also puts a bare `if`, `elif` or `while`
+      # condition in parentheses. The *_error.jde fixtures in
+      # control_flow/conditions/ hold bare conditions on purpose, to pin the
+      # refusal, so they are the files it skips.
       - name: Check formatting
-        run: ./target/debug/jade fmt --check examples
+        run: |
+          set -uo pipefail
+          status=0
+          while IFS= read -r file; do
+            ./target/debug/jade fmt --check "$file" || status=1
+          done < <(find examples -name '*.jde' -not -path 'examples/control_flow/conditions/*_error.jde' | sort)
+          exit $status
 
       # Builds every example and compares each binary's output to the
       # `<name>.expected` beside it. Until v1.4.8 this was a parity gate that ran

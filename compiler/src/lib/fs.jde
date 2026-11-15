@@ -56,7 +56,7 @@ fn read(path, trust = false) {
     let p = str(path)
     let text = __sys.read_text(p, bool(trust), "fs.read")
     _check("read", p)
-    if text is str {
+    if (text is str) {
         return text
     }
     raise f"I/O error: read '{p}': stream did not contain valid UTF-8"
@@ -95,12 +95,12 @@ fn delete(path) {
 // `..`, in the order the file system gives them.
 fn list_dir(path) {
     let names = __sys.read_dir(str(path))
-    if __sys.os_error() != 0 {
+    if (__sys.os_error() != 0) {
         raise "list_dir: could not read directory"
     }
     let out = []
     for name in names {
-        if name != "." and name != ".." {
+        if (name != "." and name != "..") {
             out.push(name)
         }
     }
@@ -115,21 +115,21 @@ fn mkdir(path) {
     // character. One that cannot be made is left for the last call to report.
     let i = 0
     for c in p {
-        if c == '/' and i > 0 {
+        if (c == '/' and i > 0) {
             __sys.mkdir(p.slice(0, i))
         }
         i = i + 1
     }
     __sys.mkdir(p)
     let code = __sys.os_error()
-    if code != 0 {
+    if (code != 0) {
         // v1 read the error after asking whether a directory was there, so a
         // path it could not ask about reports why it could not.
         let st = __sys.stat(p)
         let asked = __sys.os_error()
-        if asked != 0 {
+        if (asked != 0) {
             _fail("mkdir", p, asked)
-        } elif _kind(st[0]) != 0x4000 {
+        } elif (_kind(st[0]) != 0x4000) {
             _fail("mkdir", p, code)
         }
     }
@@ -190,7 +190,7 @@ fn _kind(mode) {
 // failed.
 fn _check(op, path) {
     let code = __sys.os_error()
-    if code != 0 {
+    if (code != 0) {
         _fail(op, path, code)
     }
 }

@@ -13,7 +13,7 @@ print(r["status"])                          // 200
 let listing = toDict("{\"containers\": " + r["body"] + "}")
 let containers = listing["containers"]
 print(len(containers))
-if len(containers) > 0 {
+if (len(containers) > 0) {
     print(containers[0]["Image"])
 }
 

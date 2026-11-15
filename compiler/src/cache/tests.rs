@@ -230,6 +230,12 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 21 in 2.0.10. No shape changed: an `if`, `elif` or `while`
+    // condition must be in parentheses. A tree cached before that holds a bare
+    // condition parsed, and a hit skips the parser, so `jade check` would let
+    // the file through. A 2.0.9 cache already fails the version check; this
+    // also refuses one written by a build of this version from before the rule.
+    //
     // Bumped to 20 in 2.0.6. The typed tree is gone: the cache holds one tree
     // per file, the per-file pass's output, and `Expr` became a node of `kind`
     // and `span` with a parser-only `RawPipe`. A v19 `ast.bin` holds the
@@ -279,6 +285,6 @@ fn cache_format_version_is_stable() {
     // this one cannot run, and would do it without complaining.
     // 18 in 2.0.4: `Expr::PromptDeref` lost a field and the typed tree's `Pipe` is
     // new, so a cached tree from 17 would not read back as what it was.
-    assert_eq!(CACHE_FORMAT_VERSION, 20);
+    assert_eq!(CACHE_FORMAT_VERSION, 21);
     assert!(!JADE_VERSION.is_empty());
 }

@@ -24,7 +24,7 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 
   When the file being built is the entry of the project's `[package]`, `check_package_sources` holds the declared `sources` list to what the entry actually imports, through `compare_sources`.
 - *`test.rs`* implements `jade test`. It finds every `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern, and builds and runs each one. A test passes when its binary exits 0.
-- *`fmt.rs`* implements `jade fmt`. It works line by line on source *text* rather than on the token stream, because the lexer strips comments and a reprint would lose them. It is limited on purpose: it fixes indentation and trailing whitespace, and does not normalize operator spacing. `--check` exits 1 if anything would change.
+- *`fmt.rs`* implements `jade fmt`. It works line by line on source *text* rather than on the token stream, because the lexer strips comments and a reprint would lose them. It is limited on purpose: it fixes indentation and trailing whitespace, and does not normalize operator spacing. `--check` exits 1 if anything would change. Since 2.0.10 it also puts a bare `if`, `elif` or `while` condition in parentheses, in `add_condition_parens`, which is what moves an older file to the new form in one command. That step finds each condition from the lexer's tokens, inserts the two characters into the text so the rest of the line is kept byte for byte, and checks that the result lexes to the old tokens plus the parentheses; a condition already in parentheses is left alone, so a program that compiles comes back unchanged.
 - *`new.rs`* implements `jade new` and `jade init`. It sets up a project directory from either the `basic` or the `llm` template.
 - *`pkg.rs`* implements `jade pkg add`, `remove`, `install`, `update`, and `list`.
 
@@ -65,6 +65,8 @@ A command exits the process directly on user error, by calling `process::exit(1)
   Its scanner has to know about `//` comments, both quote characters, triple-quoted strings spanning several lines, and escapes. A `{` it misreads shifts every line after it. Three separate versions of that bug shipped before v1.1.35. The worst of them reindented the *inside* of a multi-line string and silently changed what the program printed.
 
   Two things guard it now. `run_fmt` re-lexes its own output and refuses to write a file whose tokens changed. And CI keeps `examples/` formatted, so the formatter meets about seventy real files on every push.
+
+  Adding parentheses to a condition is the one change that does alter the tokens, so it runs first and checks its own result, and the whitespace pass is compared against that. CI's `jade fmt --check` skips the `*_error.jde` fixtures in `examples/control_flow/conditions/`, which hold bare conditions on purpose; the formatter would add their parentheses.
 
 ## Building and testing
 

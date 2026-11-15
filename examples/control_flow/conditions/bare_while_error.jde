@@ -1,0 +1,11 @@
+// Since 2.0.10 a `while` condition goes in parentheses.
+//
+// A bare condition is refused with a message that names the fix,
+// `while (running) {`.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let i = 0
+while i < 3 {
+    i = i + 1
+}

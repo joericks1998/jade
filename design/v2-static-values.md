@@ -70,11 +70,11 @@ let first = nil
 first = 5               // first: int?
 
 fn maybe(x) {           // maybe(int) -> int?
-    if x > 0 { return x }
+    if (x > 0) { return x }
 }
 
 let port = env.get("PORT")      // str?
-if port != nil {
+if (port != nil) {
     print(port.len())           // port is str inside this branch
 }
 print(port.len())               // type error: port may be nil here; check it first

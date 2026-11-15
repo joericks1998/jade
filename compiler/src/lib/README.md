@@ -42,8 +42,8 @@ A program with no file, such as a test's, gets its library modules through `aot:
 
 ```
 fn abs(x) {
-    if x is int {
-        if x < 0 {
+    if (x is int) {
+        if (x < 0) {
             return -x
         }
         return x

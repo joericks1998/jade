@@ -24,11 +24,11 @@ async fn broken(n) {
 let results = join(fetch(1), broken(2), fetch(3), broken(4), settle = true)
 
 for r in results {
-    if r["ok"] {
+    if (r["ok"]) {
         print("got " + toString(r["value"]))
     } else {
         let err = r["error"]
-        if err != nil {
+        if (err != nil) {
             print("lost " + err.message)
         }
     }

@@ -23,7 +23,7 @@ print(buf[3])
 // The local path: `dst` is a parameter, so the write is a different opcode.
 fn fill(dst, value) {
     let i = 0
-    while i < len(dst) {
+    while (i < len(dst)) {
         dst[i] = value
         i = i + 1
     }

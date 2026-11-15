@@ -36,7 +36,7 @@ print(set_max_tasks(4))
 let t0 = time.monotonic()
 let fs = []
 let i = 0
-while i < 8 {
+while (i < 8) {
     fs.push(nap())
     i = i + 1
 }
@@ -56,7 +56,7 @@ print(set_max_tasks(16))
 let t1 = time.monotonic()
 let gs = []
 let j = 0
-while j < 8 {
+while (j < 8) {
     gs.push(nap())
     j = j + 1
 }

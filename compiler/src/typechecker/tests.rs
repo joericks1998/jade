@@ -515,7 +515,9 @@ mod resolve {
     fn a_generator_cannot_also_return_a_value() {
         let err = resolve_err("fn g() {\n    yield 1\n    return 2\n}");
         assert!(matches!(err, JadeError::YieldAndReturn { .. }), "got {err:?}");
-        resolve_ok("fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}");
+        resolve_ok(
+            "fn g(n) {\n    yield 1\n    if (n > 0) {\n        return\n    }\n    yield 2\n}",
+        );
     }
 }
 
@@ -695,21 +697,22 @@ mod types {
 
     #[test]
     fn a_bool_condition_checks() {
-        ok("if true {\n let x = 1\n}");
-        ok("while false {\n let x = 1\n}");
+        ok("if (true) {\n let x = 1\n}");
+        ok("while (false) {\n let x = 1\n}");
     }
 
     #[test]
     fn an_int_condition_is_an_error() {
-        rejects("if 1 {\n let x = 2\n}", "an if condition");
-        rejects("while 1 {\n let x = 2\n}", "a while condition");
+        rejects("if (1) {\n let x = 2\n}", "an if condition");
+        rejects("while (1) {\n let x = 2\n}", "a while condition");
     }
 
     /// A `let` inside a block binds a name for that block, in the checker and
     /// in MIR alike, so the outer binding keeps its type after it.
     #[test]
     fn a_let_inside_a_block_shadows_for_the_block() {
-        let t = ok("fn f() { let x = 1\n if true { let x = \"s\" }\n return x + 1 }\nlet r = f()");
+        let t =
+            ok("fn f() { let x = 1\n if (true) { let x = \"s\" }\n return x + 1 }\nlet r = f()");
         assert_eq!(global(&t, "r"), Ty::Int);
     }
 
@@ -744,7 +747,7 @@ mod types {
     #[test]
     fn a_function_returning_two_types_is_an_error() {
         rejects(
-            "fn f(c) { if c { return \"s\" }  return 1 }\nprint(f(true))",
+            "fn f(c) { if (c) { return \"s\" }  return 1 }\nprint(f(true))",
             "this function's return values",
         );
     }
@@ -753,13 +756,13 @@ mod types {
     /// its result may be nil.
     #[test]
     fn a_conditional_return_joins_the_fall_through() {
-        let t = ok("fn f(c) { if c { return 1 } }\nlet r = f(true)");
+        let t = ok("fn f(c) { if (c) { return 1 } }\nlet r = f(true)");
         assert_eq!(global(&t, "r"), Ty::opt(Ty::Int));
     }
 
     #[test]
     fn a_function_returning_one_type_everywhere_keeps_it() {
-        let t = ok("fn f(c) { if c { return 1 }  return 2 }\nlet r = f(true)");
+        let t = ok("fn f(c) { if (c) { return 1 }  return 2 }\nlet r = f(true)");
         assert_eq!(global(&t, "r"), Ty::Int);
     }
 
@@ -938,7 +941,7 @@ mod types {
     /// A `yield` anywhere in the body counts, not just at the top level.
     #[test]
     fn a_yield_inside_a_loop_still_makes_a_generator() {
-        let t = ok("fn g(n) {\n    while n > 0 {\n        yield n\n    }\n}\nlet s = g(3)");
+        let t = ok("fn g(n) {\n    while (n > 0) {\n        yield n\n    }\n}\nlet s = g(3)");
         assert_eq!(global(&t, "s"), stream(Ty::Int));
     }
 
@@ -957,7 +960,7 @@ mod types {
     #[test]
     fn a_generator_may_return_bare_to_stop_early() {
         let t = ok(
-            "fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)",
+            "fn g(n) {\n    yield 1\n    if (n > 0) {\n        return\n    }\n    yield 2\n}\nlet s = g(0)",
         );
         assert_eq!(global(&t, "s"), stream(Ty::Int));
     }

@@ -3,7 +3,7 @@
 fn factorial(n) {
     let result = 1
     let i = 1
-    while i <= n {
+    while (i <= n) {
         result = result * i
         i = i + 1
     }
@@ -13,7 +13,7 @@ fn factorial(n) {
 fn sum_to(n) {
     let total = 0
     let i = 1
-    while i <= n {
+    while (i <= n) {
         total = total + i
         i = i + 1
     }
@@ -24,7 +24,7 @@ fn sum_to(n) {
 fn power(base, exp) {
     let result = 1
     let i = 0
-    while i < exp {
+    while (i < exp) {
         result = result * base
         i = i + 1
     }
@@ -34,7 +34,7 @@ fn power(base, exp) {
 // First n where n^2 > threshold
 fn first_square_above(threshold) {
     let n = 1
-    while n * n <= threshold {
+    while (n * n <= threshold) {
         n = n + 1
     }
     return n

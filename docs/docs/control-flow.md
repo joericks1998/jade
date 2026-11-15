@@ -4,7 +4,7 @@ title: Control Flow
 sidebar_label: Control Flow
 ---
 
-Jade has three control flow constructs. `if`, `elif`, and `else` choose between branches. `while` repeats while a condition holds. `for` walks a sequence. Every condition must be a `bool`.
+Jade has three control flow constructs. `if`, `elif`, and `else` choose between branches. `while` repeats while a condition holds. `for` walks a sequence. Every condition must be a `bool`, and every condition goes in parentheses: `if (x > 0) {`, `} elif (x == 0) {`, `while (running) {`.
 
 Inside a loop, `break` leaves it and `continue` starts its next iteration.
 
@@ -14,16 +14,44 @@ The `if` statement tests a condition and runs the *then* block when the conditio
 
 The `while` statement checks its condition and runs its body, over and over, for as long as the condition stays `true`. Once the condition turns `false`, the program continues after the closing `}`. If the condition is `false` on the very first check, the body never runs at all.
 
-Both constructs need a condition that produces a `bool`. Any other type is a compile error, so `if 1 { … }` fails with `type mismatch: expected bool, got int`. Non-boolean types are never treated as true or false.
+Both constructs need a condition that produces a `bool`. Any other type is a compile error, so `if (1) { … }` fails with `type mismatch: expected bool, got int`. Non-boolean types are never treated as true or false.
 
 Control flow statements can appear at the top level or inside a function body. A `return` inside a branch or a loop exits the function that encloses it. Using `return` with no enclosing function raises a `ReturnOutsideFunction` error.
+
+## Conditions go in parentheses
+
+The condition of an `if`, an `elif` or a `while` is one expression in parentheses, followed by the block's `{`. `else` has no condition, and neither does `for x in xs`, so neither takes parentheses.
+
+```jade
+if (count > 0) {
+    print("some")
+} elif (count == 0) {
+    print("none")
+}
+
+while (count < 10) {
+    count = count + 1
+}
+```
+
+A condition without them is a compile error at the condition, and the message shows the fix:
+
+```text
+syntax error: an if condition goes in parentheses: write 'if (x > 0) {', or run 'jade fmt' to add them
+```
+
+The parentheses have to wrap the whole condition. `if (a) and (b) {` is refused the same way, because its first pair closes before the condition ends. Write `if ((a) and (b)) {` or `if (a and b) {`.
+
+Inside the parentheses a class literal is fine, since the block's `{` comes after the `)`: `if (p == Point { x: 1 }) {`.
+
+Code written before Jade 2.0.10 used bare conditions. `jade fmt` adds the parentheses to every file it formats, around the whole condition, and changes nothing else; see [`jade fmt`](cli#jade-fmt).
 
 ## if / elif / else
 
 ### if without else
 
 ```jade
-if <condition> {
+if (<condition>) {
     <then statements>
 }
 ```
@@ -31,7 +59,7 @@ if <condition> {
 ### if with else
 
 ```jade
-if <condition> {
+if (<condition>) {
     <then statements>
 } else {
     <else statements>
@@ -41,9 +69,9 @@ if <condition> {
 ### if / elif / else
 
 ```jade
-if <condition> {
+if (<condition>) {
     <then statements>
-} elif <condition> {
+} elif (<condition>) {
     <elif statements>
 } else {
     <else statements>
@@ -54,9 +82,9 @@ Any number of `elif` branches can follow the first `if`. Jade tests each branch 
 
 ```jade
 fn classify(x) {
-    if x > 0 {
+    if (x > 0) {
         return 1
-    } elif x < 0 {
+    } elif (x < 0) {
         return -1
     } else {
         return 0
@@ -64,13 +92,13 @@ fn classify(x) {
 }
 
 fn grade(score) {
-    if score >= 90 {
+    if (score >= 90) {
         return 4
-    } elif score >= 80 {
+    } elif (score >= 80) {
         return 3
-    } elif score >= 70 {
+    } elif (score >= 70) {
         return 2
-    } elif score >= 60 {
+    } elif (score >= 60) {
         return 1
     } else {
         return 0
@@ -79,7 +107,7 @@ fn grade(score) {
 ```
 
 :::note
-The `else` keyword can go on the same line as the closing `}` of the then block, or on the next line. The lexer does not insert a semicolon after `}`, so both layouts work. The same is true of `} elif {`.
+The `else` keyword can go on the same line as the closing `}` of the then block, or on the next line. The lexer does not insert a semicolon after `}`, so both layouts work. The same is true of `} elif (…) {`.
 :::
 
 ## Basic Examples
@@ -88,7 +116,7 @@ The `else` keyword can go on the same line as the closing `}` of the then block,
 
 ```jade
 fn max(a, b) {
-    if a > b {
+    if (a > b) {
         return a
     } else {
         return b
@@ -103,10 +131,10 @@ let m2 = max(10, 2)
 
 ```jade
 fn clamp(x, lo, hi) {
-    if x < lo {
+    if (x < lo) {
         return lo
     }
-    if x > hi {
+    if (x > hi) {
         return hi
     }
     return x
@@ -123,10 +151,10 @@ Several `if` statements without an `else` form an early-exit chain. `clamp(1, 5,
 
 ```jade
 fn sign(x) {
-    if x > 0 {
+    if (x > 0) {
         return 1
     } else {
-        if x < 0 {
+        if (x < 0) {
             return -1
         } else {
             return 0
@@ -139,13 +167,13 @@ fn sign(x) {
 
 | Operation | Condition Type | Result |
 |-----------|---------------|--------|
-| `if <cond>` where the condition is `true` | `bool` | The then block runs |
-| `if <cond>` where the condition is `false` | `bool` | The else block runs, if there is one |
-| `if <cond>` where the condition is not a `bool` | `int`, `float`, `str`, `fn`, … | Compile error: `type mismatch: expected bool, got <type>` |
+| `if (<cond>)` where the condition is `true` | `bool` | The then block runs |
+| `if (<cond>)` where the condition is `false` | `bool` | The else block runs, if there is one |
+| `if (<cond>)` where the condition is not a `bool` | `int`, `float`, `str`, `fn`, … | Compile error: `type mismatch: expected bool, got <type>` |
 | `return` inside a branch | Any | Propagates return value up to enclosing function |
 
 :::note
-The condition must be exactly a `bool`. Nothing else counts as true or false, so `if 1 { … }` is a compile error rather than a truthy integer check.
+The condition must be exactly a `bool`. Nothing else counts as true or false, so `if (1) { … }` is a compile error rather than a truthy integer check.
 :::
 
 ## while Loops
@@ -155,20 +183,20 @@ The condition must be exactly a `bool`. Nothing else counts as true or false, so
 ### Syntax
 
 ```jade
-while <condition> {
+while (<condition>) {
     <body statements>
 }
 ```
 
 :::note
-Keep the condition and the opening `{` on one line. The lexer inserts a semicolon after any line ending in an integer, a float, an identifier, `true`, `false`, or `)`. Splitting the condition from the brace would therefore insert a semicolon where you did not want one. Write `while i < 5 {` on a single line.
+Keep the condition's closing `)` and the opening `{` on one line. The lexer inserts a semicolon after any line ending in an integer, a float, an identifier, `true`, `false`, or `)`. Putting the brace on the next line would therefore insert a semicolon where you did not want one. Write `while (i < 5) {` on a single line.
 :::
 
 ### Counting up to a limit
 
 ```jade
 let i = 0
-while i < 5 {
+while (i < 5) {
     i = i + 1
 }
 ```
@@ -181,7 +209,7 @@ The bare assignment updates `i` on each pass. When `i` reaches `5`, the conditio
 let n = 10
 let sum = 0
 let i = 1
-while i <= n {
+while (i <= n) {
     sum = sum + i
     i = i + 1
 }
@@ -193,7 +221,7 @@ After the loop, `sum` holds `55`, which is the sum of the integers 1 through 10.
 
 ```jade
 let never = 99
-while never < 0 {
+while (never < 0) {
     never = never + 1
 }
 ```
@@ -206,7 +234,7 @@ The condition is `false` on the first check, so the body never runs. `never` sta
 fn factorial(n) {
     let result = 1
     let i = 1
-    while i <= n {
+    while (i <= n) {
         result = result * i
         i = i + 1
     }
@@ -223,9 +251,9 @@ let f5 = factorial(5)
 ```jade
 let total = 0
 let i = 0
-while i < 3 {
+while (i < 3) {
     let j = 0
-    while j < 3 {
+    while (j < 3) {
         total = total + 1
         j = j + 1
     }
@@ -241,7 +269,7 @@ The inner loop runs all the way through on every pass of the outer loop. After b
 ```jade
 let x = "outer"
 let i = 0
-while i < 3 {
+while (i < 3) {
     let x = i     // this is the same x
     i = i + 1
 }
@@ -341,7 +369,7 @@ A function containing `yield` returns a stream, and `for` reads it like any othe
 ```jade
 fn doubles(n) {
     let i = 0
-    while i < n {
+    while (i < n) {
         yield i * 2
         i = i + 1
     }
@@ -365,8 +393,8 @@ A `dict` cannot be iterated. Writing `for k in some_dict { … }` is a compile e
 
 ```jade
 for i in [1, 2, 3, 4, 5] {
-    if i == 4 { break }
-    if i == 2 { continue }
+    if (i == 4) { break }
+    if (i == 2) { continue }
     print(i)
 }
 // 1
@@ -378,7 +406,7 @@ Both act on the *innermost* loop only. To leave two loops at once, `return` out 
 ```jade
 for a in [1, 2] {
     for b in [1, 2, 3] {
-        if b == 2 { break }     // leaves the b loop, not the a loop
+        if (b == 2) { break }     // leaves the b loop, not the a loop
         print(f"{a}-{b}")
     }
 }
@@ -388,13 +416,13 @@ for a in [1, 2] {
 
 ### Loop until something happens
 
-Reach for `while true` with a `break` when you cannot know the exit condition until part-way through the body, rather than at the top.
+Reach for `while (true)` with a `break` when you cannot know the exit condition until part-way through the body, rather than at the top.
 
 ```jade
 let n = 0
-while true {
+while (true) {
     n = n + 1
-    if n * n > 50 { break }
+    if (n * n > 50) { break }
 }
 print(n)   // 8
 ```
@@ -404,7 +432,7 @@ print(n)   // 8
 A loop can also end because something raised. That is the natural shape for a Rust package that signals end-of-input with an `Err`, since an `Err` [raises in the program](packages#errors-and-panics).
 
 ```jade
-while true {
+while (true) {
     try {
         print(archive.next_entry(a))
     } catch e {

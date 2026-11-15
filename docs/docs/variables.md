@@ -26,7 +26,7 @@ Variable names must start with a letter or underscore and may contain letters, d
 A name first introduced inside an `if`, `while`, or `for` block cannot be used after the block ends:
 
 ```jade
-if true {
+if (true) {
     let inner = 9
 }
 print(inner)     // error: undefined variable 'inner'
@@ -36,7 +36,7 @@ Reusing an outer name is a different case. A `let` inside the block overwrites t
 
 ```jade
 let x = 1
-if true {
+if (true) {
     let x = 99
 }
 print(x)         // 99, not 1
