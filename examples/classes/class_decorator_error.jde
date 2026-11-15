@@ -1,0 +1,16 @@
+// No decorator works on a class.
+//
+// A class's members take decorators, @public and a type such as @int, but the
+// class itself takes none: not a function, a type or another class. The
+// parser refuses it where it is written.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+fn log(v) {
+    return v
+}
+
+@log
+class Account {
+    @public balance
+}

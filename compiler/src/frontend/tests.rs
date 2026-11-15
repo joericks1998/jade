@@ -1771,6 +1771,29 @@ mod parser {
         assert!(e.to_string().contains("a class takes no decorators"), "got: {e}");
     }
 
+    /// No decorator works on a class: a function, a type, a class name or a
+    /// namespaced one, on the same line or the line before, at the top level or
+    /// in a function. `@public` is refused with its own message.
+    #[test]
+    fn no_decorator_works_on_a_class() {
+        for src in [
+            "@log class A {\n    x\n}",
+            "@log\nclass A {\n    x\n}",
+            "@int\nclass A {\n    x\n}",
+            "@byte\nclass A {\n    x\n}",
+            "@B\nclass A {\n    x\n}",
+            "@json::parse\nclass A {\n    x\n}",
+            "@log @log\nclass A(B) {\n    x\n}",
+            "@log\n\n// a comment\nclass A {\n    x\n}",
+            "fn f() {\n    @log\n    class A {\n        x\n    }\n}",
+        ] {
+            let e = parse_src_err(src);
+            assert!(e.to_string().contains("a class takes no decorators"), "{src}: {e}");
+        }
+        let e = parse_src_err("@public\nclass A {\n    x\n}");
+        assert!(e.to_string().contains("@public marks a class member"), "got: {e}");
+    }
+
     /// A decorator on a `let` still works; only the class target is refused.
     #[test]
     fn a_decorator_on_a_let_still_parses() {
