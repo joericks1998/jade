@@ -66,16 +66,15 @@ fn check_imports(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Re
         None => None,
     };
 
-    if paths.is_empty() {
-        return Ok(());
+    // A malformed dependency is one `jade run` refuses, and checking costs
+    // nothing beyond the read that just happened, so `jade check` stays an
+    // honest predictor without reaching for the network.
+    for (name, entry) in manifest.iter().flat_map(|m| m.dependencies.iter().flatten()) {
+        entry.validate(name)?;
     }
 
-    // A dependency whose prototypes are still `"?"` is one `jade run` refuses,
-    // and reading the manifest for it costs nothing beyond the read that just
-    // happened. Reporting it here is what keeps `jade check` an honest
-    // predictor without reaching for the network.
-    if let Some(m) = &manifest {
-        crate::pkg::check_symbols_resolved(m)?;
+    if paths.is_empty() {
+        return Ok(());
     }
 
     let libraries = project_root

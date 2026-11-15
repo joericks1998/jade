@@ -177,31 +177,18 @@ pub fn run_build(path: Option<&str>, output: Option<&str>, emit: Option<&str>) {
         }
     };
 
-    let bundled = compile_file(path, &out, emit);
-
+    compile_file(path, &out, emit);
     if emit == crate::build::Emit::Binary {
-        if bundled.is_empty() {
-            eprintln!("built: {}", out.display());
-        } else {
-            // Named rather than counted: `-o` now writes a directory's worth
-            // of files, and a reader who does not know that will ship one.
-            let dir = out.parent().unwrap_or_else(|| Path::new(".")).join(crate::pkg::LIBS_DIR);
-            eprintln!(
-                "built: {} (with {} in {}/)",
-                out.display(),
-                bundled.join(", "),
-                dir.display()
-            );
-        }
+        eprintln!("built: {}", out.display());
     }
 }
 
 /// Compile one source file to `out`, exiting with a message on any error.
 ///
 /// Shared by `jade build` and `jade run`, which builds into a scratch directory
-/// and then runs the binary. Returns the dependencies copied into a `libs/`
-/// beside the artifact, so the caller can say where they went.
-pub(crate) fn compile_file(path: &str, out: &Path, emit: crate::build::Emit) -> Vec<String> {
+/// and then runs the binary. The binary stands alone: a Rust package is linked
+/// into it, so there is nothing to copy beside it.
+pub(crate) fn compile_file(path: &str, out: &Path, emit: crate::build::Emit) {
     try_compile_file(path, out, emit).unwrap_or_else(|e| {
         eprintln!("{e}");
         process::exit(1);
@@ -214,7 +201,7 @@ pub(crate) fn try_compile_file(
     path: &str,
     out: &Path,
     emit: crate::build::Emit,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => return Err(format!("error: could not read '{}': {}", path, e)),
@@ -237,9 +224,9 @@ pub(crate) fn try_compile_file(
     // Absolute source path so imports resolve relative to it, not the CWD.
     let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
 
-    // Install the project's dependencies before resolving imports. Without
-    // this a fresh clone builds against nothing at all, and a rebuilt local
-    // library is silently ignored in favour of whatever `libs/` last held. The
+    // Install the project's source packages before resolving imports. Without
+    // this a fresh clone builds against nothing at all, and an edited local
+    // package is silently ignored in favour of whatever `libs/` last held. The
     // project is found from the source file's directory because that is how
     // `aot/imports.rs` finds it. A manifest that will not parse is reported
     // here rather than skipped, so the error names jade.toml and not a `use`.
@@ -255,26 +242,6 @@ pub(crate) fn try_compile_file(
         std::env::current_dir().map(|d| d.join(out)).unwrap_or_else(|_| out.to_path_buf())
     };
 
-    let needed = match crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
-        Ok(needed) => needed,
-        Err(e) => return Err(format!("{path}: build error: {e}")),
-    };
-
-    // Copy the dependencies the artifact will look for into a `libs/` beside
-    // it, so the pair can be moved together and still work. Without this the
-    // artifact holds the build machine's absolute paths, which is why one
-    // used to run here and nowhere else.
-    let mut bundled: Vec<String> = Vec::new();
-    if !needed.is_empty()
-        && let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
-    {
-        let libs_root = root.join(crate::pkg::LIBS_DIR);
-        let libs_root = std::fs::canonicalize(&libs_root).unwrap_or(libs_root);
-        match crate::pkg::bundle_beside_artifact(&abs_out, &libs_root) {
-            Ok(names) => bundled = names,
-            Err(e) => return Err(format!("error: {e}")),
-        }
-    }
-
-    Ok(bundled)
+    crate::build::build(&tprogram, &abs_source, &abs_out, emit)
+        .map_err(|e| format!("{path}: build error: {e}"))
 }

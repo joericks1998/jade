@@ -1,0 +1,7 @@
+// A Rust struct's class requires every field, since Rust gives no field a
+// default: `values.Point` has x, y and name, and this literal leaves out two.
+
+use values
+
+let p = values.Point { x: 1.0 }
+print(p.x)

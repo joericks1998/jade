@@ -26,19 +26,13 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 - *`test.rs`* implements `jade test`. It finds every `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern, and builds and runs each one. A test passes when its binary exits 0.
 - *`fmt.rs`* implements `jade fmt`. It works line by line on source *text* rather than on the token stream, because the lexer strips comments and a reprint would lose them. It is limited on purpose: it fixes indentation and trailing whitespace, and does not normalize operator spacing. `--check` exits 1 if anything would change.
 - *`new.rs`* implements `jade new` and `jade init`. It sets up a project directory from either the `basic` or the `llm` template.
-- *`pkg.rs`* implements `jade pkg add`, `bind`, `remove`, `install`, `update`, and `list`.
+- *`pkg.rs`* implements `jade pkg add`, `remove`, `install`, `update`, and `list`.
 
-  Binding a C library is folded into `add` and `install`, rather than being a separate step to learn. Both the ABI and the header are discovered rather than demanded.
+  `jade pkg add <name> --path <dir>` decides the kind of dependency from what is in the directory: a `Cargo.toml` makes it a Rust package, and a `jade.toml` a Jade source package. `--rust` says so for a `--git` repository or a crates.io `--version`, which cannot be looked inside first, and `--package` gives a Rust package's own name when it differs. A Rust package is built on the spot (`rustpkg::build`), so `add` reports how many functions and structs it exports and refuses one that does not compile. A `--git` repository or a `.tar.gz` `--url` without `--rust` is a Jade source package, which `src/pkg/source.rs` installs and pins.
 
-  `jade pkg add <name> --path <lib>` reads the artifact's symbol table to see whether it exports `jade_pkg_init`. That is the same symbol the loader requires, so detection and acceptance cannot disagree. For a plain C library it then derives the likely header from the library name, searches pkg-config and the usual include roots, checks the candidate against the library's own export table, and finally writes the symbol table and builds the shim, all in one command. A `--path` naming a directory, a `--git` repository, or a `.tar.gz` `--url` adds a Jade source package instead, which `src/pkg/source.rs` installs and pins.
+  `jade pkg bind` and `add`'s `--header`, `--c-abi`, `--include`, `--define` and `--only` went in 2.0.5 with the C bindings they generated (`design/v2-rust-packages.md`). A path to a `.dylib` or `.so` is refused with a message naming the replacement, a Rust crate that wraps the library.
 
-  `--header` overrides the search, and `install` fills in any dependency that names a header but has no symbols yet. `bind` remains for the cases with a real decision in them, such as re-running after a header changes or narrowing a large header with `--only`. `--dry-run` shows the report without touching the manifest.
-
-  All three print what could not be bound and why, because a generator that quietly covers most of an API is how the rest gets found at run time.
-
-  A header clang could *read* is recorded on the dependency even when every symbol in it was skipped. The skip report tells the user to write that stanza by hand, and without the header their `int` would mean Jade's width rather than the library's. So `add` keeps its entry in that one case rather than rolling it back, and says which of the two happened.
-
-  The manifest is the source of truth, and `jade.lock` is derived from it. With no registry to query, "update" means reconciling the lock with the manifest rather than discovering a newer version. `install` re-hashes local `path` dependencies before installing, since those point at files the user rebuilds. `--locked` reports that drift as an error instead.
+  The manifest is the source of truth, and `jade.lock` is derived from it. With no registry to query, "update" means reconciling the lock with the manifest rather than discovering a newer version. `install` re-hashes local `path` dependencies before installing, since those point at directories the user edits. `--locked` reports that drift as an error instead.
 
 - *`env.rs`* implements `jade env`, which prints the version, binary path, platform, cache statistics, and project information. `--json` makes the output easy to script against.
 - *`cache.rs`* implements `jade cache info` and `jade cache clean`.
@@ -58,7 +52,7 @@ A command exits the process directly on user error, by calling `process::exit(1)
 
 `jade upgrade` and `jade pkg update` are easy to confuse in help text and in commit messages. Upgrade is the toolchain. Update is the project's dependencies.
 
-*`jade pkg add` writes before it validates, so a failure has to undo the write.* Binding a C library reads the dependency back out of `jade.toml`, and resolving needs the entry to be there, so it cannot come last.
+*`jade pkg add` writes before it validates, so a failure has to undo the write.* Resolving a source package and building a Rust one both read the dependency back out of `jade.toml`, so the entry has to be there first.
 
   What made the missing rollback worse than it sounds is that every other `pkg` command re-validates the whole manifest. One `add` that failed on a missing file made `install`, `list`, and even a later successful `add` fail on an orphan entry the user never managed to add, with nothing naming the cause.
 

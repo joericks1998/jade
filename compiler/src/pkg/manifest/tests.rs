@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -47,38 +46,59 @@ fn parsed(root: &Path) -> ProjectManifest {
 // ── add_dependency ────────────────────────────────────────────────────────────
 
 #[test]
-fn add_writes_a_url_dependency() {
+fn add_writes_a_source_archive_dependency() {
     let tmp = project("addurl", "[project]\nname = \"app\"\n");
 
     add_dependency(
         tmp.path(),
-        "tok",
-        Source::Url("https://x/tok-{platform}.so"),
+        "geo",
+        Source::Url("https://x/geo-1.2.0.tar.gz"),
         Some("1.2.0"),
-        Abi::Jade,
+        Abi::Source,
         None,
     )
     .unwrap();
 
     let m = parsed(tmp.path());
-    let dep = &m.dependencies.unwrap()["tok"];
+    let dep = &m.dependencies.unwrap()["geo"];
     assert_eq!(dep.version.as_deref(), Some("1.2.0"));
-    assert_eq!(dep.url.as_deref(), Some("https://x/tok-{platform}.so"));
+    assert_eq!(dep.url.as_deref(), Some("https://x/geo-1.2.0.tar.gz"));
     assert!(dep.path.is_none());
-    assert_eq!(dep.abi, Abi::Jade);
-    assert!(dep.validate("tok").is_ok());
+    assert_eq!(dep.abi, Some(Abi::Source));
+    assert!(dep.validate("geo").is_ok());
 }
 
 #[test]
-fn add_writes_a_path_dependency() {
-    let tmp = project("addpath", "[project]\nname = \"app\"\n");
+fn add_writes_a_rust_path_dependency_with_its_package_name() {
+    let tmp = project("addrust", "[project]\nname = \"app\"\n");
 
-    add_dependency(tmp.path(), "zlib", Source::Path("vendor/libz.so"), None, Abi::Jade, None)
-        .unwrap();
+    add_dependency(
+        tmp.path(),
+        "zlib",
+        Source::Path("rust/zlib"),
+        None,
+        Abi::Rust,
+        Some("zlib-jade"),
+    )
+    .unwrap();
 
     let dep = &parsed(tmp.path()).dependencies.unwrap()["zlib"];
-    assert_eq!(dep.path.as_deref(), Some("vendor/libz.so"));
-    assert!(dep.version.is_none());
+    assert_eq!(dep.path.as_deref(), Some("rust/zlib"));
+    assert_eq!(dep.package.as_deref(), Some("zlib-jade"));
+    assert_eq!(dep.abi, Some(Abi::Rust));
+    assert!(dep.validate("zlib").is_ok());
+}
+
+#[test]
+fn add_writes_a_crates_io_rust_dependency() {
+    let tmp = project("addreg", "[project]\nname = \"app\"\n");
+
+    add_dependency(tmp.path(), "hex", Source::Registry, Some("0.4.3"), Abi::Rust, None).unwrap();
+
+    let dep = &parsed(tmp.path()).dependencies.unwrap()["hex"];
+    assert_eq!(dep.version.as_deref(), Some("0.4.3"));
+    assert!(dep.path.is_none() && dep.git.is_none() && dep.url.is_none());
+    assert!(dep.validate("hex").is_ok());
 }
 
 #[test]
@@ -92,15 +112,7 @@ fn add_preserves_comments_and_unrelated_sections() {
          [lib.utils]\npath = \"src/utils\"\n",
     );
 
-    add_dependency(
-        tmp.path(),
-        "tok",
-        Source::Url("https://x/t.so"),
-        Some("1.0.0"),
-        Abi::Jade,
-        None,
-    )
-    .unwrap();
+    add_dependency(tmp.path(), "geo", Source::Path("../geo"), None, Abi::Source, None).unwrap();
 
     let text = read(tmp.path());
     assert!(text.contains("# my project"), "leading comment lost:\n{text}");
@@ -120,72 +132,26 @@ fn add_replaces_an_existing_dependency_wholesale() {
     // then rejects for a reason the user never asked for.
     let tmp = project(
         "replace",
-        "[project]\nname = \"app\"\n[dependencies.tok]\nversion = \"1.0.0\"\n\
-         url = \"https://x/old.so\"\n",
+        "[project]\nname = \"app\"\n[dependencies.geo]\nversion = \"1.0.0\"\n\
+         url = \"https://x/old.tar.gz\"\nabi = \"source\"\n",
     );
 
-    add_dependency(
-        tmp.path(),
-        "tok",
-        Source::Path("vendor/tok.so"),
-        Some("2.0.0"),
-        Abi::Jade,
-        None,
-    )
-    .unwrap();
+    add_dependency(tmp.path(), "geo", Source::Path("vendor/geo"), Some("2.0.0"), Abi::Source, None)
+        .unwrap();
 
-    let dep = &parsed(tmp.path()).dependencies.unwrap()["tok"];
-    assert_eq!(dep.path.as_deref(), Some("vendor/tok.so"));
+    let dep = &parsed(tmp.path()).dependencies.unwrap()["geo"];
+    assert_eq!(dep.path.as_deref(), Some("vendor/geo"));
     assert!(dep.url.is_none(), "the stale url must not survive");
     assert_eq!(dep.version.as_deref(), Some("2.0.0"));
-    assert!(dep.validate("tok").is_ok());
-}
-
-#[test]
-fn add_writes_c_abi_with_symbols() {
-    let tmp = project("addc", "[project]\nname = \"app\"\n");
-    let mut symbols = HashMap::new();
-    symbols.insert(
-        "crc32".to_string(),
-        CSymbol {
-            args: vec!["int".into(), "str".into()],
-            ret: "int".into(),
-            fails_when: None,
-            frees_with: None,
-        },
-    );
-
-    add_dependency(
-        tmp.path(),
-        "zlib",
-        Source::Path("libz.so"),
-        Some("1.3.1"),
-        Abi::C,
-        Some(&symbols),
-    )
-    .unwrap();
-
-    let dep = &parsed(tmp.path()).dependencies.unwrap()["zlib"];
-    assert_eq!(dep.abi, Abi::C);
-    let syms = dep.symbols.as_ref().unwrap();
-    assert_eq!(syms["crc32"].args, vec!["int".to_string(), "str".to_string()]);
-    assert_eq!(syms["crc32"].ret, "int");
-    assert!(dep.validate("zlib").is_ok());
+    assert!(dep.validate("geo").is_ok());
 }
 
 #[test]
 fn add_is_idempotent() {
     let tmp = project("addidem", "[project]\nname = \"app\"\n");
     let add = || {
-        add_dependency(
-            tmp.path(),
-            "tok",
-            Source::Url("https://x/t.so"),
-            Some("1.0.0"),
-            Abi::Jade,
-            None,
-        )
-        .unwrap()
+        add_dependency(tmp.path(), "fast", Source::Path("rust/fast"), None, Abi::Rust, None)
+            .unwrap()
     };
 
     add();
@@ -194,20 +160,37 @@ fn add_is_idempotent() {
     assert_eq!(read(tmp.path()), first, "re-adding the same dependency must not churn the file");
 }
 
+/// A source package's own dependency, Rust included, is written whole into the
+/// project adding it.
+#[test]
+fn a_declared_rust_dependency_is_carried_over_with_its_package_name() {
+    let tmp = project("addentry", "[project]\nname = \"app\"\n");
+    let entry = crate::project::DependencyEntry {
+        path: Some("../pkgs/fast".into()),
+        package: Some("fast-math".into()),
+        abi: Some(Abi::Rust),
+        ..Default::default()
+    };
+    add_entry(tmp.path(), "fast", &entry).unwrap();
+    let dep = &parsed(tmp.path()).dependencies.unwrap()["fast"];
+    assert_eq!(dep.package.as_deref(), Some("fast-math"));
+    assert_eq!(dep.abi, Some(Abi::Rust));
+}
+
 // ── remove_dependency ─────────────────────────────────────────────────────────
 
 #[test]
 fn remove_deletes_the_entry() {
     let tmp = project(
         "rm",
-        "[project]\nname = \"app\"\n[dependencies.tok]\nversion = \"1.0.0\"\n\
-         url = \"https://x/t.so\"\n[dependencies.other]\npath = \"a.so\"\n",
+        "[project]\nname = \"app\"\n[dependencies.geo]\npath = \"geo\"\nabi = \"source\"\n\
+         [dependencies.other]\npath = \"rust/other\"\nabi = \"rust\"\n",
     );
 
-    assert!(remove_dependency(tmp.path(), "tok").unwrap());
+    assert!(remove_dependency(tmp.path(), "geo").unwrap());
 
     let deps = parsed(tmp.path()).dependencies.unwrap();
-    assert!(!deps.contains_key("tok"));
+    assert!(!deps.contains_key("geo"));
     assert!(deps.contains_key("other"), "the other dependency must survive");
 }
 
@@ -219,8 +202,10 @@ fn remove_reports_an_absent_dependency() {
 
 #[test]
 fn remove_drops_an_emptied_dependencies_table() {
-    let tmp =
-        project("rmempty", "[project]\nname = \"app\"\n[dependencies.only]\npath = \"a.so\"\n");
+    let tmp = project(
+        "rmempty",
+        "[project]\nname = \"app\"\n[dependencies.only]\npath = \"a\"\nabi = \"source\"\n",
+    );
 
     remove_dependency(tmp.path(), "only").unwrap();
 
@@ -233,68 +218,13 @@ fn remove_drops_an_emptied_dependencies_table() {
 fn remove_preserves_unrelated_content() {
     let tmp = project(
         "rmpreserve",
-        "# keep me\n[project]\nname = \"app\"\n[dependencies.tok]\npath = \"a.so\"\n\
-         [scripts]\nrun = \"jade run\"\n",
+        "# keep me\n[project]\nname = \"app\"\n[dependencies.geo]\npath = \"a\"\n\
+         abi = \"source\"\n[scripts]\nrun = \"jade run\"\n",
     );
 
-    remove_dependency(tmp.path(), "tok").unwrap();
+    remove_dependency(tmp.path(), "geo").unwrap();
 
     let text = read(tmp.path());
     assert!(text.contains("# keep me"), "comment lost:\n{text}");
     assert!(text.contains("[scripts]"), "section lost:\n{text}");
-}
-
-// ── Binding a second header must not undo the first ──────────────────────
-
-/// `set_bindings` with just a header list, which is all these tests vary.
-fn bind_headers(root: &Path, name: &str, headers: &[&str], dirs: &[&str]) {
-    let mut symbols = std::collections::BTreeMap::new();
-    symbols.insert(
-        format!("{}_fn", headers[0].trim_end_matches(".h")),
-        crate::project::CSymbol {
-            args: vec!["int".into()],
-            ret: "int".into(),
-            fails_when: None,
-            frees_with: None,
-        },
-    );
-    set_bindings(
-        root,
-        name,
-        &symbols,
-        &std::collections::BTreeMap::new(),
-        &headers.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
-        &dirs.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
-        &[],
-    )
-    .unwrap();
-}
-
-#[test]
-fn binding_a_second_header_keeps_the_first() {
-    // Replacing the list dropped `archive.h` while keeping the symbols that
-    // came from it. The shim then declared none of them, and C lets an
-    // undeclared function be called — so it compiled clean and crashed on the
-    // first call that returned a pointer, with no diagnostic anywhere.
-    let tmp =
-        project("hdrmerge", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
-
-    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
-    bind_headers(tmp.path(), "arc", &["archive_entry.h"], &["/opt/include"]);
-
-    let dep = parsed(tmp.path()).dependencies.unwrap().remove("arc").unwrap();
-    assert_eq!(dep.headers.unwrap(), ["archive.h", "archive_entry.h"]);
-    assert_eq!(dep.include_dirs.unwrap(), ["/usr/include", "/opt/include"]);
-}
-
-#[test]
-fn rebinding_the_same_header_does_not_duplicate_it() {
-    let tmp = project("hdrdup", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
-
-    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
-    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
-
-    let dep = parsed(tmp.path()).dependencies.unwrap().remove("arc").unwrap();
-    assert_eq!(dep.headers.unwrap(), ["archive.h"]);
-    assert_eq!(dep.include_dirs.unwrap(), ["/usr/include"]);
 }

@@ -29,6 +29,8 @@ There is one directory per language area, and one subdirectory inside it per cas
 
 `arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `bytes/` · `classes/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `ffi/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `json/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `time/` · `trust/` · `uhttp/`
 
+`ffi/` holds the Rust package fixtures added in 2.0.5, each a project of its own, since only a project has dependencies: `rust_values/` calls one Rust function for each kind of value that crosses, `rust_zlib/` reaches zlib, a C library, through `libz-sys`, and the rest pin the errors a user meets. [`ffi/README.md`](ffi/README.md) lists them. Building them runs cargo.
+
 `async/max_tasks/` pins the v1.4.6 concurrency limit. It reads the default, clamps at both ends, and then times the same eight sleeping tasks at a limit of four and of sixteen, so a run that widened or narrowed the fan-out fails on the wave count rather than passing quietly. Its last case is a task awaiting another at `set_max_tasks(1)`, which is what a parked task keeping its slot would deadlock on.
 
 `exceptions/raise_through_frames/` pins the v1.4.3 unwinding cleanup: a raise that passes through frames holding locals, a catch that keeps its own, and a rethrow of an unmatched type. Nothing there is visible in the output, which is the point — what it pins is that the values are still correct after the frames let go of what they held.

@@ -1,0 +1,17 @@
+# The Rust package examples/ffi/rust_zlib calls: zlib, a C library, reached through
+# libz-sys, the crate that builds it and declares its functions, and a few lines of
+# safe Rust that export what Jade needs. This is how a C library is used from Jade.
+#
+# The package is named zlib-jade, which a Jade program cannot write, so jade.toml
+# names the dependency `zlib` and gives this name as `package`.
+[package]
+name = "zlib-jade"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+jade-rs = { path = "../../../../jade-rs" }
+# `static` builds zlib from the source libz-sys carries and links it into the crate,
+# so the program needs no zlib on the machine it runs on.
+libz-sys = { version = "1.1", default-features = false, features = ["libc", "static"] }

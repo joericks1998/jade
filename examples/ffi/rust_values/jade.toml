@@ -1,0 +1,10 @@
+# A project of its own, because a Rust package is a dependency and only a project
+# has dependencies. `values/` is the Rust crate: it depends on jade-rs and marks what
+# the program may call with #[jade::export]. Building the program builds it with
+# cargo and links it in; see design/v2-rust-packages.md.
+[project]
+name = "rust-values-example"
+
+[dependencies.values]
+path = "values"
+abi = "rust"

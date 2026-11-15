@@ -1,0 +1,21 @@
+# `jade-rs-macros`: the `#[jade::export]` attribute. A proc-macro crate can export
+# nothing but macros, so the traits and types the generated code calls live in
+# `jade-rs`, the directory above, which re-exports this macro. A package depends on
+# `jade-rs` alone.
+[package]
+name = "jade-rs-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["JADE OS Contributors"]
+license = "MIT"
+description = "The #[jade::export] attribute of jade-rs"
+publish = false
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }

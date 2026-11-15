@@ -1,0 +1,26 @@
+// The FFI gate's program: a crates.io crate and a system C library, called the
+// way any program calls a Rust package. ffi-gate.sh compares what it prints with
+// gate.expected, and checks its exit status, which a crash after the last line
+// would change while leaving the output looking right.
+
+use gate
+
+print(gate.find_all("[0-9]+", "a1 b22 c333"))
+print(gate.is_match("^j.de$", "jade"))
+print(gate.replace_all("(\\w+)@(\\w+)", "joe@jade and ann@rust", "$2:$1"))
+try {
+    print(gate.is_match("(", "x"))
+} catch e {
+    print("an invalid pattern raises")
+}
+
+let text = "the same words, the same words, the same words"
+let packed = gate.deflate(text.encode())
+print(len(packed) < len(text.encode()))
+print(gate.inflate(packed).decode())
+print(gate.zlib_version().starts_with("1."))
+try {
+    print(gate.inflate("not compressed".encode()))
+} catch e {
+    print("damaged data raises")
+}

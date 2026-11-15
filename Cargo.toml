@@ -4,6 +4,8 @@
 # - compiler/: `jade`, the compiler and the rest of the toolchain. Needs LLVM 18.
 # - dovata/: the process that holds a model's memory and plans it for the
 #   compiler. Needs no LLVM.
+# - jade-rs/: the crate a Rust package depends on to be called from Jade. Needs no
+#   LLVM.
 #
 # A bare cargo command here means the compiler, through default-members, so
 # `cargo build` and `cargo test` work as they always have. Name dovata's
@@ -20,6 +22,12 @@ members = [
     # real and checks every tensor against the model file, so it needs unsafe code and
     # Apple's Metal framework, neither of which belongs in dovata. Never published.
     "dovata/src/refback",
+    # `jade-rs`: what a Rust crate depends on to be a Jade package, `#[jade::export]` and
+    # the runtime its generated code calls, with the proc macro in `jade-rs/macros`. A
+    # proc-macro crate can export nothing but macros, so they are two crates in one
+    # directory. Test them with -p. See jade-rs/README.md.
+    "jade-rs",
+    "jade-rs/macros",
 ]
 default-members = ["compiler"]
 # The resolver the compiler's edition, 2024, picked when it was the root package.

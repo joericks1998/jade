@@ -226,7 +226,6 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.position(end);
             }
             Ty::Json => self.json_destroy(p),
-            Ty::Handle(_) => self.handle_destroy(p),
             Ty::Future(_) => {
                 // A job frees itself through the function it carries, which
                 // knows its result type.

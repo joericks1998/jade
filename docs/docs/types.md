@@ -23,7 +23,6 @@ These are Jade's value types.
 | `fn` | First-class function value |
 | `prompt` | Text to send to a model; `?p` dereferences one |
 | `grammar` | A sampling constraint built by `Grammar.new(pattern)` |
-| `handle<T>` | An opaque pointer a native package handed you |
 | `nil` | Absence of value |
 
 An `async fn` and the `future` its call produces are covered in [Async](async).
@@ -261,20 +260,6 @@ print(?p)
 ```
 
 `?p` on its own gives the whole reply as a `str`. A converter around it limits what the model may generate and converts the result, so `toInt(?p)` gives you an `int`. A pipe after it, `?p |> write`, runs once per piece of the reply as the model writes it. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#pipe) for how pipes work.
-
-## Handle
-
-A `handle<T>` is an opaque pointer a native package gave you, such as a database connection, an open audio file, or a decompression context. Jade holds it, passes it back to the library, and never looks inside. There are no operations on a handle itself. Everything you do with one is a call into the package that made it.
-
-The `T` is the C type the pointer came from, so `handle<sqlite3>` and `handle<sqlite3_stmt>` are different types. Passing one where the other belongs gives you a readable error instead of a crash inside the library. Printing a handle shows `handle<sqlite3>`, never an address.
-
-Two rules are worth knowing before you use one:
-
-*Jade never closes a handle for you.* It cannot know what the pointer is or which allocator made it. Closing is a call the package exposes, and a handle dropped without that call leaks whatever the library allocated.
-
-*A handle cannot be passed into a task.* Jade cannot see what a library does with a pointer, so it cannot tell a thread-safe library from an unsafe one. Sharing is refused at compile time. Open the handle inside the task instead.
-
-See [Packages](packages) for installing a native package.
 
 ## Nil
 

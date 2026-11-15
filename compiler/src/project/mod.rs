@@ -20,15 +20,14 @@ pub use imports::{
 pub struct ProjectManifest {
     pub project: Option<ProjectSection>,
     pub scripts: Option<HashMap<String, String>>,
-    /// `[dependencies.<name>]` sections: external native packages, fetched into
-    /// the project-local `libs/` directory and pinned by `jade.lock`. See
-    /// [`DependencyEntry`].
+    /// `[dependencies.<name>]` sections: Jade source packages, fetched into the
+    /// project-local `libs/` directory and pinned by `jade.lock`, and Rust
+    /// packages, which cargo builds. See [`DependencyEntry`].
     pub dependencies: Option<HashMap<String, DependencyEntry>>,
-    /// `[lib.<name>]` sections: register a directory and its modules as a named
-    /// library so they can be imported cross-directory via `use <name>.<module>`,
-    /// anchored at the project root. A module is a Jade source file (`.jde`) or a
-    /// native C-ABI shared library (`.dylib` / `.so` / `.dll`) — the file
-    /// extension decides. See [`resolve_library_import`].
+    /// `[lib.<name>]` sections: register a directory and its Jade modules as a
+    /// named library so they can be imported cross-directory via
+    /// `use <name>.<module>`, anchored at the project root. See
+    /// [`resolve_library_import`].
     pub lib: Option<HashMap<String, LibraryEntry>>,
     /// `[package]` section: this project *is* a Jade package, and
     /// `jade build --lib` should read what it is made of from here rather than
@@ -182,16 +181,17 @@ impl PackageSection {
 ///
 /// ```toml
 /// [lib.utils]
-/// path  = "src/utils"                  # directory, relative to the project root
-/// files = ["math.jde", "fast.dylib"]   # optional allowlist of importable filenames
+/// path  = "src/utils"           # directory, relative to the project root
+/// files = ["math.jde"]          # optional allowlist of importable filenames
 /// ```
 ///
-/// `files` is an allowlist of importable module **filenames, with extension**.
-/// The extension both disambiguates modules from other files in the directory
-/// and selects how each is loaded: `.jde` is a Jade source module, while
-/// `.dylib` / `.so` / `.dll` is a native shared library (loaded over the
-/// `jade_pkg_init` C ABI). Omit `files` to make every recognized file in `path`
-/// importable.
+/// `files` is an allowlist of importable module filenames, with the `.jde`
+/// extension. Omit it to make every `.jde` file in `path` importable.
+///
+/// A dependency becomes one of these too (see `pkg::resolved_libraries`): a
+/// source package's points at its directory, and a Rust package's carries the
+/// dependency's name in `rust`, since its functions come from the build rather
+/// than a file.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LibraryEntry {
     pub path: String,
@@ -205,44 +205,20 @@ pub struct LibraryEntry {
     /// package's `[package] exports`. `None` shows every top-level name.
     #[serde(default)]
     pub exports: Option<Vec<String>>,
-    /// What a native library's functions take and return, for the static
-    /// checker: `[lib.<name>.symbols.<fn>]` with `args` and `ret` written in
-    /// Jade types. A Jade-ABI library carries no types of its own, so this is
-    /// where they come from. See `typechecker::infer::native`.
-    #[serde(default)]
-    pub symbols: Option<HashMap<String, NativeDecl>>,
-    /// Records a native library's functions pass and return, as
-    /// `[lib.<name>.structs.<T>] fields = [["x", "float"], ["y", "float"]]` in
-    /// Jade types. Each becomes a class the program names as `<name>.<T>`.
-    #[serde(default)]
-    pub structs: Option<HashMap<String, NativeRecord>>,
+    /// Set for a Rust package: the dependency's name in `jade.toml`. Never
+    /// written in a manifest; `[lib]` holds Jade modules alone.
+    #[serde(skip)]
+    pub rust: Option<String>,
 }
 
-/// Purpose: This struct holds a record a native library declares: each field's
-/// name and Jade type, in order.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct NativeRecord {
-    pub fields: Vec<(String, String)>,
-}
-
-/// Purpose: This struct holds one native function's declared types, as
-/// `jade.toml` writes them: `args = ["str"]`, `ret = "handle<Thing>"`. Either
-/// may be left out, and inference fills in what is missing.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct NativeDecl {
-    #[serde(default)]
-    pub args: Option<Vec<String>>,
-    #[serde(default)]
-    pub ret: Option<String>,
-}
-
-/// How a resolved `[lib]` module is loaded.
+/// What a resolved `[lib]` import is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportKind {
     /// A Jade source module (`.jde`).
     Jade,
-    /// A native C-ABI shared library (`.dylib` / `.so` / `.dll`).
-    Native,
+    /// A Rust package, whose functions the build reads out of its library; the
+    /// resolved path is the dependency's name.
+    Rust,
 }
 
 /// A resolved `[lib]` import: the on-disk file plus how to load it.
@@ -268,24 +244,13 @@ impl ResolvedLib {
     }
 }
 
-/// Map a recognized library file extension to its import kind.
-fn kind_for_ext(ext: &str) -> Option<ImportKind> {
-    match ext {
-        "jde" => Some(ImportKind::Jade),
-        "dylib" | "so" | "dll" => Some(ImportKind::Native),
-        _ => None,
-    }
-}
-
-/// Split a recognized library extension off a filename, preserving any
-/// subdirectory in the stem. Returns `(stem, ext)`, or `(name, "")` if none match.
+/// Split the `.jde` extension off a filename, preserving any subdirectory in
+/// the stem. Returns `(stem, "jde")`, or `(name, "")` without one.
 fn split_lib_ext(name: &str) -> (&str, &str) {
-    for (suffix, ext) in [(".jde", "jde"), (".dylib", "dylib"), (".so", "so"), (".dll", "dll")] {
-        if let Some(stem) = name.strip_suffix(suffix) {
-            return (stem, ext);
-        }
+    match name.strip_suffix(".jde") {
+        Some(stem) => (stem, "jde"),
+        None => (name, ""),
     }
-    (name, "")
 }
 
 /// Resolve a `use` path against registered `[lib]` libraries, anchored at `root`.
@@ -293,9 +258,9 @@ fn split_lib_ext(name: &str) -> (&str, &str) {
 /// A path is a *library reference* when it has the form `<lib>/<module>` and
 /// `<lib>` names a registered library. Resolution is anchored at the project
 /// `root` (not the importing file) — this is what enables cross-directory
-/// imports. The resolved file's extension determines its [`ImportKind`]. With a
-/// `files` allowlist the module must match one of its entries (by stem);
-/// otherwise the directory is probed for `<module>.jde` then a native library.
+/// imports. With a `files` allowlist the module must match one of its entries
+/// (by stem); otherwise the directory is probed for `<module>.jde`. A Rust
+/// package resolves to its dependency's name, with [`ImportKind::Rust`].
 ///
 /// Returns:
 ///   * `Ok(Some(resolved))` — a registered library module + how to load it,
@@ -308,6 +273,12 @@ pub fn resolve_library_import(
     import_path: &str,
     root: &Path,
 ) -> Result<Option<ResolvedLib>, String> {
+    // A Rust package is one module, named by the dependency.
+    if let Some(entry) = libs.get(import_path)
+        && let Some(dep) = &entry.rust
+    {
+        return Ok(Some(ResolvedLib::open(PathBuf::from(dep), ImportKind::Rust)));
+    }
     let (lib_name, rest) = match import_path.split_once('/') {
         Some(pair) => pair,
         // A source package names its entry module, and a bare `use geometry`
@@ -350,14 +321,21 @@ pub fn resolve_library_import(
     if let Some(files) = &entry.files {
         for f in files {
             let (stem, ext) = split_lib_ext(f);
-            if stem == module {
-                let kind = kind_for_ext(ext).ok_or_else(|| {
-                    format!(
-                        "module '{f}' in [lib.{lib_name}] of jade.toml has an unsupported \
-                         extension (expected .jde, .dylib, .so, or .dll)"
-                    )
-                })?;
-                return Ok(Some(ResolvedLib::open(base.join(f), kind)));
+            if stem == module && ext == "jde" {
+                return Ok(Some(ResolvedLib::open(base.join(f), ImportKind::Jade)));
+            }
+            // A shared library was a module until 2.0.5; say what replaced it
+            // rather than calling the name unregistered.
+            let native = Path::new(f)
+                .extension()
+                .is_some_and(|e| matches!(e.to_str(), Some("dylib" | "so" | "dll")))
+                && Path::new(f).with_extension("") == Path::new(module);
+            if native {
+                return Err(format!(
+                    "module '{f}' in [lib.{lib_name}] of jade.toml is a shared library; [lib] \
+                     lists .jde files, and native code is a Rust package under [dependencies] \
+                     with abi = \"rust\" (see design/v2-rust-packages.md)"
+                ));
             }
         }
         return Err(format!(
@@ -367,20 +345,9 @@ pub fn resolve_library_import(
         ));
     }
 
-    // No allowlist: prefer a Jade source module, then probe for a native library.
-    let jde = base.join(format!("{module}.jde"));
-    if jde.exists() {
-        return Ok(Some(ResolvedLib::open(jde, ImportKind::Jade)));
-    }
-    for suffix in [".dylib", ".so", ".dll"] {
-        let cand = base.join(format!("{module}{suffix}"));
-        if cand.exists() {
-            return Ok(Some(ResolvedLib::open(cand, ImportKind::Native)));
-        }
-    }
-    // Nothing on disk — return the `.jde` candidate so the caller surfaces a
-    // normal not-found error.
-    Ok(Some(ResolvedLib::open(jde, ImportKind::Jade)))
+    // No allowlist: the module's `.jde` file. Nothing on disk still returns the
+    // candidate, so the caller surfaces a normal not-found error.
+    Ok(Some(ResolvedLib::open(base.join(format!("{module}.jde")), ImportKind::Jade)))
 }
 
 /// Resolve a bare/`::` import that is **not** a registered library to a file
@@ -388,236 +355,69 @@ pub fn resolve_library_import(
 /// extension), optionally with `/`-separated subdirectories (`sub/helper`).
 ///
 /// This is the fallback that makes `use utils` load `./utils.jde` and
-/// `use sub::helper` load `./sub/helper.jde` — the same probe order
-/// `resolve_library_import` uses without an allowlist: a `.jde` source module
-/// first, then a native library. A parent path (`..`) is not expressible in
-/// `::` notation, so cross-directory imports go through `[lib]` instead.
+/// `use sub::helper` load `./sub/helper.jde`. A parent path (`..`) is not
+/// expressible in `::` notation, so cross-directory imports go through `[lib]`
+/// instead.
 ///
 /// Always returns a candidate; a missing file surfaces as a normal not-found
 /// error at the read site (mirroring `resolve_library_import`).
 pub fn resolve_relative_import(dir: &Path, import_path: &str) -> ResolvedLib {
-    let jde = dir.join(format!("{import_path}.jde"));
-    if jde.exists() {
-        return ResolvedLib::open(jde, ImportKind::Jade);
-    }
-    for suffix in ["dylib", "so", "dll"] {
-        let cand = dir.join(format!("{import_path}.{suffix}"));
-        if cand.exists() {
-            return ResolvedLib::open(cand, ImportKind::Native);
-        }
-    }
-    ResolvedLib::open(jde, ImportKind::Jade)
+    ResolvedLib::open(dir.join(format!("{import_path}.jde")), ImportKind::Jade)
 }
 
 // ── Dependencies ──────────────────────────────────────────────────────────────
 
-/// Which ABI a dependency's shared library speaks.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+/// What kind of package a dependency is.
+///
+/// Written out in every entry, since neither kind is a sensible default. Until
+/// 2.0.5 there were two more, `jade` and `c`, for prebuilt shared libraries;
+/// `design/v2-rust-packages.md` says why Rust replaced both, and reading one
+/// stops with a message pointing there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Abi {
-    /// Exports `jade_pkg_init` directly — a Jade-authored package, or a Rust
-    /// `cdylib` written against the Jade ABI.
-    #[default]
-    Jade,
-    /// A plain C library with no knowledge of Jade. Requires a `[symbols]`
-    /// table; a generated shim supplies `jade_pkg_init` at install time.
-    C,
     /// Jade source: a directory, git repository or `.tar.gz` archive holding a
     /// project with a `[package]` section. Its files are compiled into each
     /// program that uses it, the way design decision 11 settles.
     Source,
+    /// A Rust crate that marks what Jade may call with `#[jade::export]`,
+    /// built by cargo into the program (see `rustpkg`).
+    Rust,
 }
 
 impl Abi {
-    /// The spelling used in `jade.lock`. Kept explicit rather than derived from
-    /// `Debug` so the lock format can't drift when this enum is refactored.
+    /// The spelling used in `jade.toml` and `jade.lock`. Kept explicit rather
+    /// than derived from `Debug` so the formats can't drift when this enum is
+    /// refactored.
     pub fn as_str(self) -> &'static str {
         match self {
-            Abi::Jade => "jade",
-            Abi::C => "c",
             Abi::Source => "source",
+            Abi::Rust => "rust",
         }
     }
 }
 
-/// One entry of a `[dependencies.<name>.symbols]` table: the C prototype of a
-/// symbol to bind, in terms of the FFI's primitive type names.
-///
-/// Written either as a table, or as the single string `"?"` for a symbol whose
-/// name is known and whose prototype is not — see [`UNRESOLVED`].
-///
-/// ```toml
-/// [dependencies.zlib.symbols]
-/// crc32 = { args = ["scalar:unsigned long", "str"], ret = "scalar:unsigned long" }
-/// deflate = "?"
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSymbol {
-    pub args: Vec<String>,
-    pub ret: String,
-    /// How this symbol reports failure, so the shim can turn one into a
-    /// catchable Jade error carrying the reason.
-    ///
-    /// Absent means the call cannot fail, which is the safe default: reading a
-    /// convention that is not there would turn every legitimate `-1` into a
-    /// raise. Without this, a failing C call returns its raw sentinel and the
-    /// reason — which the library already put in `errno` — is simply lost.
-    pub fails_when: Option<CFailure>,
-    /// The library function that releases what this call allocated, for the
-    /// shapes that hand back memory the caller then owns.
-    ///
-    /// Required by `out_alloc_str`, and only useful with it. A header never says
-    /// this — `char **str` looks exactly like the borrowed `const char **name`
-    /// beside it — so the generator refuses those shapes and names this key
-    /// rather than guessing. Guessing one way leaks on every call; the other
-    /// frees memory that was never allocated.
-    ///
-    /// The value is a C function name taking one pointer: `free` for a library
-    /// that documents plain malloc, `ares_free_string` for one with its own.
-    pub frees_with: Option<String>,
-}
-
-/// The signature of a symbol whose name is known and whose types are not.
-///
-/// A shared library always says what it *exports*, so `jade pkg add` can read
-/// every function's name out of any C library on the machine. It can read
-/// nothing else: C keeps no argument or return types in a compiled artifact, so
-/// `crc32` in the export table says only "there is a `crc32`". Types survive
-/// only in DWARF, which release builds strip and which the macOS linker leaves
-/// in the `.o` files rather than the library.
-///
-/// Rather than refuse to write anything, `add` writes the names it found with
-/// `"?"` where the prototype goes. That turns "go find this library's header"
-/// into "fill in two blanks", and — more importantly — gives every later stage
-/// a concrete thing to refuse. Guessing instead would be worse than blank: a
-/// wrong prototype is a corrupted stack several calls later, with nothing
-/// pointing at the manifest.
-///
-/// `?` cannot collide with a real entry because it is not one of the FFI's type
-/// names.
-pub const UNRESOLVED: &str = "?";
-
-impl CSymbol {
-    /// A symbol known only by name.
-    pub fn unresolved() -> Self {
-        CSymbol {
-            args: Vec::new(),
-            ret: UNRESOLVED.to_string(),
-            fails_when: None,
-            frees_with: None,
-        }
-    }
-
-    /// Whether any part of this prototype is still a placeholder.
-    ///
-    /// Checks the arguments as well as the return, so a half-filled entry
-    /// written by hand is caught here rather than by `cc` failing on `?` as a
-    /// type name, several stages further on.
-    pub fn is_unresolved(&self) -> bool {
-        self.ret == UNRESOLVED || self.args.iter().any(|a| a == UNRESOLVED)
-    }
-}
-
-/// Accepts either the table or the bare `"?"` string.
-///
-/// Hand-written rather than `#[serde(untagged)]`: untagged reports every
-/// failure as "data did not match any variant", so a table with a typo in it
-/// would stop saying which field was missing. Delegating the map case to a
-/// derived struct keeps those messages exactly as they were.
-impl<'de> Deserialize<'de> for CSymbol {
+/// Reads `"source"` or `"rust"`, and names the replacement for the two kinds
+/// 2.0.5 removed, so the message lands on the manifest's own line.
+impl<'de> Deserialize<'de> for Abi {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = CSymbol;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with `args` and `ret`, or \"{UNRESOLVED}\"")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<CSymbol, E> {
-                if s == UNRESOLVED {
-                    return Ok(CSymbol::unresolved());
-                }
-                Err(E::custom(format!(
-                    "expected a table with `args` and `ret`, or \"{UNRESOLVED}\" for a \
-                     signature that is not known yet — found \"{s}\""
-                )))
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<CSymbol, A::Error> {
-                #[derive(Deserialize)]
-                struct Full {
-                    args: Vec<String>,
-                    ret: String,
-                    #[serde(default)]
-                    fails_when: Option<CFailure>,
-                    #[serde(default)]
-                    frees_with: Option<String>,
-                }
-                let f = Full::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(CSymbol {
-                    args: f.args,
-                    ret: f.ret,
-                    fails_when: f.fails_when,
-                    frees_with: f.frees_with,
-                })
-            }
-        }
-
-        d.deserialize_any(V)
-    }
-}
-
-/// The sentinel a C function returns to signal failure.
-///
-/// There is no universal convention, so the binding names the one its symbol
-/// uses. These four cover the shapes in practice: a pointer-returning `open`,
-/// a POSIX-style `int`, a status code, and a call that cannot fail.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CFailure {
-    /// A null pointer or handle. `sqlite3_open`, `gzopen`, `fopen`.
-    Null,
-    /// A negative return. The POSIX `read`/`write`/`open` convention.
-    Negative,
-    /// Any non-zero return. A status code where 0 means success.
-    Nonzero,
-    /// A zero return. The shape where the value *is* the answer and zero means
-    /// there is none — a count that came back empty, a lookup that found
-    /// nothing. Never inferred, because a zero count is a legitimate answer
-    /// almost everywhere; it exists so a report that declines to guess can name
-    /// a spelling that works.
-    Zero,
-    /// Never fails. The same as omitting the key, spellable for clarity.
-    Never,
-}
-
-impl CFailure {
-    /// The spelling used in `jade.toml`. Explicit rather than derived from
-    /// `Debug`, so the manifest format cannot drift when this enum is renamed.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CFailure::Null => "null",
-            CFailure::Negative => "negative",
-            CFailure::Nonzero => "nonzero",
-            CFailure::Zero => "zero",
-            CFailure::Never => "never",
-        }
-    }
-
-    /// The C expression testing `r` for failure, or `None` when it cannot fail.
-    ///
-    /// A pointer test is written `!(r)` rather than `(r) == NULL` so it works
-    /// unchanged for a handle typedef that is an integer rather than a pointer
-    /// — `gzFile` on some builds, and every `HANDLE`-shaped API.
-    pub fn test(self) -> Option<&'static str> {
-        match self {
-            CFailure::Null => Some("!(r)"),
-            CFailure::Negative => Some("(r) < 0"),
-            CFailure::Nonzero => Some("(r) != 0"),
-            CFailure::Zero => Some("(r) == 0"),
-            CFailure::Never => None,
+        let s = String::deserialize(d)?;
+        match s.as_str() {
+            "source" => Ok(Abi::Source),
+            "rust" => Ok(Abi::Rust),
+            "c" => Err(serde::de::Error::custom(
+                "abi = \"c\" was removed in jade 2.0.5: a C library is reached through a Rust \
+                 crate that wraps it, such as its -sys crate, named with abi = \"rust\" (see \
+                 design/v2-rust-packages.md)",
+            )),
+            "jade" => Err(serde::de::Error::custom(
+                "abi = \"jade\" was removed in jade 2.0.5: a Jade package is shared as source \
+                 with abi = \"source\", and native code is a Rust crate with abi = \"rust\" \
+                 (see design/v2-rust-packages.md)",
+            )),
+            other => Err(serde::de::Error::custom(format!(
+                "abi = \"{other}\" is not a kind of package; write abi = \"source\" for Jade \
+                 source or abi = \"rust\" for a Rust crate"
+            ))),
         }
     }
 }
@@ -625,141 +425,54 @@ impl CFailure {
 /// Entry in a `[dependencies.<name>]` section of `jade.toml`.
 ///
 /// ```toml
-/// [dependencies.fastmath]
-/// version = "1.2.0"
-/// url     = "https://example.com/fastmath-{platform}.so"
+/// [dependencies.geometry]
+/// path = "../geometry"
+/// abi  = "source"
 ///
-/// [dependencies.zlib]
-/// version = "1.3.1"
-/// path    = "vendor/libz.so"
-/// abi     = "c"
-/// [dependencies.zlib.symbols.crc32]
-/// args = ["scalar:unsigned long", "str"]
-/// ret  = "scalar:unsigned long"
+/// [dependencies.imgtools]
+/// path    = "rust/imgtools"       # a directory holding a Cargo.toml
+/// package = "img-tools"           # the Rust package's name, when it differs
+/// abi     = "rust"
 /// ```
 ///
-/// Exactly one of `path` or `url` names the source. A `url` may contain the
-/// `{platform}` placeholder, expanded per target (`darwin-aarch64`,
-/// `linux-x86_64`, …) when the lock is generated.
+/// A source package comes from exactly one of `path`, `url` or `git`. A Rust
+/// package comes from a `path`, a `git` repository, or a crates.io `version`.
 ///
 /// **Integrity lives in `jade.lock`, not here** — deliberately, following
-/// Cargo. `jade pkg add` fetches each platform's artifact once, hashes it, and
-/// records the digests in the lock; every later install verifies against those.
-/// A `{platform}` URL could not carry a single digest in the manifest anyway.
+/// Cargo. `jade pkg add` hashes a source package once and records the digest in
+/// the lock; every later install verifies against it. A Rust package is pinned
+/// by cargo, in the generated crate's `Cargo.lock` (see `rustpkg::cargo`).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct DependencyEntry {
-    /// Exact version. Not a range — see [`DependencyEntry::validate`].
+    /// Exact version. Not a range — see [`DependencyEntry::validate`]. For a
+    /// Rust package with no other source, the crates.io version to build.
     pub version: Option<String>,
-    /// Path to a local `.so`/`.dylib`, relative to the project root.
+    /// A directory, relative to the project root: a source package's project,
+    /// or a Rust package's crate.
     pub path: Option<String>,
-    /// Download URL, optionally containing `{platform}`.
+    /// Download URL of a source package's `.tar.gz` archive.
     pub url: Option<String>,
-    /// A git repository holding a source package. One of `rev`, `tag` or
-    /// `branch` names the commit, and `jade.lock` pins the commit it was.
+    /// A git repository holding the package. One of `rev`, `tag` or `branch`
+    /// names the commit.
     pub git: Option<String>,
     pub rev: Option<String>,
     pub tag: Option<String>,
     pub branch: Option<String>,
+    /// What kind of package it is. Required; see [`Abi`].
     #[serde(default)]
-    pub abi: Abi,
-    /// Required for `abi = "c"`: the symbols to bind, and their prototypes.
-    pub symbols: Option<HashMap<String, CSymbol>>,
-    /// C structs a symbol fills through an out-parameter, by C type name.
-    ///
-    /// Only the field *names* and their Jade types live here. The **layout does
-    /// not**, deliberately — see [`headers`](Self::headers).
-    pub structs: Option<HashMap<String, CStruct>>,
-    /// Headers the generated shim includes, e.g. `["sndfile.h"]`.
-    ///
-    /// Required by any symbol with an `out_struct` parameter, because the shim
-    /// has to declare a real local of that type. The alternative — synthesizing
-    /// the struct from the declared field list — would put the layout in a
-    /// hand-written TOML file, where one wrong type or a missed padding byte
-    /// silently corrupts memory at a wrong offset. Including the real header
-    /// makes the layout the C compiler's problem, which is the only place it can
-    /// be correct. Anyone who has the library has its header.
-    pub headers: Option<Vec<String>>,
-    /// Extra `-I` directories for the shim compile, for a header that is not on
-    /// the default search path.
-    pub include_dirs: Option<Vec<String>>,
-    /// `-D` macros the header needs before it will parse, as clang's `-D`.
-    ///
-    /// Recorded rather than only passed on the command line, because the header
-    /// is read again — `jade pkg install` on a fresh clone re-binds one whose
-    /// symbols are absent, and the shim compile includes the same header. A
-    /// macro given once to `jade pkg add` and then forgotten would leave both of
-    /// those failing on the `#error` the flag exists to get past.
-    pub defines: Option<Vec<String>>,
-}
-
-/// One entry of a `[dependencies.<name>.structs]` table: the fields of a C
-/// struct a symbol fills through an out-parameter.
-///
-/// ```toml
-/// [dependencies.sndfile.structs.SF_INFO]
-/// fields = [["frames", "int"], ["samplerate", "int"], ["channels", "int"]]
-/// ```
-///
-/// Each entry is a field name and the Jade type it reads as. The C type is not
-/// named because it is not needed: the shim assigns through the real struct
-/// declared by the header, so the compiler converts. Listing a field that the
-/// struct does not have is a compile error in the generated shim, naming the
-/// field — which is the failure mode you want.
-/// `held = true` marks a struct the *caller* allocates and the library keeps
-/// between calls — `lzma_stream`, `ZSTD_outBuffer`. Those cannot be passed by
-/// value in either direction: the shim would declare a fresh local every call,
-/// and the fields the FFI cannot carry, the pointers a codec keeps its position
-/// in, would be dropped. The library would get a zeroed struct instead of the
-/// state the last call left.
-///
-/// A held struct is allocated once, on the C heap, and Jade holds a handle to
-/// it. The generator writes `<T>_new`, `<T>_free`, `<T>_get` and `<T>_set`
-/// alongside the library's own symbols, so the fields that *can* travel are
-/// readable and writable and the ones that cannot simply stay where the library
-/// put them.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CStruct {
-    pub fields: Vec<(String, String)>,
-    #[serde(default)]
-    pub held: bool,
-    /// Buffer fields of a held struct: a pointer and the count beside it.
-    ///
-    /// The pointer types the FFI cannot carry are exactly the ones a codec keeps
-    /// its position in, so a held struct with no way to set them is a handle you
-    /// can make and never feed. The shim owns the memory these point at, for the
-    /// duration of the handle, because the library expects it to still be there
-    /// on the next call and a Jade blob makes no such promise.
-    #[serde(default)]
-    pub buffers: Vec<CBuffer>,
-}
-
-/// One buffer field of a held struct, and the field holding its extent.
-///
-/// ```toml
-/// buffers = [
-///   { ptr = "next_in",  len = "avail_in",  writable = false },
-///   { ptr = "next_out", len = "avail_out", writable = true },
-/// ]
-/// ```
-///
-/// `writable` decides which accessors the field gets. A read-only one is *set*
-/// from a blob the caller has; a writable one is *allocated* to a size and then
-/// *taken* from once the library has filled it.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CBuffer {
-    pub ptr: String,
-    pub len: String,
-    #[serde(default)]
-    pub writable: bool,
+    pub abi: Option<Abi>,
+    /// A Rust package's own name, when it is not the dependency's: a Jade name is
+    /// an identifier, and a Rust package's name may hold a `-`.
+    pub package: Option<String>,
 }
 
 /// Placeholder expanded to a platform tag when resolving a dependency `url`.
 pub const PLATFORM_PLACEHOLDER: &str = "{platform}";
 
-/// Characters that only appear in a *range* version requirement. Ranges need a
-/// registry to resolve against, and Jade deliberately has none — a dependency
-/// names one exact artifact. Rejecting these is friendlier than accepting a
-/// range and silently treating it as a literal string that matches nothing.
+/// Characters that only appear in a *range* version requirement. A dependency
+/// names one exact version, so a build is the same build on every machine.
+/// Rejecting these is friendlier than accepting a range and silently treating
+/// it as a literal string that matches nothing.
 const RANGE_CHARS: &[char] = &['^', '~', '*', '>', '<', '=', ',', '|'];
 
 impl DependencyEntry {
@@ -768,25 +481,30 @@ impl DependencyEntry {
         self.url.as_deref().is_some_and(|u| u.contains(PLATFORM_PLACEHOLDER))
     }
 
-    /// The symbols whose prototype is still `"?"`, sorted.
-    ///
-    /// Not part of [`validate`](Self::validate): a manifest carrying
-    /// placeholders is a legal, expected state — it is what `jade pkg add`
-    /// writes for a library with no header — and failing to *load* it would
-    /// take `jade pkg list` and `jade pkg remove` down with it, which are the
-    /// two commands most likely to be reached for next. The refusal belongs
-    /// where a placeholder would actually be used, in `pkg::build_c_shims`.
-    pub fn unresolved_symbols(&self) -> Vec<&str> {
-        let Some(symbols) = &self.symbols else { return Vec::new() };
-        let mut out: Vec<&str> =
-            symbols.iter().filter(|(_, s)| s.is_unresolved()).map(|(n, _)| n.as_str()).collect();
-        out.sort_unstable();
-        out
+    /// The kind of package. An entry with no `abi` reads as source here, and
+    /// [`validate`](Self::validate) refuses it before anything relies on that.
+    pub fn kind(&self) -> Abi {
+        self.abi.unwrap_or(Abi::Source)
     }
 
     /// Check the entry is well-formed, naming `name` in every error so the
     /// message is actionable without the user hunting for which table is wrong.
     pub fn validate(&self, name: &str) -> Result<(), String> {
+        let Some(abi) = self.abi else {
+            return Err(format!(
+                "dependency '{name}' has no abi in jade.toml; write abi = \"source\" for a Jade \
+                 source package or abi = \"rust\" for a Rust crate"
+            ));
+        };
+        if abi == Abi::Rust {
+            return self.validate_rust(name);
+        }
+        if self.package.is_some() {
+            return Err(format!(
+                "dependency '{name}' sets 'package' in jade.toml, which names a Rust package; a \
+                 Jade source package is named by its own [package] section"
+            ));
+        }
         let sources = [self.path.is_some(), self.url.is_some(), self.git.is_some()];
         match sources.iter().filter(|s| **s).count() {
             0 => {
@@ -803,7 +521,67 @@ impl DependencyEntry {
                 ));
             }
         }
+        self.validate_git_ref(name)?;
 
+        // A url dependency is fetched into `libs/<name>-<version>/`, so the
+        // version is what makes that directory unique — it can't be omitted.
+        if self.url.is_some() && self.version.is_none() {
+            return Err(format!(
+                "dependency '{name}' has a 'url' but no 'version' in jade.toml \
+                 (url dependencies are pinned to an exact version)"
+            ));
+        }
+        self.validate_version(name)?;
+        if self.is_platform_template() {
+            return Err(format!(
+                "dependency '{name}' is Jade source, which is the same on every platform, so its \
+                 url in jade.toml takes no {{platform}}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Purpose: This function checks a Rust package's entry: one of `path`, `git`
+    /// or a crates.io `version`.
+    fn validate_rust(&self, name: &str) -> Result<(), String> {
+        if self.url.is_some() {
+            return Err(format!(
+                "dependency '{name}' is a Rust package with a 'url' in jade.toml; a Rust package \
+                 comes from a 'path', a 'git' repository, or a crates.io 'version', and cargo \
+                 fetches it"
+            ));
+        }
+        if self.path.is_some() && self.git.is_some() {
+            return Err(format!(
+                "dependency '{name}' sets both 'path' and 'git' in jade.toml (a dependency has \
+                 exactly one source)"
+            ));
+        }
+        if self.path.is_none() && self.git.is_none() && self.version.is_none() {
+            return Err(format!(
+                "dependency '{name}' is a Rust package with no source in jade.toml; set 'path' to \
+                 the directory holding its Cargo.toml, 'git' with a 'rev', 'tag' or 'branch', or \
+                 'version' for crates.io"
+            ));
+        }
+        // The name becomes an `extern crate` line in the generated crate, and a
+        // Jade program writes it before a dot.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || name.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Err(format!(
+                "dependency '{name}' is not a name a Jade program can write; name it with \
+                 letters, digits and underscores, and give the Rust package's own name as \
+                 package = \"{name}\""
+            ));
+        }
+        self.validate_git_ref(name)?;
+        self.validate_version(name)
+    }
+
+    /// Purpose: This function checks that a git source names one commit, and that
+    /// nothing else names one.
+    fn validate_git_ref(&self, name: &str) -> Result<(), String> {
         let refs = [&self.rev, &self.tag, &self.branch];
         let named = refs.iter().filter(|r| r.is_some()).count();
         if self.git.is_some() {
@@ -813,28 +591,16 @@ impl DependencyEntry {
                      its 'git' in jade.toml, to say which commit to build"
                 ));
             }
-            if self.abi != Abi::Source {
-                return Err(format!(
-                    "dependency '{name}' comes from git, which holds Jade source; set \
-                     abi = \"source\" in jade.toml, or name a prebuilt library with 'url'"
-                ));
-            }
         } else if named > 0 {
             return Err(format!(
                 "dependency '{name}' sets 'rev', 'tag' or 'branch' without 'git' in jade.toml"
             ));
         }
+        Ok(())
+    }
 
-        // A url dependency is fetched into `libs/<name>-<version>/`, so the
-        // version is what makes that directory unique — it can't be omitted.
-        // A path dependency points at a file the user already controls.
-        if self.url.is_some() && self.version.is_none() {
-            return Err(format!(
-                "dependency '{name}' has a 'url' but no 'version' in jade.toml \
-                 (url dependencies are pinned to an exact version)"
-            ));
-        }
-
+    /// Purpose: This function checks a version names one exact version.
+    fn validate_version(&self, name: &str) -> Result<(), String> {
         if let Some(version) = &self.version {
             if version.trim().is_empty() {
                 return Err(format!("dependency '{name}' has an empty 'version' in jade.toml"));
@@ -842,51 +608,11 @@ impl DependencyEntry {
             if let Some(bad) = version.chars().find(|c| RANGE_CHARS.contains(c)) {
                 return Err(format!(
                     "dependency '{name}' has version '{version}' in jade.toml, but \
-                     version ranges are not supported (found '{bad}') — Jade has no \
-                     package registry to resolve a range against, so dependencies \
-                     name one exact version, e.g. \"1.2.0\""
+                     version ranges are not supported (found '{bad}') — a dependency names \
+                     one exact version, e.g. \"1.2.0\""
                 ));
             }
         }
-
-        match self.abi {
-            Abi::C => {
-                let empty = self.symbols.as_ref().is_none_or(|s| s.is_empty());
-                if empty {
-                    return Err(format!(
-                        "dependency '{name}' sets abi = \"c\" but declares no \
-                         [dependencies.{name}.symbols] in jade.toml — a plain C library \
-                         exports no jade_pkg_init, so Jade needs the symbol prototypes \
-                         to generate a binding shim"
-                    ));
-                }
-            }
-            Abi::Jade => {
-                if self.symbols.is_some() {
-                    return Err(format!(
-                        "dependency '{name}' declares [dependencies.{name}.symbols] but \
-                         does not set abi = \"c\" in jade.toml — a Jade-ABI package \
-                         exports jade_pkg_init and describes its own bindings"
-                    ));
-                }
-            }
-            Abi::Source => {
-                if self.symbols.is_some() {
-                    return Err(format!(
-                        "dependency '{name}' declares [dependencies.{name}.symbols] but is \
-                         Jade source in jade.toml; a source package declares the C libraries \
-                         it calls in its own jade.toml"
-                    ));
-                }
-                if self.is_platform_template() {
-                    return Err(format!(
-                        "dependency '{name}' is Jade source, which is the same on every \
-                         platform, so its url in jade.toml takes no {{platform}}"
-                    ));
-                }
-            }
-        }
-
         Ok(())
     }
 }

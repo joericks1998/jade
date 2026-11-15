@@ -246,14 +246,10 @@ pub enum JadeError {
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
-    /// A call into a C-ABI dependency names a symbol its `[symbols]` table does
-    /// not declare.
-    ///
-    /// This is the one FFI mistake that used to survive every stage. A symbol
-    /// the shim never bound is not a link error — nothing links it — so a typo
-    /// compiled, built, packaged, shipped, and failed the first time that line
-    /// ran, as "dict has no key or method". The manifest already lists every
-    /// symbol the dependency provides, so the answer was there to be read.
+    /// A program names something a Rust package does not export: no function
+    /// or struct of that name is marked `#[jade::export]` in the crate. The
+    /// package's library describes everything it exports, so the answer is
+    /// there to be read when the program is checked.
     UnknownFfiSymbol {
         /// The name the import bound, as written before the dot.
         module: String,
@@ -271,12 +267,6 @@ pub enum JadeError {
     /// concurrently on a shared heap with no lock on collection payloads, so
     /// this is a data race; see `mir::taskcheck`.
     SharedMutation { task: String, what: String, span: Span },
-
-    /// A handle was passed into a spawned function. Distinct from
-    /// [`JadeError::SharedMutation`] because the fix is the opposite one: a
-    /// handle is exactly what must *not* be passed in as a parameter, since
-    /// nothing on the Jade side can make sharing it safe.
-    HandleAcrossTask { type_name: String, span: Span },
 
     /// `use "path"` would create a cycle: `a` imports `b` which imports `a`.
     CircularImport { path: String, span: Span },
@@ -593,14 +583,17 @@ impl std::fmt::Display for JadeError {
                 span.line, span.col, package, name
             ),
             JadeError::UnknownFfiSymbol { module, symbol, suggestion, span } => {
-                write!(f, "[{}:{}] '{}' has no symbol '{}'", span.line, span.col, module, symbol)?;
+                write!(
+                    f,
+                    "[{}:{}] the Rust package '{}' exports nothing named '{}'",
+                    span.line, span.col, module, symbol
+                )?;
                 match suggestion {
                     Some(s) => write!(f, " — did you mean '{}'?", s)?,
                     None => write!(
                         f,
-                        ". Add it to [dependencies.{}.symbols] in jade.toml, \
-                         or re-run `jade pkg bind {} --header <h>`",
-                        module, module
+                        "; mark the function or struct #[jade::export] in the package, or call \
+                         one it exports"
                     )?,
                 }
                 Ok(())
@@ -611,14 +604,6 @@ impl std::fmt::Display for JadeError {
                  tasks run concurrently on a shared heap, so this is a data race\n  \
                  help: pass the value in as a parameter and return the result instead",
                 span.line, span.col, task, what
-            ),
-            JadeError::HandleAcrossTask { type_name, span } => write!(
-                f,
-                "[{}:{}] cannot pass handle<{}> into a task\n  \
-                 a handle is a pointer into a C library, and Jade cannot see what the library \
-                 does with it or know whether it is thread-safe\n  \
-                 help: open the handle inside the task and close it before returning",
-                span.line, span.col, type_name
             ),
             JadeError::CircularImport { path, span } => write!(
                 f,

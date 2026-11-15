@@ -52,11 +52,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev
 
-      # glib is the FFI gate's fixture — see compiler/src/scripts/ffi-gate.sh for why a
-      # big ordinary library is the point. pkg-config is how the gate finds it,
-      # since the library sits in an architecture-named directory.
-      - name: Install glib
-        run: sudo apt-get install -y libglib2.0-dev pkg-config
+      # The FFI gate's Rust package links the system zlib through libz-sys, which
+      # finds it with pkg-config. See compiler/src/scripts/ffi-gate.sh.
+      - name: Install zlib
+        run: sudo apt-get install -y zlib1g-dev pkg-config
 
       # Overrides the Apple Silicon Homebrew path in .cargo/config.toml. Cargo's
       # [env] does not set a variable that is already present, so this wins.
@@ -70,6 +69,11 @@ jobs:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: cargo test --verbose
 
+      # jade-rs, the crate a Rust package depends on to be called from Jade, and
+      # its proc macro. Not default members, so they are named; they need no LLVM.
+      - name: Test jade-rs
+        run: cargo test -p jade-rs -p jade-rs-macros
+
       # Deliberately not `-D warnings`: the tree carries ~120 style warnings and
       # failing on them would mean either a large mechanical diff or a step
       # nobody can keep green. Clippy's correctness lints are deny-by-default,
@@ -79,7 +83,9 @@ jobs:
       - name: Clippy
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: cargo clippy --all-targets
+        run: |
+          cargo clippy --all-targets
+          cargo clippy -p jade-rs -p jade-rs-macros --all-targets
 
       # The tree was not rustfmt-clean, so `cargo fmt` rewrote 151 files and
       # anyone who ran it lost their own diff in the noise. `rustfmt.toml` now
@@ -90,7 +96,7 @@ jobs:
       # dovata is in the workspace and is not formatted with rustfmt, for the reason
       # dovata-ci.yml gives.
       - name: Rust formatting
-        run: cargo fmt -p jade --check
+        run: cargo fmt -p jade -p jade-rs -p jade-rs-macros --check
 
       # Exercises the real `jade check` binary against every committed fixture,
       # covering the CLI wiring and on-disk cache that the in-process test in
@@ -136,14 +142,11 @@ jobs:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: ./compiler/src/scripts/golden.sh
 
-      # Binds a real C library and runs it, once and then 600,000 times.
-      #
-      # It exists because of bugs that reached users: binding glib rather than
-      # the tidy libraries the survey used turned up a callback parameter
-      # checked against a typedef's name instead of its category, and a
-      # function-like macro shadowing the symbol we bound. Each refused the
-      # whole dependency. The long run catches a leak or a crash that only
-      # shows under sustained churn.
+      # Builds a real Rust package, wrapping regex from crates.io and the system
+      # zlib, and runs it once and then 600,000 times. The first run covers cargo,
+      # a dependency graph nobody here wrote, and linking a staticlib that imports
+      # a system library; the long run catches a leak of what Rust returns, or a
+      # crash that only shows under sustained churn.
       - name: FFI gate
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18

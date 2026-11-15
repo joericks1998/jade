@@ -80,9 +80,9 @@ pub struct Program {
     /// Each class with a destructor chain, with the `drop` functions a value
     /// of it runs when it is freed, in order.
     pub drops: Vec<(String, Vec<FuncId>)>,
-    /// The native packages the program calls, which it loads the first time
-    /// it calls each.
-    pub natives: Vec<NativeLib>,
+    /// The staticlib holding the program's Rust packages and the system
+    /// libraries it needs, when the program calls one; the backend links it in.
+    pub rust: Option<crate::rustpkg::Link>,
     /// The model a program that dereferences a prompt runs, read from its plan
     /// when the program is built into a binary. `None` until then, and for a
     /// program that runs no model.
@@ -112,30 +112,15 @@ impl Program {
     }
 }
 
-/// Purpose: This struct says where a native package is found when the program
-/// runs.
-#[derive(Debug, Clone)]
-pub struct NativeLib {
-    /// The id its calls name.
-    pub id: u32,
-    /// The name the program imports it by, for messages.
-    pub name: String,
-    /// Its path within the project's `libs/` directory, which the program
-    /// looks for beside itself or under `JADE_LIBS`; `None` for a library
-    /// outside `libs/`.
-    pub rel: Option<String>,
-    /// Where it was when the program was built.
-    pub abs: String,
-}
-
-/// Purpose: This struct describes one call into a native package: the
-/// function and the static types its arguments are sent as and its result is
-/// read back as.
+/// Purpose: This struct describes one call into a Rust package: the wrapper to
+/// call, and the static types its arguments are sent as and its result is read
+/// back as.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativeCall {
-    pub pkg: u32,
-    pub func: String,
-    /// How the program writes the call, `handlefix.open`, for messages.
+    /// The `extern "C"` wrapper `#[jade::export]` wrote. Its companion that
+    /// frees the result is the same name with `__free` added.
+    pub symbol: String,
+    /// How the program writes the call, `geo.midpoint`, for messages.
     pub display: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -576,8 +561,8 @@ pub enum Op {
     /// [`HttpFn`]. The operands are the url, the body when the method has one,
     /// and the headers, a `{str}` or nil.
     Http(HttpFn, bool),
-    /// A call into a native package, with arguments marshalled by their
-    /// static types; see [`NativeCall`].
+    /// A call into a Rust package, with each argument passed in its C form;
+    /// see [`NativeCall`].
     Native(Box<NativeCall>),
     /// `(url: str, handler: fn(str) -> T, headers: {str}?) -> nil`:
     /// `uhttp.stream`, calling the handler once a line until the stream ends
@@ -1051,8 +1036,7 @@ pub fn is_heap(t: &Ty) -> bool {
         | Ty::Struct(_)
         | Ty::Error
         | Ty::Future(_)
-        | Ty::Json
-        | Ty::Handle(_) => true,
+        | Ty::Json => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

@@ -164,14 +164,15 @@ enum PkgCommands {
     Add {
         /// Name the dependency is imported by (`use <name>`)
         name: String,
-        /// Local .so/.dylib, or a directory holding a Jade source package,
-        /// relative to the project root
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "git"])]
+        /// A directory holding a Jade source package (a jade.toml) or a Rust
+        /// package (a Cargo.toml), relative to the project root
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["url", "git"])]
         path: Option<String>,
-        /// Download URL; may contain {platform}. A .tar.gz is a Jade source package
+        /// Download URL of a Jade source package's .tar.gz archive
         #[arg(long, value_name = "URL", conflicts_with = "git")]
         url: Option<String>,
-        /// A git repository holding a Jade source package
+        /// A git repository holding a Jade source package, or with --rust a
+        /// Rust package
         #[arg(long, value_name = "URL")]
         git: Option<String>,
         /// The tag of --git to build
@@ -180,51 +181,20 @@ enum PkgCommands {
         /// The commit of --git to build
         #[arg(long, value_name = "COMMIT", requires = "git", conflicts_with = "branch")]
         rev: Option<String>,
-        /// The branch of --git to build; jade.lock pins the commit it is at
+        /// The branch of --git to build
         #[arg(long, value_name = "BRANCH", requires = "git")]
         branch: Option<String>,
-        /// Exact version (required for --url; there are no version ranges)
+        /// Exact version: required for --url, and with --rust alone, the
+        /// crates.io version to build (there are no version ranges)
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-        /// Force plain-C binding. Usually unnecessary — a local artifact is
-        /// recognised by whether it exports jade_pkg_init
-        #[arg(long = "c-abi")]
-        c_abi: bool,
-        /// The C library's header. Implies --c-abi, and binds it on the spot
-        #[arg(long, value_name = "FILE")]
-        header: Option<String>,
-        /// Extra include directory for the header; repeatable
-        #[arg(short = 'I', long = "include", value_name = "DIR")]
-        include: Vec<String>,
-        /// Macro to define before the header is read, as clang's -D; repeatable
-        #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
-        define: Vec<String>,
-        /// Only bind symbols whose name contains this
-        #[arg(long, value_name = "TEXT")]
-        only: Option<String>,
-    },
-    /// Re-generate a C dependency's symbol table from its header
-    ///
-    /// `jade pkg add --header` already does this; reach for `bind` to re-run it
-    /// after a header changes, or to narrow a large one with --only.
-    Bind {
-        /// The dependency to bind, which must already be in jade.toml
-        name: String,
-        /// The library's header, e.g. /opt/homebrew/include/sqlite3.h
-        #[arg(long, value_name = "FILE")]
-        header: String,
-        /// Extra include directory; repeatable
-        #[arg(short = 'I', long = "include", value_name = "DIR")]
-        include: Vec<String>,
-        /// Macro to define before the header is read, as clang's -D; repeatable
-        #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
-        define: Vec<String>,
-        /// Only bind symbols whose name contains this
-        #[arg(long, value_name = "TEXT")]
-        only: Option<String>,
-        /// Show what would be written without changing jade.toml
+        /// The dependency is a Rust package. Unneeded for a --path holding a
+        /// Cargo.toml, which is recognised
         #[arg(long)]
-        dry_run: bool,
+        rust: bool,
+        /// The Rust package's own name, when it is not the dependency's
+        #[arg(long, value_name = "NAME")]
+        package: Option<String>,
     },
     /// Remove a dependency from jade.toml, jade.lock, and libs/
     Remove { name: String },
@@ -250,10 +220,7 @@ fn main() {
     // macros panic and dump a Rust backtrace over ordinary shell usage.
     jade::stdio::install_broken_pipe_hook();
 
-    // Parsed here rather than inside `run_cli` so the libs root can be published
-    // below, while this is still the only thread. See `publish_libs_root`.
     let cli = Cli::parse();
-    publish_libs_root(&cli);
 
     // Every compiler stage recurses over the source, so the CLI runs on a thread
     // with a stack sized for that. See `COMPILER_STACK_SIZE`.
@@ -268,57 +235,6 @@ fn main() {
         })
         .join()
         .expect("the main thread panicked");
-}
-
-/// Say where this project's dependencies live, before anything can load one.
-///
-/// A dependency must be loaded once per process, not once per package that uses
-/// it, and `dlopen` keys a loaded image by the path it was asked for — so every
-/// image has to resolve to the same path, which means agreeing on one root. The
-/// CLI is the host here, so the CLI is what says which.
-///
-/// The channel is the environment because it is the only one there is: the
-/// program runs as its own process, and a native package it loads is another
-/// image, while the environment is held by libc and shared by both.
-/// `backend/native.rs` reads it as the first place to look.
-///
-/// The root is taken from the *source file's* directory rather than the working
-/// directory, matching `cli::run::run_file` — reading it from the CWD is what
-/// once made the two engines disagree about what a `use` resolves to.
-fn publish_libs_root(cli: &Cli) {
-    // A root the user set wins, and is never replaced. It is the only way to
-    // give one root to a process with no Jade host in it — a C program that
-    // embeds a Jade package has no `main` of ours to publish from.
-    if std::env::var_os("JADE_LIBS").is_some() {
-        return;
-    }
-
-    let target = match &cli.command {
-        Commands::Run { target, .. } => target.clone(),
-        // `test` discovers from the working directory, so it has no path of
-        // its own to anchor on.
-        Commands::Test { .. } => None,
-        Commands::Build { file, .. } => file.clone(),
-        _ => return,
-    };
-    let from = match target {
-        Some(t) => std::path::Path::new(&t).canonicalize().ok().and_then(|p| {
-            if p.is_dir() { Some(p) } else { p.parent().map(std::path::Path::to_path_buf) }
-        }),
-        None => std::env::current_dir().ok(),
-    };
-    let Some(root) = from.and_then(|d| jade::project::find_project_root_from(&d)) else { return };
-
-    let libs = root.join(jade::pkg::LIBS_DIR);
-    if !libs.is_dir() {
-        return;
-    }
-    let libs = std::fs::canonicalize(&libs).unwrap_or(libs);
-
-    // SAFETY: no thread has been spawned yet, so this is the only thread in the
-    // process and nothing can be reading the environment concurrently.
-    // `src/cache/mod.rs` documents the same rule for the same reason.
-    unsafe { std::env::set_var("JADE_LIBS", &libs) };
 }
 
 fn run_cli(cli: Cli) {
@@ -387,21 +303,7 @@ fn run_cli(cli: Cli) {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add {
-                name,
-                path,
-                url,
-                git,
-                tag,
-                rev,
-                branch,
-                version,
-                c_abi,
-                header,
-                include,
-                define,
-                only,
-            } => {
+            PkgCommands::Add { name, path, url, git, tag, rev, branch, version, rust, package } => {
                 let reference = match (&tag, &rev, &branch) {
                     (Some(t), _, _) => ("tag", t.as_str()),
                     (_, Some(r), _) => ("rev", r.as_str()),
@@ -415,25 +317,8 @@ fn run_cli(cli: Cli) {
                     url.as_deref(),
                     git,
                     version.as_deref(),
-                    c_abi,
-                    header.as_deref(),
-                    cli::pkg::HeaderOptions {
-                        include: &include,
-                        defines: &define,
-                        only: only.as_deref(),
-                    },
-                )
-            }
-            PkgCommands::Bind { name, header, include, define, only, dry_run } => {
-                cli::pkg::run_bind(
-                    &name,
-                    &header,
-                    cli::pkg::HeaderOptions {
-                        include: &include,
-                        defines: &define,
-                        only: only.as_deref(),
-                    },
-                    dry_run,
+                    rust,
+                    package.as_deref(),
                 )
             }
             PkgCommands::Remove { name } => cli::pkg::run_remove(&name),

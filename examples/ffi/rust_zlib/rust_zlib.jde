@@ -1,0 +1,27 @@
+// zlib, a C library, called through the Rust crate in zlib/ that wraps it with
+// libz-sys. There is no binding table and no header: the crate's exported
+// functions say what they take and return, and a zlib error comes back as a
+// raise.
+
+use zlib
+
+let text = "a repeated line, a repeated line, a repeated line, a repeated line"
+let packed = zlib.compress(text.encode(), 9)
+print(len(packed) < len(text.encode()))
+print(zlib.decompress(packed).decode())
+
+// The CRC-32 of "hello", which zlib and every other implementation agree on.
+print(zlib.crc32("hello".encode()))
+
+try {
+    print(zlib.decompress("not compressed at all".encode()))
+} catch e {
+    print(e.message)
+}
+try {
+    print(zlib.compress(text.encode(), 42))
+} catch e {
+    print(e.message)
+}
+
+print(zlib.version().starts_with("1."))

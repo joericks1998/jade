@@ -197,8 +197,6 @@ pub enum Ty {
     Json,
     /// The value a catch-all `catch e` binds.
     Error,
-    /// An opaque pointer from a C library, named by its C type.
-    Handle(String),
     /// A slot in the [`Store`].
     Var(u32),
 }
@@ -713,7 +711,6 @@ impl fmt::Display for Ty {
             Ty::Grammar => write!(f, "grammar"),
             Ty::Json => write!(f, "json"),
             Ty::Error => write!(f, "error"),
-            Ty::Handle(n) => write!(f, "handle<{n}>"),
             Ty::Var(_) => write!(f, "an unknown type"),
         }
     }

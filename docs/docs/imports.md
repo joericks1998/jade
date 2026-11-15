@@ -68,26 +68,20 @@ files = ["math.jde", "io.jde"]  # optional: allowlist of importable filenames
 
 `files` is optional:
 
-- *Omit it* to make every recognized file in the directory importable.
-- *List filenames*, with their extensions, to allow only those.
-
-A module's *file extension decides how it loads*:
-
-- `.jde` is a Jade source module.
-- `.dylib` and `.so` are *native* C-ABI shared libraries, such as a Rust crate built as a `cdylib`. Jade loads one over the `jade_pkg_init` FFI and binds it as a dict of functions.
+- *Omit it* to make every `.jde` file in the directory importable.
+- *List filenames*, with their `.jde` extensions, to allow only those.
 
 ```toml
 [lib.ext]
 path  = "lib"
-files = ["math.jde", "fastmath.dylib"]   # one Jade module, one native library
+files = ["math.jde"]
 ```
 
 ```jade
-use ext::math       // -> lib/math.jde     (Jade)
-use ext::fastmath   // -> lib/fastmath.dylib (native), then fastmath.some_fn(...)
+use ext::math       // -> lib/math.jde
 ```
 
-Native libraries work in both engines. The interpreter loads one with `dlopen`. A compiled binary also loads it with `dlopen` at startup, then calls through `jrt_native_call`. The same `.so` file serves both.
+A `[lib]` holds Jade modules alone. Native code is a Rust package under `[dependencies]`; see [Packages](packages#rust-packages). Until 2.0.5 a `[lib]` could list a `.dylib` or `.so`, which the program opened with `dlopen`.
 
 Then import the module with `::` notation from *any* file in the project. Jade resolves the path against the library's directory, anchored at the project root, rather than against the importing file. The import binds to its last segment automatically, with no `as` needed:
 
@@ -137,7 +131,7 @@ use geometry
 fn area(w, h) { return geometry.area(w, h) }
 ```
 
-So adding a helper to `geometry.jde` never quietly widens what users of `mathlib` can call. See [Packages](packages#a-package-of-several-files).
+So adding a helper to `geometry.jde` never quietly widens what users of `mathlib` can call. See [Packages](packages#jade-source-packages).
 
 ---
 
@@ -199,20 +193,21 @@ As with `use`, the string-literal form is a compile-time error, so `from "std/ma
 
 ## Dependencies
 
-External packages are declared in `jade.toml` and imported by their bare name. See [Packages](packages) for the full workflow.
+External packages are declared in `jade.toml` and imported by their bare name: a Jade source package, or a Rust package, whose functions and structs are reached through the name. See [Packages](packages) for the full workflow.
 
 ```toml
-[dependencies.fastmath]
-version = "1.2.0"
-url     = "https://example.com/fastmath-{platform}.so"
+[dependencies.imgtools]
+path = "rust/imgtools"
+abi  = "rust"
 ```
 
 ```jade
-use fastmath
+use imgtools
 
-print(fastmath.triple(14))
+print(imgtools.greet("Jade"))
+let p = imgtools.Point { x: 1.0, y: 2.0 }
 ```
 
 A dependency resolves through the same machinery as a registered library, so it behaves the same way in `jade run` and `jade build`. If a project declares both a dependency and a `[lib]` entry under one name, the local `[lib]` wins and Jade warns you. If a bare name matches both a dependency and a sibling `.jde` file, that is a hard error rather than a silent choice. Rename one of them.
 
-A dependency is always *one name binding one artifact*, no matter how many files went into building it. `use fastmath` reaches the package's exported functions and nothing more. There is no `fastmath::submodule`, because the package's internal structure did not survive compilation. That is the difference between a dependency and a `[lib]`. A `[lib]` registers a *directory* whose modules you address one at a time, while a package is a single compiled unit.
+A dependency is always *one name binding one package*. `use imgtools` reaches what the package exports and nothing more: a source package's entry module, or a Rust package's `#[jade::export]` functions and structs. There is no `imgtools::submodule`. That is the difference between a dependency and a `[lib]`. A `[lib]` registers a *directory* whose modules you address one at a time.

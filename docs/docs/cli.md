@@ -48,7 +48,7 @@ jade build --lib                          # build the [package] in jade.toml
 
 Every module the file `use`s is compiled into the same artifact, so a program or a package can span as many files as you like.
 
-With no file given, `--lib` builds the project's `[package]` section. Its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](packages#declaring-the-package-in-jadetoml).
+With no file given, `--lib` builds the project's `[package]` section. Its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](packages#jade-source-packages).
 
 ### Flags
 
@@ -259,17 +259,18 @@ jade cache clean --dry-run
 
 ## `jade pkg`
 
-Manage the project dependencies declared in the `[dependencies]` section of `jade.toml` and pinned by `jade.lock`. A dependency is a prebuilt native shared library, installed into a project-local `libs/` directory. `jade run`, `jade test`, and `jade build` install anything missing on their own.
+Manage the dependencies declared in the `[dependencies]` section of `jade.toml`. A dependency is a Jade source package, pinned by `jade.lock` and installed into a project-local `libs/` directory, or a Rust package, which cargo builds into the program. `jade run`, `jade test`, and `jade build` install anything missing on their own.
 
 :::warning The package commands are nested
-It is `jade pkg add`, never `jade add`. The same is true of `bind`, `remove`, `install`, `update`, and `list`. Every one of them lives under `jade pkg`.
+It is `jade pkg add`, never `jade add`. The same is true of `remove`, `install`, `update`, and `list`. Every one of them lives under `jade pkg`.
 :::
 
 ```bash
-jade pkg add fastmath --url 'https://example.com/fastmath-{platform}.so' --version 1.2.0
-jade pkg add mathlib --path ../mathlib/mathlib.dylib
-jade pkg add sqlite --path /opt/homebrew/lib/libsqlite3.dylib   # a plain C library
-jade pkg install                 # install everything in the lock
+jade pkg add geometry --path ../geometry          # Jade source: the directory has a jade.toml
+jade pkg add imgtools --path rust/imgtools        # Rust: the directory has a Cargo.toml
+jade pkg add shapes --git https://github.com/me/shapes --tag v1.2.0
+jade pkg add hex --rust --version 0.4.3           # a Rust package from crates.io
+jade pkg install                                  # install everything in the lock
 jade pkg list
 ```
 
@@ -277,34 +278,24 @@ jade pkg list
 
 | Subcommand | Description |
 |------------|-------------|
-| `add <name>` | Add a dependency from `--url` or `--path`, then install it. For a local artifact it works out on its own whether the library is a Jade package or plain C, finds the C header, and generates the binding. |
-| `bind <name> --header <h>` | Regenerate a C dependency's symbol table from its header. `add` and `install` already do this, so use `bind` to re-run after a header changes, or to narrow a large header with `--only`. |
+| `add <name>` | Add a dependency, then install it. A `--path` directory holding a `Cargo.toml` is a Rust package, and one holding a `jade.toml` is Jade source. A Rust package is built on the spot, and `add` reports what it exports. |
 | `remove <name>` | Remove a dependency from `jade.toml`, `jade.lock`, and `libs/`. |
-| `install` | Fetch and verify everything `jade.lock` pins. It re-pins any local `path` dependency whose source was rebuilt, and fills in the symbols of any C dependency that names a header but has none yet. `--locked` refuses to change the lock, and fails instead if the lock is out of date. |
-| `update [name]` | Resolve dependencies against `jade.toml` again and rewrite `jade.lock`. There is no registry, so this reconciles what you declared. It does not go looking for a newer version. |
-| `list` | List locked dependencies, whether they are installed here, and whether a local source has changed since it was pinned. |
+| `install` | Fetch and verify every source package `jade.lock` pins, re-pinning any local `path` package whose source changed. `--locked` refuses to change the lock, and fails instead if the lock is out of date. Rust packages are left to cargo, at build time. |
+| `update [name]` | Resolve dependencies against `jade.toml` again and rewrite `jade.lock`. It reconciles what you declared; it does not go looking for a newer version. |
+| `list` | List locked source packages, whether they are installed here, and whether a local source has changed since it was pinned, then the Rust packages. |
 
 ### `add` flags
 
 | Flag | Description |
 |------|-------------|
-| `--path <FILE>` | A local `.so`/`.dylib`, relative to the project root. |
-| `--url <URL>` | Download URL. May contain `{platform}`. |
-| `--version <VERSION>` | An exact version. Required with `--url` and optional with `--path`. There are no version ranges. |
-| `--c-abi` | Force plain-C binding. You rarely need it, because Jade recognises a local artifact by whether it exports `jade_pkg_init`. You do need it for a `--url` C library, since there is no local file to inspect yet. |
-| `--header <FILE>` | The C library's header. It implies `--c-abi` and binds on the spot. Pass it when the automatic search would miss the file. |
-| `-I`, `--include <DIR>` | Extra include directory for the header. Repeatable. |
+| `--path <DIR>` | A directory, relative to the project root: a Jade source package or a Rust crate. |
+| `--git <URL>` | A git repository, with one of `--tag`, `--rev` or `--branch`. Jade source, unless `--rust` is given. |
+| `--url <URL>` | A `.tar.gz` archive of a Jade source package. Needs `--version`. |
+| `--version <VERSION>` | An exact version. Required with `--url`; with `--rust` and no other source, the crates.io version to build. There are no version ranges. |
+| `--rust` | The dependency is a Rust package. Unneeded for a `--path` holding a `Cargo.toml`. |
+| `--package <NAME>` | A Rust package's own name, when it differs from the name a program writes, such as one with a `-`. |
 
-### `bind` flags
-
-| Flag | Description |
-|------|-------------|
-| `--header <FILE>` | The library's header, such as `/opt/homebrew/include/sqlite3.h`. Required. |
-| `-I`, `--include <DIR>` | Extra include directory. Repeatable. |
-| `--only <TEXT>` | Only bind symbols whose name contains this. |
-| `--dry-run` | Show what would be written without changing `jade.toml`. |
-
-`bind` merges into the existing symbol table rather than replacing it. So working through a large header a piece at a time with `--only` is a normal way to use it.
+`jade pkg bind` and the `--header`, `--c-abi`, `--include` and `--define` flags of `add` were removed in 2.0.5, with the C bindings they generated. A C library is reached through a Rust crate that wraps it.
 
 See [Packages](packages) for the full workflow.
 

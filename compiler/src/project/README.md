@@ -10,11 +10,11 @@ Import resolution has to give the same answer every time a `use` is read. The AO
 
 The `[lib]` mechanism is why this module is more than a TOML parser. A `[lib.<name>]` section registers a directory and its modules under a name, anchored at the project root. So `use utils.math` works from anywhere in the tree, rather than only from a sibling directory.
 
-A `[lib]` entry naming a native library may also carry `symbols`, one table a function with `args` and `ret` written in Jade types. A Jade-ABI library carries no types of its own, and the static checker reads them from here; see `typechecker::infer::native`. A `structs` table, `[lib.<name>.structs.<T>]` with `fields` in Jade types, declares a record those functions pass or return, which the program names as `<name>.<T>`.
+The `files` list carries the `.jde` extension, which separates modules from the other files in the directory. A `[lib]` holds Jade modules alone. Until 2.0.5 it could list a `.dylib` or `.so` loaded with `dlopen`; one listed now is refused with a message naming Rust packages, the replacement.
 
-The `files` list carries file extensions on purpose. An extension does two jobs: it separates modules from the other files in the directory, and it *selects how each one loads*. `.jde` means Jade source, while `.dylib`, `.so`, and `.dll` mean a native shared library loaded over the `jade_pkg_init` C ABI.
+The package manager reuses that mechanism rather than adding a second one beside it. Resolved dependencies come back from `pkg/` as synthetic `LibraryEntry` values, which are merged into the `[lib]` map. A Rust package's entry carries its dependency's name in `rust`, which no manifest can write, and `resolve_library_import` answers it with `ImportKind::Rust`, so the build knows to read its functions out of the compiled crate (`rustpkg/`).
 
-The package manager reuses that mechanism rather than adding a second one beside it. Resolved dependencies come back from `pkg/` as synthetic `LibraryEntry` values, which are merged into the `[lib]` map. So nothing downstream ever learns what a dependency is.
+A `[dependencies]` entry says what kind of package it is with `abi`, `"source"` or `"rust"`, and must say it. `Abi`'s deserializer refuses `"c"` and `"jade"`, the two prebuilt kinds 2.0.5 removed, on the manifest's own line, naming the replacement. A Rust entry comes from a `path`, a `git` repository or a crates.io `version`, and may give the Rust package's own name as `package`, since a Jade name is an identifier and a Rust package's name may hold a `-`.
 
 A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resolves to, and `exports`, the entry module's names other projects may use. A source package's `[lib]` entry, which `pkg/` builds from its lock entry, carries both. A file inside a source package resolves its imports against the package's own `jade.toml` first, so the package's `[lib]` entries work wherever it is installed.
 
@@ -33,8 +33,8 @@ A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resol
   - `ambiguous_bare_import` detects a bare name that could mean two things, so the error can name the ambiguity rather than silently picking one.
   - `find_test_files` finds every `test_*.jde` and `*_test.jde` for `jade test`.
 - *`imports.rs`* gives one answer to "what does this `use` name?", plus the graph walk `check` runs:
-  - `resolve_import` is the single resolver, built on the three primitives above. It returns an `ImportTarget`, which is either a built-in `std::*` package, a native shared library, or a Jade source file. `walk_imports` and `reachable_jade_modules` both go through it. The AOT backend's `resolve_use` in `aot/imports.rs` is built on the same three primitives rather than on this function. Until v1.4.8 the VM reached it through a thin adapter in `vm/chunk.rs`.
-  - `walk_imports` resolves every import reachable from a file, following Jade modules through as many levels as they go, and returns the first one it cannot resolve along with its span. It loads nothing. A native module is checked for existence but never `dlopen`ed, because opening one runs its initializer, and `check` must not execute the program it is checking.
+  - `resolve_import` is the single resolver, built on the three primitives above. It returns an `ImportTarget`, which is either a built-in `std::*` package, a Rust package, or a Jade source file. `walk_imports` and `reachable_jade_modules` both go through it. The AOT backend's `resolve_use` in `aot/imports.rs` is built on the same three primitives rather than on this function. Until v1.4.8 the VM reached it through a thin adapter in `vm/chunk.rs`.
+  - `walk_imports` resolves every import reachable from a file, following Jade modules through as many levels as they go, and returns the first one it cannot resolve along with its span. It loads nothing. A Rust package is left to the build that types the program, which reports one that does not compile.
   - `reachable_jade_modules` is the same walk, except it keeps the set of modules it visits rather than discarding it. `jade build --lib` checks a `[package]`'s declared `sources` against that set. Asking the frontend rather than the LLVM backend keeps the check off the compile path, which is right: what a package contains is a property of the import graph, not of code generation.
   - `program_import_paths` returns the `use` and `from … use` paths of a parsed program.
 - *`tests.rs`* holds the resolution tests, plus the import-walk tests covering missing modules, breakage several levels down, cycles, and per-module directory resolution.
@@ -49,9 +49,7 @@ A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resol
 
 Any change to resolution behavior must be checked against `examples/imports/`. `./compiler/src/scripts/golden.sh` builds those fixtures and compares their output with what was recorded, and `jade check` over the same fixtures covers the import walk.
 
-`CSymbol` accepts two shapes: a table, or the bare string `"?"` for a prototype nobody has written yet. It deserializes by hand to keep the two apart. Using `#[serde(untagged)]` would collapse every table's error into "data did not match any variant", losing the "missing field `ret`" that says what is actually wrong.
-
-A placeholder is deliberately *not* a `validate` failure. It is a legal manifest state, and refusing to load one would take `jade pkg list` and `jade pkg remove` down with it. The refusal lives in `pkg::unresolved_report` instead.
+`DependencyEntry::validate` is what refuses a missing `abi`, not deserialization. A manifest with an incomplete entry still loads, so `jade pkg list` and `jade pkg remove` keep working on it, and every command that would use the entry refuses it by name.
 
 A `[scripts]` entry is a shell string that `jade run <name>` executes. It is not Jade code.
 

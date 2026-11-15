@@ -143,7 +143,7 @@ text growing; `?p |> print` would put each piece on a line of its own.
 ## Out of scope
 
 - *Native sources.* A Rust function that returns an iterator is where pipes meet
-  native code. That lands with the Rust packages of 2.0.4,
+  native code. That lands with the Rust packages of 2.0.5,
   `design/v2-rust-packages.md`. `uhttp.stream` keeps its handler argument until then.
 - *`for` over a live source.* A loop could also run its body per piece as it
   arrives; nobody has asked for it.

@@ -1,0 +1,6 @@
+// A literal takes a sized parameter's type, and must fit it: the first
+// parameter of `widths` is a Rust u8, a Jade byte, which holds 0 to 255.
+
+use values
+
+print(values.widths(300, 2, 3, 4, 5, 6))

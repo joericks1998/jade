@@ -1,0 +1,29 @@
+# `jade-rs`: what a Rust crate depends on to be a Jade package. It marks functions
+# and structs with `#[jade::export]` and this crate supplies everything the generated
+# code calls: the C form of each type that crosses, the conversions to and from it,
+# the description of each signature the Jade compiler reads, and the wrapper every
+# exported call runs inside. design/v2-rust-packages.md has the design.
+[package]
+name = "jade-rs"
+version = "0.1.0"
+edition = "2021"
+# Needs Rust 1.82 or later: the generated code writes `#[unsafe(no_mangle)]`, which
+# edition 2024 requires and Rust accepts in every edition from 1.82. Not declared as
+# `rust-version`, because the workspace's resolver would then prefer dependency
+# versions for 1.82 across every member, the compiler included.
+authors = ["JADE OS Contributors"]
+license = "MIT"
+description = "Write Jade packages in Rust: #[jade::export] and the runtime it calls"
+# Not published yet; a package outside this repo depends on it by git.
+publish = false
+
+[lib]
+# The library is `jade`, so `jade-rs = { ... }` in a package's Cargo.toml gives
+# `#[jade::export]` with no rename. The compiler's library is also `jade`; the two are
+# never built in one cargo invocation (the workspace's default member is the compiler,
+# and this crate is tested with `-p jade-rs`), so their outputs never meet.
+name = "jade"
+path = "src/lib.rs"
+
+[dependencies]
+jade-rs-macros = { path = "macros", version = "=0.1.0" }

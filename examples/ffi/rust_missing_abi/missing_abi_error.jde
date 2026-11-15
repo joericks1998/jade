@@ -1,0 +1,6 @@
+// jade.toml beside this file names a dependency with no abi. A dependency is Jade
+// source or a Rust crate, and neither is a sensible default, so the build stops:
+//   dependency 'geo' has no abi in jade.toml; write abi = "source" for a Jade
+//   source package or abi = "rust" for a Rust crate
+
+print("never runs")

@@ -2239,7 +2239,7 @@ impl<'a> Checker<'a> {
         Ty::Int
     }
 
-    /// Purpose: This function types a call into a native package.
+    /// Purpose: This function types a call into a Rust package.
     ///
     /// Inputs:
     /// - `name`: the `__native$<pkg>$<fn>` reference.
@@ -2248,8 +2248,9 @@ impl<'a> Checker<'a> {
     /// - `f`: the frame.
     /// - `node`: the call's address.
     ///
-    /// Outputs: the call's type: the declared result, or a slot its use fills
-    /// when `jade.toml` declares none (see `native.rs`).
+    /// Outputs: the call's type, which the package's record declares (see
+    /// `native.rs`). A number literal takes a sized parameter's type, as it does
+    /// in an assignment.
     fn native_call(
         &mut self,
         name: &str,
@@ -2259,67 +2260,28 @@ impl<'a> Checker<'a> {
         f: &mut Frame,
         node: usize,
     ) -> Ty {
-        let result = self.slot(f, node);
-        let sig = self.natives.get(name).cloned();
-        if sig.as_ref().is_none_or(|s| s.ret.is_none()) {
-            self.native_results.insert((f.key.clone(), node), result.clone());
-        }
-        let Some(sig) = sig else {
-            return result;
+        let Some(sig) = self.natives.get(name).cloned() else {
+            let fname = name.rsplit('$').next().unwrap_or(name);
+            self.report(span, format!("the Rust package exports no function '{fname}'"));
+            return self.slot(f, node);
         };
-        if let Some(params) = &sig.params {
-            if params.len() != tys.len() {
-                self.report(
-                    span,
-                    format!(
-                        "{} takes {} argument{}, got {}",
-                        sig.display,
-                        params.len(),
-                        if params.len() == 1 { "" } else { "s" },
-                        tys.len()
-                    ),
-                );
-                return result;
-            }
-            for (i, ((p, t), a)) in params.iter().zip(&tys).zip(args).enumerate() {
-                // A declared callback type gets a return slot of its own at this
-                // call, which is how the store recognizes it on the next pass
-                // rather than recording the function as a new member each time.
-                let p = &match p {
-                    Ty::Fn(ft) => {
-                        let ret = self.slot(f, node + 10 + i);
-                        self.unify(
-                            &ret,
-                            &ft.ret,
-                            a.span,
-                            &format!("what {}'s callback returns", sig.display),
-                        );
-                        Ty::Fn(Box::new(super::FnTy {
-                            params: ft.params.clone(),
-                            ret,
-                            is_async: ft.is_async,
-                        }))
-                    }
-                    other => other.clone(),
-                };
-                // `handle` takes a handle of any type; the call decides which.
-                if matches!(p, Ty::Handle(n) if n.is_empty()) {
-                    let at = self.store.resolve(t);
-                    if !matches!(at, Ty::Handle(_) | Ty::Var(_)) {
-                        self.report(
-                            a.span,
-                            format!("{} takes a handle here, got {at}", sig.display),
-                        );
-                    }
-                    continue;
-                }
-                self.unify(p, t, a.span, &format!("the argument to {}", sig.display));
-            }
+        if sig.params.len() != tys.len() {
+            self.report(
+                span,
+                format!(
+                    "{} takes {} argument{}, got {}",
+                    sig.display,
+                    sig.params.len(),
+                    if sig.params.len() == 1 { "" } else { "s" },
+                    tys.len()
+                ),
+            );
+            return sig.ret;
         }
-        if let Some(r) = &sig.ret {
-            self.unify(&result, r, span, &format!("what {} returns", sig.display));
+        for ((p, t), a) in sig.params.iter().zip(&tys).zip(args) {
+            self.accept(p, a, t, a.span, &format!("the argument to {}", sig.display));
         }
-        result
+        sig.ret
     }
 }
 

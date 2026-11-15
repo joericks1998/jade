@@ -39,6 +39,8 @@ The repo holds two programs and an editor extension. Each is a directory with it
 | [`dovata/`](dovata/README.md) | the process that holds a model's memory, plans where every tensor lives, and hands that memory to compiled programs. |
 | [`vscode/`](vscode/README.md) | the VS Code extension: syntax highlighting for `.jde` files. Not a Cargo crate. |
 
+[`jade-rs/`](jade-rs/README.md) is the crate a Rust library depends on to be called from a Jade program: `#[jade::export]` and the runtime its code calls. It is two workspace members, the crate and its proc macro in `jade-rs/macros/`, and has no release of its own yet.
+
 The rest is shared:
 
 - [`examples/`](examples/README.md) is the `.jde` fixture suite. CI checks every one, and builds and runs most of them.
@@ -47,7 +49,7 @@ The rest is shared:
 - [`bench/`](bench/README.md) holds benchmarks against CPython.
 - [`.github/workflows/`](.github/workflows/README.md) tests and releases all three.
 
-The root `Cargo.toml` is the workspace and nothing else. A bare `cargo build` or `cargo test` here means the compiler; name dovata's packages with `-p`, as in `cargo build -p dovata`.
+The root `Cargo.toml` is the workspace and nothing else. A bare `cargo build` or `cargo test` here means the compiler; name dovata's and jade-rs's packages with `-p`, as in `cargo build -p dovata` or `cargo test -p jade-rs -p jade-rs-macros`.
 
 ---
 
@@ -82,7 +84,7 @@ cargo test -p dovata -p dovata-chat-template -p refback
 cargo clippy -p dovata -p dovata-chat-template -p refback --all-targets
 ```
 
-CI is defined in `.github/workflows/`, one workflow per program, and runs on every pull request against `main` that touches that program. The compiler's, `ci.yml`, runs its four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `compiler/src/scripts/golden.sh`, which builds every example and compares its output with the recorded `.expected` file, and `compiler/src/scripts/ffi-gate.sh`, which builds and runs real C bindings.
+CI is defined in `.github/workflows/`, one workflow per program, and runs on every pull request against `main` that touches that program. The compiler's, `ci.yml`, runs its four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `compiler/src/scripts/golden.sh`, which builds every example and compares its output with the recorded `.expected` file, and `compiler/src/scripts/ffi-gate.sh`, which builds and runs a real Rust package wrapping a crates.io crate and the system zlib.
 
 Clippy runs without `-D warnings`, so existing warnings do not fail the build. Do not add new ones.
 

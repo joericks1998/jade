@@ -41,7 +41,9 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     `Pipe` (2.0.4), when a pipe began calling its stages once per piece and
 ///     a typed dereference became a call around the reply, `toInt(?p)`. A v17
 ///     cache holds pipes as calls and `?p |> toInt` folded in.
-pub const CACHE_FORMAT_VERSION: u32 = 18;
+/// v19: `JadeType::Handle` was removed (2.0.5), with the C foreign function
+///     interface, renumbering every variant after it.
+pub const CACHE_FORMAT_VERSION: u32 = 19;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

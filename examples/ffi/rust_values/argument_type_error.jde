@@ -1,0 +1,7 @@
+// A Rust function's parameters have the types its signature gives them, so an
+// argument of another type is refused when the program is checked: `add` takes
+// two ints, and "one" is a str.
+
+use values
+
+print(values.add("one", 2))

@@ -141,23 +141,14 @@ fn parse_lib_section() {
 #[test]
 fn split_lib_ext_recognizes_extensions() {
     assert_eq!(split_lib_ext("math.jde"), ("math", "jde"));
-    assert_eq!(split_lib_ext("fast.dylib"), ("fast", "dylib"));
-    assert_eq!(split_lib_ext("a.so"), ("a", "so"));
-    assert_eq!(split_lib_ext("b.dll"), ("b", "dll"));
+    // A `[lib]` holds Jade modules alone, so nothing else is an extension.
+    assert_eq!(split_lib_ext("fast.dylib"), ("fast.dylib", ""));
+    assert_eq!(split_lib_ext("a.so"), ("a.so", ""));
     // Subdir preserved in the stem.
     assert_eq!(split_lib_ext("nested/mod.jde"), ("nested/mod", "jde"));
     // Unknown extension → (name, "").
     assert_eq!(split_lib_ext("plain.txt"), ("plain.txt", ""));
     assert_eq!(split_lib_ext("noext"), ("noext", ""));
-}
-
-#[test]
-fn kind_for_ext_maps_extensions() {
-    assert_eq!(kind_for_ext("jde"), Some(ImportKind::Jade));
-    assert_eq!(kind_for_ext("dylib"), Some(ImportKind::Native));
-    assert_eq!(kind_for_ext("so"), Some(ImportKind::Native));
-    assert_eq!(kind_for_ext("dll"), Some(ImportKind::Native));
-    assert_eq!(kind_for_ext("txt"), None);
 }
 
 // ── resolve_library_import ────────────────────────────────────────────────────
@@ -196,7 +187,7 @@ fn resolve_import_with_allowlist_hit() {
 }
 
 #[test]
-fn resolve_import_with_allowlist_native() {
+fn a_native_library_in_an_allowlist_is_refused_with_the_fix() {
     let libs = libs_with(
         "utils",
         LibraryEntry {
@@ -205,10 +196,19 @@ fn resolve_import_with_allowlist_native() {
             ..Default::default()
         },
     );
-    let resolved =
-        resolve_library_import(&libs, "utils/fast", Path::new("/root")).unwrap().unwrap();
-    assert_eq!(resolved.kind, ImportKind::Native);
-    assert_eq!(resolved.path, PathBuf::from("/root/src/utils/fast.dylib"));
+    let err = resolve_library_import(&libs, "utils/fast", Path::new("/root")).unwrap_err();
+    assert!(err.contains("abi = \"rust\""), "{err}");
+}
+
+#[test]
+fn a_rust_package_entry_resolves_to_its_dependency_name() {
+    let libs = libs_with(
+        "fast",
+        LibraryEntry { path: String::new(), rust: Some("fast".into()), ..Default::default() },
+    );
+    let resolved = resolve_library_import(&libs, "fast", Path::new("/root")).unwrap().unwrap();
+    assert_eq!(resolved.kind, ImportKind::Rust);
+    assert_eq!(resolved.path, PathBuf::from("fast"));
 }
 
 #[test]
@@ -421,13 +421,13 @@ fn bare_import_resolves_registered_library() {
         "fastmath",
         LibraryEntry {
             path: "libs/fastmath-1.0.0".into(),
-            files: Some(vec!["fastmath.so".into()]),
+            files: Some(vec!["fastmath.jde".into()]),
             ..Default::default()
         },
     );
     let resolved = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap().unwrap();
-    assert_eq!(resolved.kind, ImportKind::Native);
-    assert_eq!(resolved.path, PathBuf::from("/root/libs/fastmath-1.0.0/fastmath.so"));
+    assert_eq!(resolved.kind, ImportKind::Jade);
+    assert_eq!(resolved.path, PathBuf::from("/root/libs/fastmath-1.0.0/fastmath.jde"));
 }
 
 #[test]
@@ -470,32 +470,27 @@ fn parse_dependencies_section() {
         [project]
         name = "app"
 
-        [dependencies.fastmath]
+        [dependencies.geometry]
         version = "1.2.0"
-        url = "https://example.com/fastmath-{platform}.so"
+        url = "https://example.com/geometry-1.2.0.tar.gz"
+        abi = "source"
 
         [dependencies.zlib]
-        version = "1.3.1"
-        path = "vendor/libz.so"
-        abi = "c"
-
-        [dependencies.zlib.symbols.crc32]
-        args = ["int", "str"]
-        ret = "int"
+        path = "rust/zlib"
+        package = "zlib-jade"
+        abi = "rust"
         "#,
     );
     let deps = m.dependencies.expect("dependencies parsed");
     assert_eq!(deps.len(), 2);
 
-    let fastmath = &deps["fastmath"];
-    assert_eq!(fastmath.abi, Abi::Jade, "abi defaults to jade");
-    assert!(fastmath.is_platform_template());
-    assert!(fastmath.validate("fastmath").is_ok());
+    let geometry = &deps["geometry"];
+    assert_eq!(geometry.abi, Some(Abi::Source));
+    assert!(geometry.validate("geometry").is_ok());
 
     let zlib = &deps["zlib"];
-    assert_eq!(zlib.abi, Abi::C);
-    assert!(!zlib.is_platform_template());
-    assert_eq!(zlib.symbols.as_ref().unwrap()["crc32"].ret, "int");
+    assert_eq!(zlib.abi, Some(Abi::Rust));
+    assert_eq!(zlib.package.as_deref(), Some("zlib-jade"));
     assert!(zlib.validate("zlib").is_ok());
 }
 
@@ -508,8 +503,15 @@ fn manifest_without_dependencies_still_parses() {
 
 // ── DependencyEntry::validate ─────────────────────────────────────────────────
 
+/// A source dependency's entry; `abi = "source"` is added unless the text names
+/// a kind of its own.
 fn dep(toml_src: &str) -> DependencyEntry {
-    toml::from_str::<DependencyEntry>(toml_src).expect("valid dependency toml")
+    let src = if toml_src.contains("abi") {
+        toml_src.to_string()
+    } else {
+        format!("abi = \"source\"\n{toml_src}")
+    };
+    toml::from_str::<DependencyEntry>(&src).expect("valid dependency toml")
 }
 
 #[test]
@@ -563,20 +565,30 @@ fn validate_rejects_empty_version() {
 }
 
 #[test]
-fn validate_rejects_c_abi_without_symbols() {
-    let d = dep("version = \"1.0.0\"\npath = \"libz.so\"\nabi = \"c\"\n");
-    let err = d.validate("zlib").unwrap_err();
-    assert!(err.contains("zlib"));
-    assert!(err.contains("symbols"), "unexpected message: {err}");
+fn validate_requires_an_abi() {
+    let d: DependencyEntry = toml::from_str("path = \"geo\"\n").unwrap();
+    let err = d.validate("geo").unwrap_err();
+    assert!(err.contains("abi = \"source\"") && err.contains("abi = \"rust\""), "{err}");
 }
 
 #[test]
-fn validate_rejects_symbols_without_c_abi() {
-    // Declaring symbols but leaving abi = "jade" means the shim is never
-    // generated and the symbols silently do nothing — catch it at parse time.
-    let d = dep("version = \"1.0.0\"\npath = \"a.so\"\n[symbols.foo]\nargs = []\nret = \"int\"\n");
-    let err = d.validate("mismatch").unwrap_err();
-    assert!(err.contains("abi = \"c\""), "unexpected message: {err}");
+fn validate_takes_a_rust_package_from_a_path_git_or_crates_io() {
+    assert!(dep("path = \"rust/geo\"\nabi = \"rust\"\n").validate("geo").is_ok());
+    assert!(dep("git = \"https://x/r\"\ntag = \"v1\"\nabi = \"rust\"\n").validate("r").is_ok());
+    assert!(dep("version = \"0.4.3\"\nabi = \"rust\"\n").validate("hex").is_ok());
+    let none = dep("abi = \"rust\"\n").validate("geo").unwrap_err();
+    assert!(none.contains("Cargo.toml"), "{none}");
+    let url = dep("url = \"https://x/a.tar.gz\"\nversion = \"1\"\nabi = \"rust\"\n");
+    assert!(url.validate("geo").unwrap_err().contains("cargo fetches it"));
+    // A Jade name is an identifier; the Rust package's own name goes in `package`.
+    let dashed = dep("path = \"rust/geo\"\nabi = \"rust\"\n").validate("img-tools").unwrap_err();
+    assert!(dashed.contains("package = \"img-tools\""), "{dashed}");
+}
+
+#[test]
+fn validate_refuses_package_on_a_source_dependency() {
+    let d = dep("path = \"geo\"\npackage = \"geo-2\"\n");
+    assert!(d.validate("geo").unwrap_err().contains("names a Rust package"));
 }
 
 // ── Import resolution and the check-time graph walk ───────────────────────────
@@ -695,18 +707,22 @@ fn a_circular_import_terminates() {
 }
 
 #[test]
-fn a_native_module_is_checked_for_existence_but_not_loaded() {
-    // An empty file with a library extension is not a loadable package. The walk
-    // must still accept it: opening it would run its initializer, and `check`
-    // does not execute the program it is checking.
-    let tmp = TempDir::new("native_import");
-    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
-    std::fs::write(tmp.path().join(format!("fastmath.{ext}")), b"").unwrap();
-    let (libs, dir) = bare_ctx(tmp.path());
-    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
-
-    assert!(matches!(resolve_import(&ctx, "fastmath").unwrap(), ImportTarget::Native(_)));
-    assert!(walk_imports(&paths_of("use fastmath\n"), &ctx).is_ok());
+fn a_rust_package_import_is_left_for_the_build_to_check() {
+    // A Rust package is built with the program, which reports one that does not
+    // compile; the walk only needs to know the name is one.
+    let tmp = TempDir::new("rust_import");
+    let mut libs = HashMap::new();
+    libs.insert(
+        "fast".to_string(),
+        LibraryEntry { path: String::new(), rust: Some("fast".into()), ..Default::default() },
+    );
+    let ctx = ImportContext {
+        libraries: &libs,
+        project_root: Some(tmp.path()),
+        source_dir: tmp.path().to_path_buf(),
+    };
+    assert_eq!(resolve_import(&ctx, "fast").unwrap(), ImportTarget::Rust("fast".to_string()));
+    assert!(walk_imports(&paths_of("use fast\n"), &ctx).is_ok());
 }
 
 // ── [package] ─────────────────────────────────────────────────────────────────
@@ -865,19 +881,6 @@ fn reachable_modules_terminates_on_a_cycle() {
 }
 
 #[test]
-fn a_lib_entry_declares_its_functions_types() {
-    let m = parse(
-        "[lib.fix]\npath = \".\"\n\n[lib.fix.symbols.open]\nargs = [\"str\"]\nret = \"handle<Thing>\"\n\n\
-         [lib.fix.symbols.live]\nret = \"int\"\n",
-    );
-    let fix = &m.lib.as_ref().unwrap()["fix"];
-    let syms = fix.symbols.as_ref().unwrap();
-    assert_eq!(syms["open"].args.as_deref(), Some(&["str".to_string()][..]));
-    assert_eq!(syms["open"].ret.as_deref(), Some("handle<Thing>"));
-    assert!(syms["live"].args.is_none());
-}
-
-#[test]
 fn validate_takes_git_with_one_reference() {
     let ok = dep("git = \"https://x/r\"\ntag = \"v1\"\nabi = \"source\"\n");
     assert!(ok.validate("r").is_ok());
@@ -885,8 +888,6 @@ fn validate_takes_git_with_one_reference() {
     assert!(none.contains("exactly one of 'rev', 'tag' or 'branch'"), "{none}");
     let two = dep("git = \"https://x/r\"\ntag = \"v1\"\nrev = \"abc\"\nabi = \"source\"\n");
     assert!(two.validate("r").is_err());
-    let prebuilt = dep("git = \"https://x/r\"\ntag = \"v1\"\n").validate("r").unwrap_err();
-    assert!(prebuilt.contains("abi = \"source\""), "{prebuilt}");
     let stray = dep("path = \"a.so\"\ntag = \"v1\"\n").validate("r").unwrap_err();
     assert!(stray.contains("without 'git'"), "{stray}");
 }

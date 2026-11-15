@@ -1,0 +1,10 @@
+# A package that exports a type with no Jade form, so it does not compile. It
+# exists for examples/ffi/rust_build_failure/rust_build_error.jde.
+[package]
+name = "badpkg"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+jade-rs = { path = "../../../../jade-rs" }

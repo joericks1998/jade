@@ -75,11 +75,11 @@ fn is_stdlib(path: &str) -> bool {
 /// imported files (mangled into per-module namespaces), and return one flat,
 /// fully-resolved statement stream for the LLVM backend. `main`'s own globals
 /// keep bare names; imported modules' globals are mangled `name$<id>`.
-/// Returns the inlined statement stream plus the native packages that must be
-/// `dlopen`'d at startup: `(pkgid, absolute_lib_path)`. Native function
-/// references in the stream are rewritten to the canonical identifier
-/// `__native$<pkgid>$<fnname>` (see [`Renamer`]), which codegen lowers to a
-/// `jrt_native_call` against the package loaded under `pkgid`.
+/// Returns the inlined statement stream, and for a program that uses a Rust
+/// package, the library to link and each function's signature. A reference to a
+/// Rust function is rewritten to the canonical identifier
+/// `__native$<pkgid>$<fnname>` (see [`Renamer`]), which the checker types from
+/// the package's record and the backend lowers to a call of its wrapper.
 pub fn resolve_and_namespace(
     stmts: Vec<TStmt>,
     source_path: &Path,
@@ -97,8 +97,7 @@ pub fn resolve_and_namespace(
         .and_then(|r| crate::project::load_project(&r).ok().map(|m| (r, m)))
     {
         reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
-        reg.dep_symbols = declared_c_symbols(&manifest);
-        reg.native_decls = native_declarations(&manifest).map_err(ResolveError::Program)?;
+        reg.manifest = Some(manifest);
         reg.lib_root = Some(root);
     }
 
@@ -112,15 +111,10 @@ pub fn resolve_and_namespace(
 
     // Imported modules were appended to `reg.out` in dependency order (deps before
     // dependents); main's statements come last.
-    let libs_root = reg.libs_root();
+    let rust = reg.rust.as_ref().filter(|_| !reg.rust_ids.is_empty()).map(|b| b.link());
     let mut out = reg.out;
     out.extend(main_stmts);
-    Ok(ResolvedImports {
-        stmts: out,
-        libs_root,
-        native_pkgs: reg.native_pkgs,
-        native_sigs: reg.native_sigs,
-    })
+    Ok(ResolvedImports { stmts: out, rust, native_sigs: reg.native_sigs })
 }
 
 /// Purpose: This function namespaces a module given as source text rather
@@ -183,19 +177,14 @@ impl From<String> for ResolveError {
 }
 
 /// What one resolution pass produced.
-///
-/// `libs_root` is where this build's dependencies live. Codegen needs it to
-/// tell a compiled program where to look, and the CLI needs it to know what to
-/// copy beside the artifact — so it is answered once, here, rather than
-/// recomputed at each.
 pub struct ResolvedImports {
     pub stmts: Vec<TStmt>,
-    pub native_pkgs: Vec<NativePkg>,
-    /// What each native function this program can call is declared to take
-    /// and return, by `__native$<pkgid>$<fn>`.
+    /// The staticlib holding the project's Rust packages, when the program
+    /// uses one, for the backend to link.
+    pub rust: Option<crate::rustpkg::Link>,
+    /// What each Rust function this program can call takes and returns, by
+    /// `__native$<pkgid>$<fn>`.
     pub native_sigs: HashMap<String, NativeSig>,
-    /// `None` when the build is not inside a project.
-    pub libs_root: Option<PathBuf>,
 }
 
 // ── Module registry ───────────────────────────────────────────────────────────
@@ -214,55 +203,24 @@ struct Registry {
     /// from `jade.toml`. Empty when the build isn't inside a project.
     lib_root: Option<PathBuf>,
     libraries: HashMap<String, crate::project::LibraryEntry>,
-    /// Native (C-ABI) packages, keyed by canonical lib path so a lib imported
-    /// from several modules shares one `dlopen` handle / pkgid. Their own id
-    /// space, distinct from `.jde` module ids (native refs always carry the
-    /// `__native$` prefix). `native_pkgs` is the ordered output list.
-    native_ids: HashMap<PathBuf, u32>,
+    /// The project's manifest, whose Rust dependencies the build compiles.
+    manifest: Option<crate::project::ProjectManifest>,
+    /// The project's Rust packages, built the first time a `use` names one.
+    rust: Option<crate::rustpkg::Build>,
+    /// Each Rust package a `use` named, by its dependency name, and the id its
+    /// functions' references carry. Its own id space, distinct from `.jde`
+    /// module ids (native refs always carry the `__native$` prefix).
+    rust_ids: HashMap<String, u32>,
     native_next_id: u32,
-    native_pkgs: Vec<NativePkg>,
-    /// What `jade.toml` declares about each native package's functions, by
-    /// the package's import name, then the function. See
-    /// `typechecker::infer::native`.
-    native_decls: HashMap<String, NativeDecls>,
-    /// The classes each loaded native package defines, by pkgid, then the
-    /// name the program writes after the package's alias.
+    /// The classes each Rust package defines, by pkgid, then the name the
+    /// program writes after the package's alias.
     native_types: HashMap<u32, HashMap<String, String>>,
-    /// The same declarations by `__native$<pkgid>$<fn>`, for the packages this
-    /// build loads.
+    /// Each Rust function's signature by `__native$<pkg>$<fn>`, for the
+    /// packages this build uses.
     native_sigs: HashMap<String, NativeSig>,
-    /// Declared C-ABI symbols by dependency name, from
-    /// `[dependencies.<name>.symbols]` in the project's `jade.toml`.
-    ///
-    /// Only `abi = "c"` dependencies appear. A Jade-ABI package declares its
-    /// exports in *its own* project, which this manifest cannot see — so there
-    /// is nothing here to check it against, and checking it against an empty set
-    /// would reject every call it has ever served.
-    dep_symbols: HashMap<String, HashSet<String>>,
-    /// The same sets, keyed by the pkgid the import was assigned. This is the
-    /// form the renamer needs, since an alias resolves to a pkgid and not to a
-    /// dependency name.
+    /// The names each Rust package exports, functions and structs, keyed by
+    /// pkgid, which is the form the renamer needs to check `alias.name`.
     native_symbols: HashMap<u32, HashSet<String>>,
-}
-
-/// A native package the artifact will load at startup.
-///
-/// Two spellings, because they answer different questions. `rel` is the
-/// dependency's path *within* the project's `libs/` —
-/// `fastmath-1.2.0/fastmath.dylib` — and is what makes an artifact relocatable,
-/// and what makes two packages naming the same dependency resolve to one file
-/// rather than to two copies with two sets of state. `abs` is where it sat at
-/// build time, kept for a library that is not a dependency at all: a
-/// hand-written `[lib]` pointing anywhere on disk has no `libs/`-relative
-/// spelling and never had one.
-#[derive(Debug, Clone)]
-pub struct NativePkg {
-    pub id: u32,
-    /// The name the program imports it by.
-    pub name: String,
-    /// `None` when the library is not under the project's `libs/`.
-    pub rel: Option<String>,
-    pub abs: String,
 }
 
 /// One decorator on a TIR item: its name, and its positional arguments.
@@ -282,13 +240,12 @@ impl Registry {
             out: Vec::new(),
             lib_root: None,
             libraries: HashMap::new(),
-            native_ids: HashMap::new(),
+            manifest: None,
+            rust: None,
+            rust_ids: HashMap::new(),
             native_next_id: 0,
-            native_pkgs: Vec::new(),
-            native_decls: HashMap::new(),
             native_types: HashMap::new(),
             native_sigs: HashMap::new(),
-            dep_symbols: HashMap::new(),
             native_symbols: HashMap::new(),
         }
     }
@@ -299,69 +256,68 @@ impl Registry {
         id
     }
 
-    /// Assign (or reuse) the pkgid for a native library's canonical path,
-    /// recording what codegen's startup loader needs to find it again.
+    /// Purpose: This function assigns (or reuses) the pkgid of a Rust package,
+    /// building the project's Rust packages the first time one is named.
     ///
-    /// `import_path` is the `use` path that reached this library, which is also
-    /// the dependency's name in `jade.toml` — that is how the declared symbol
-    /// table finds its way to the pkgid the renamer will look up.
-    fn native_pkg_id(&mut self, canon: &Path, import_path: &str) -> u32 {
-        if let Some(&id) = self.native_ids.get(canon) {
-            return id;
+    /// Inputs:
+    /// - `name`: the package's dependency name, which is what `use` wrote.
+    ///
+    /// Outputs: the pkgid, or why the packages could not be built or read.
+    /// Building emits a class for every struct the library exports, once.
+    fn rust_pkg_id(&mut self, name: &str) -> Result<u32, ResolveError> {
+        if let Some(&id) = self.rust_ids.get(name) {
+            return Ok(id);
         }
+        if self.rust.is_none() {
+            let (Some(root), Some(manifest)) = (&self.lib_root, &self.manifest) else {
+                return Err(ResolveError::Program(format!(
+                    "'{name}' names a Rust package, which only a project can depend on"
+                )));
+            };
+            let built = crate::rustpkg::build(root, manifest).map_err(ResolveError::Program)?;
+            let Some(built) = built else {
+                return Err(ResolveError::Program(format!(
+                    "'{name}' names no Rust package in jade.toml"
+                )));
+            };
+            let classes = rust_classes(&built);
+            for s in built.structs.values() {
+                self.out.push(rust_class(s, &classes));
+            }
+            self.rust = Some(built);
+        }
+        let Some(built) = &self.rust else {
+            return Err(ResolveError::Program(format!("the Rust package '{name}' was not built")));
+        };
+        let Some(pkg) = built.packages.get(name) else {
+            return Err(ResolveError::Program(format!(
+                "'{name}' is not a Rust dependency in jade.toml; add it under [dependencies] \
+                 with abi = \"rust\""
+            )));
+        };
         let id = self.native_next_id;
         self.native_next_id += 1;
-        self.native_ids.insert(canon.to_path_buf(), id);
-        // A native library has no submodules, so the whole path is the name.
-        if let Some(symbols) = self.dep_symbols.get(import_path) {
-            self.native_symbols.insert(id, symbols.clone());
+        self.rust_ids.insert(name.to_string(), id);
+        let classes = rust_classes(built);
+        for f in pkg.functions.values() {
+            let sig = crate::typechecker::infer::native::rust_sig(
+                &format!("{name}.{}", f.name),
+                f,
+                &classes,
+            )
+            .map_err(ResolveError::Program)?;
+            self.native_sigs.insert(native_ref(id, &f.name), sig);
         }
-        if let Some(decls) = self.native_decls.get(import_path) {
-            for (f, sig) in &decls.sigs {
-                self.native_sigs.insert(native_ref(id, f), sig.clone());
-            }
-            // Each record becomes a class with public fields, so a program can
-            // read what a function returns and build what it takes.
-            let types: HashMap<String, String> = decls
-                .records
-                .keys()
-                .map(|bare| (bare.clone(), native_class(import_path, bare)))
-                .collect();
-            for (bare, fields) in &decls.records {
-                let fields: Vec<(String, String)> =
-                    fields.iter().map(|(f, t)| (f.clone(), rename_idents(t, &types))).collect();
-                self.out.push(record_class(&types[bare], &fields));
-            }
-            self.native_types.insert(id, types);
-        }
-        self.native_pkgs.push(NativePkg {
-            id,
-            name: import_path.to_string(),
-            rel: self.libs_relative(canon),
-            abs: canon.to_string_lossy().into_owned(),
-        });
-        id
-    }
-
-    /// The dependency's path within the project's `libs/`, or `None` when it is
-    /// not in there.
-    ///
-    /// Deliberately not a guess at the shape: `pkg::dependency_libraries` builds
-    /// every dependency's `[lib]` entry as `libs/<install dir>`, so stripping
-    /// that prefix yields exactly the string the package manager put there. A
-    /// library reached any other way is outside the one-instance contract by
-    /// definition, and keeps the absolute path it always had.
-    fn libs_relative(&self, canon: &Path) -> Option<String> {
-        let root = self.lib_root.as_ref()?;
-        let libs = std::fs::canonicalize(root.join(crate::pkg::LIBS_DIR)).ok()?;
-        let rest = canon.strip_prefix(&libs).ok()?;
-        Some(rest.to_string_lossy().replace('\\', "/"))
-    }
-
-    /// Where this build's `libs/` is, for the bundle the artifact will look in.
-    fn libs_root(&self) -> Option<PathBuf> {
-        let root = self.lib_root.as_ref()?;
-        std::fs::canonicalize(root.join(crate::pkg::LIBS_DIR)).ok()
+        let types: HashMap<String, String> = pkg
+            .structs
+            .iter()
+            .filter_map(|(bare, key)| Some((bare.clone(), classes.get(key)?.clone())))
+            .collect();
+        let mut symbols: HashSet<String> = pkg.functions.keys().cloned().collect();
+        symbols.extend(types.keys().cloned());
+        self.native_types.insert(id, types);
+        self.native_symbols.insert(id, symbols);
+        Ok(id)
     }
 }
 
@@ -435,8 +391,8 @@ fn process_file(
     let mut aliases: HashMap<String, (u32, HashSet<String>, HashSet<String>)> = HashMap::new();
     let mut from_value: HashMap<String, String> = HashMap::new();
     let mut from_type: HashMap<String, String> = HashMap::new();
-    // Native (C-ABI) imports: `use lib.mod as m` → `m` -> pkgid; `from lib use f`
-    // → `f` -> pkgid. The renamer rewrites references through these to
+    // Rust package imports: `use pkg` → `pkg` -> pkgid; `from pkg use f` → `f`
+    // -> pkgid. The renamer rewrites references through these to
     // `__native$<pkgid>$<fn>`.
     let mut native_aliases: HashMap<String, u32> = HashMap::new();
     let mut native_from: HashMap<String, u32> = HashMap::new();
@@ -453,11 +409,11 @@ fn process_file(
                     continue;
                 }
                 match resolve_use(reg, dir, &path)? {
-                    Resolved::Native(canon) => {
-                        let pkgid = reg.native_pkg_id(&canon, &path);
+                    Resolved::Rust(name) => {
+                        let pkgid = reg.rust_pkg_id(&name)?;
                         let alias = as_name.unwrap_or_else(|| stem(&path));
                         native_aliases.insert(alias, pkgid);
-                        // No body to inline — the lib is dlopen'd at runtime.
+                        // No body to inline — the package is linked in.
                     }
                     Resolved::Jade(dep, exports) => {
                         load_dep(reg, &dep)?;
@@ -492,9 +448,9 @@ fn process_file(
                     continue;
                 }
                 match resolve_use(reg, dir, &path)? {
-                    Resolved::Native(canon) => {
-                        let pkgid = reg.native_pkg_id(&canon, &path);
-                        // A record the package declares is a class, not a function.
+                    Resolved::Rust(name) => {
+                        let pkgid = reg.rust_pkg_id(&name)?;
+                        // A struct the package exports is a class, not a function.
                         let types = reg.native_types.get(&pkgid).cloned().unwrap_or_default();
                         let names: Vec<String> = names
                             .into_iter()
@@ -590,10 +546,10 @@ fn process_file(
     Ok(kept)
 }
 
-/// A resolved `use` target: a native C-ABI shared library (dlopen'd at runtime)
-/// or a Jade source module (inlined + mangled).
+/// A resolved `use` target: a Rust package, by its dependency name, or a Jade
+/// source module (inlined + mangled).
 enum Resolved {
-    Native(PathBuf),
+    Rust(String),
     /// A Jade module, and the names an importer may use when it is a source
     /// package's entry module that lists its exports.
     Jade(PathBuf, Option<Exports>),
@@ -609,9 +565,8 @@ struct Exports {
 
 /// Resolve a `use` path to a canonical file. Registered `[lib]` libraries take
 /// precedence (anchored at the project root, enabling cross-directory imports);
-/// everything else resolves relative to the importing file's `dir`. The resolved
-/// file's extension (via `resolve_library_import`) decides whether it's a native
-/// library or a Jade module.
+/// everything else resolves relative to the importing file's `dir`. A Rust
+/// package resolves through the `[lib]` entry its dependency became.
 fn resolve_use(reg: &mut Registry, dir: &Path, path: &str) -> Result<Resolved, String> {
     // A file inside a source package resolves against the package's own
     // `[lib]` entries first, anchored at the package, then the build's.
@@ -619,43 +574,37 @@ fn resolve_use(reg: &mut Registry, dir: &Path, path: &str) -> Result<Resolved, S
         && let Some(libs) = &manifest.lib
         && let Some(r) = crate::project::resolve_library_import(libs, path, &pkg_root)?
     {
-        let canon = r.path.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
-        if r.kind == crate::project::ImportKind::Native {
-            // The package declares its native functions' types in its own
-            // manifest; the project's own declarations win.
-            for (name, decls) in native_declarations(&manifest)? {
-                reg.native_decls.entry(name).or_insert(decls);
-            }
-            return Ok(Resolved::Native(canon));
+        if r.kind == crate::project::ImportKind::Rust {
+            return Ok(Resolved::Rust(r.path.to_string_lossy().into_owned()));
         }
+        let canon = r.path.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
         return Ok(Resolved::Jade(canon, None));
     }
     if let Some(message) = crate::project::ambiguous_bare_import(path, &reg.libraries, dir) {
         return Err(message);
     }
     // Not a registered library: resolve relative to the importing file. `path` is
-    // a module stem (`utils`, `sub/helper`), so probe `<path>.jde` then a native
-    // library, the same order as an allowlist-free `[lib]`.
-    let relative = || {
-        let r = crate::project::resolve_relative_import(dir, path);
-        (r.path, r.kind == crate::project::ImportKind::Native)
-    };
+    // a module stem (`utils`, `sub/helper`), so probe `<path>.jde`.
+    let relative = || crate::project::resolve_relative_import(dir, path).path;
     let mut exports = None;
-    let (target, is_native) = match &reg.lib_root {
+    let target = match &reg.lib_root {
         Some(root) => match crate::project::resolve_library_import(&reg.libraries, path, root)? {
+            Some(r) if r.kind == crate::project::ImportKind::Rust => {
+                return Ok(Resolved::Rust(r.path.to_string_lossy().into_owned()));
+            }
             Some(r) => {
                 exports = r.exports.map(|names| Exports {
                     package: path.to_string(),
                     names: names.into_iter().collect(),
                 });
-                (r.path, r.kind == crate::project::ImportKind::Native)
+                r.path
             }
             None => relative(),
         },
         None => relative(),
     };
     let canon = target.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
-    Ok(if is_native { Resolved::Native(canon) } else { Resolved::Jade(canon, exports) })
+    Ok(Resolved::Jade(canon, exports))
 }
 
 /// Purpose: This function finds the source package a directory belongs to,
@@ -687,53 +636,40 @@ fn stem(path: &str) -> String {
     Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
 }
 
-/// Every `abi = "c"` dependency's declared symbol names, by dependency name.
-///
-/// A dependency with an empty table is skipped rather than recorded as an empty
-/// set: the two mean different things here, and an empty set would reject every
-/// call into it. `[symbols]` is required for `abi = "c"`, so an empty one means
-/// a manifest still being filled in, not a library with no functions.
-/// Purpose: This struct holds what `jade.toml` declares about one native
-/// package.
-#[derive(Clone, Default)]
-struct NativeDecls {
-    /// Each function's signature, by name.
-    sigs: HashMap<String, NativeSig>,
-    /// The records its functions pass and return, by the name the package
-    /// gives them, each with its fields' names and Jade types.
-    records: std::collections::BTreeMap<String, Vec<(String, String)>>,
-}
-
-/// Purpose: This function names the class a native package's record becomes.
+/// Purpose: This function maps each struct a Rust library exports to its class.
 ///
 /// Inputs:
-/// - `import`: the package's import name.
-/// - `bare`: the record's own name.
+/// - `b`: the build.
 ///
-/// Outputs: `<bare>$n<import>`, which messages show as `<bare>` and no
-/// program can write.
-fn native_class(import: &str, bare: &str) -> String {
-    let tag: String =
-        import.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    format!("{bare}$n{tag}")
+/// Outputs: each struct by the names a type is written with, `crate::Name` in a
+/// record and the class's own name in a class's field, to the class's name.
+fn rust_classes(b: &crate::rustpkg::Build) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (key, s) in &b.structs {
+        let class = crate::rustpkg::class_name(&s.krate, &s.name);
+        out.insert(key.clone(), class.clone());
+        out.insert(class.clone(), class);
+    }
+    out
 }
 
-/// Purpose: This function renames the class names inside a type's text.
+/// Purpose: This function spells a record's type with each struct written as its
+/// class, the form a class field's type decorator takes.
 ///
 /// Inputs:
-/// - `t`: the type, such as `[Point]`.
-/// - `names`: each name to replace, and its replacement.
+/// - `t`: the type, such as `[geo::Point]?`.
+/// - `classes`: as [`rust_classes`] gives them.
 ///
-/// Outputs: the text with every whole name in `names` replaced.
-fn rename_idents(t: &str, names: &HashMap<String, String>) -> String {
+/// Outputs: the type, such as `[Point$rgeo]?`.
+fn class_type_text(t: &str, classes: &HashMap<String, String>) -> String {
     let mut out = String::new();
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
-        out.push_str(names.get(word.as_str()).map_or(word.as_str(), String::as_str));
+        out.push_str(classes.get(word.as_str()).map_or(word.as_str(), String::as_str));
         word.clear();
     };
     for c in t.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
+        if c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '$' {
             word.push(c);
         } else {
             flush(&mut word, &mut out);
@@ -744,158 +680,33 @@ fn rename_idents(t: &str, names: &HashMap<String, String>) -> String {
     out
 }
 
-/// Purpose: This function builds the class definition of a native record.
+/// Purpose: This function builds the class a Rust struct becomes.
 ///
 /// Inputs:
-/// - `name`: the class's name in the program.
-/// - `fields`: each field's name and Jade type.
+/// - `s`: the struct's record.
+/// - `classes`: as [`rust_classes`] gives them.
 ///
-/// Outputs: a class whose fields are all public and typed, each with a zero
-/// default where its type has one, so a program may leave a field out the way
-/// C leaves it zero.
-fn record_class(name: &str, fields: &[(String, String)]) -> TStmt {
-    use crate::frontend::ast::{ClassMembers, Expr};
+/// Outputs: a class whose fields are the struct's, in order, every one public,
+/// typed, and required, since Rust gives no field a default.
+fn rust_class(s: &crate::rustpkg::Struct, classes: &HashMap<String, String>) -> TStmt {
+    use crate::frontend::ast::ClassMembers;
     let span = Span { line: 0, col: 0 };
-    let zero = |t: &str| -> Option<Expr> {
-        Some(match t {
-            "int" => Expr::Integer { value: 0, span },
-            "float" => Expr::Float { value: 0.0, span },
-            "bool" => Expr::Bool { value: false, span },
-            "str" => Expr::Str { value: String::new(), span },
-            t if t.starts_with('[') => Expr::Array { elements: Vec::new(), span },
-            _ => return None,
-        })
-    };
     TStmt::StructDef {
-        name: name.to_string(),
-        fields: fields
-            .iter()
-            .map(|(f, t)| match zero(t) {
-                Some(default) => StructFieldDef::Let { name: f.clone(), default },
-                None => StructFieldDef::Required(f.clone()),
-            })
-            .collect(),
+        name: crate::rustpkg::class_name(&s.krate, &s.name),
+        fields: s.fields.iter().map(|f| StructFieldDef::Required(f.name.clone())).collect(),
         parents: Vec::new(),
         members: ClassMembers {
-            decorators: fields
+            decorators: s
+                .fields
                 .iter()
-                .map(|(f, t)| (f.clone(), vec!["public".to_string(), t.clone()]))
+                .map(|f| {
+                    (f.name.clone(), vec!["public".to_string(), class_type_text(&f.ty, classes)])
+                })
                 .collect(),
             declared: Vec::new(),
         },
         span,
     }
-}
-
-/// Purpose: This function reads what `jade.toml` declares about native
-/// packages' functions: a `[lib]` entry's `symbols` table in Jade types, and a
-/// C dependency's `symbols` table, whose Jade signature is derived from its C
-/// one.
-///
-/// Inputs:
-/// - `manifest`: the project's manifest.
-///
-/// Outputs: the declarations by import name, then function, or a message for a
-/// type a `[lib]` declaration misspells.
-fn native_declarations(
-    manifest: &crate::project::ProjectManifest,
-) -> Result<HashMap<String, NativeDecls>, String> {
-    use crate::typechecker::infer::native::parse_sig_in;
-    let mut out: HashMap<String, NativeDecls> = HashMap::new();
-    if let Some(deps) = &manifest.dependencies {
-        for (name, d) in deps {
-            if d.abi != crate::project::Abi::C {
-                continue;
-            }
-            let Some(symbols) = &d.symbols else { continue };
-            let structs = d.structs.clone().unwrap_or_default();
-            let table = out.entry(name.clone()).or_default();
-            for (sym, spec) in symbols {
-                let display = format!("{name}.{sym}");
-                // A symbol whose signature does not translate refuses only
-                // calls to itself; the rest of the dependency still builds.
-                let derived = crate::pkg::cshim::jade_signature(name, sym, spec, &structs)
-                    .and_then(|j| {
-                        let classes: HashMap<String, String> = j
-                            .records
-                            .iter()
-                            .map(|(bare, _)| (bare.clone(), native_class(name, bare)))
-                            .collect();
-                        let sig = parse_sig_in(&display, Some(&j.params), Some(&j.ret), &classes)?;
-                        Ok((sig, j.records))
-                    });
-                let sig = match derived {
-                    Ok((sig, records)) => {
-                        for (bare, fields) in records {
-                            table.records.entry(bare).or_insert(fields);
-                        }
-                        sig
-                    }
-                    Err(why) => NativeSig {
-                        display: display.clone(),
-                        params: None,
-                        ret: None,
-                        refused: Some(why),
-                    },
-                };
-                table.sigs.insert(sym.clone(), sig);
-            }
-        }
-    }
-    // A `[lib]` of the same name is the library this build uses, so its
-    // declarations replace a dependency's.
-    if let Some(libs) = &manifest.lib {
-        for (name, entry) in libs {
-            if entry.symbols.is_none() && entry.structs.is_none() {
-                continue;
-            }
-            let table = out.entry(name.clone()).or_default();
-            *table = NativeDecls::default();
-            for (bare, rec) in entry.structs.iter().flatten() {
-                table.records.insert(bare.clone(), rec.fields.clone());
-            }
-            let classes: HashMap<String, String> =
-                table.records.keys().map(|bare| (bare.clone(), native_class(name, bare))).collect();
-            for (f, decl) in entry.symbols.iter().flatten() {
-                let display = format!("{name}.{f}");
-                let sig =
-                    parse_sig_in(&display, decl.args.as_deref(), decl.ret.as_deref(), &classes)?;
-                table.sigs.insert(f.clone(), sig);
-            }
-            // A record's fields are checked here, where the manifest is named.
-            for (bare, fields) in &table.records {
-                for (field, t) in fields {
-                    crate::typechecker::infer::native::parse_type_in(t, &classes).map_err(|e| {
-                        format!(
-                            "the field {field} of [lib.{name}.structs.{bare}] in jade.toml: {e}"
-                        )
-                    })?;
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn declared_c_symbols(
-    manifest: &crate::project::ProjectManifest,
-) -> HashMap<String, HashSet<String>> {
-    let Some(deps) = &manifest.dependencies else { return HashMap::new() };
-    deps.iter()
-        .filter(|(_, d)| d.abi == crate::project::Abi::C)
-        // A `[lib.<name>]` of the same name wins the import (see
-        // `pkg::resolved_libraries`), so the dependency's table describes a
-        // library this build is not using. Checking against it would reject
-        // calls into whatever the `[lib]` actually points at.
-        .filter(|(name, _)| !manifest.lib.as_ref().is_some_and(|l| l.contains_key(*name)))
-        .filter_map(|(name, d)| {
-            let symbols = d.symbols.as_ref()?;
-            if symbols.is_empty() {
-                return None;
-            }
-            Some((name.clone(), symbols.keys().cloned().collect()))
-        })
-        .collect()
 }
 
 /// The declared symbol closest to `wanted`, when one is close enough to name.
@@ -944,19 +755,17 @@ struct Renamer {
     /// `from "x" use n` → mangled target name, by namespace.
     from_value: HashMap<String, String>,
     from_type: HashMap<String, String>,
-    /// Native imports: `use lib.mod as m` alias → pkgid, and `from lib use f`
-    /// name → pkgid. References through these rewrite to `__native$<pkgid>$<fn>`.
+    /// Rust package imports: `use pkg` alias → pkgid, and `from pkg use f` name
+    /// → pkgid. References through these rewrite to `__native$<pkgid>$<fn>`.
     native_aliases: HashMap<String, u32>,
     native_from: HashMap<String, u32>,
     /// Import alias → the source package it names and the top-level names the
     /// package keeps to itself.
     hidden: HashMap<String, (String, HashSet<String>)>,
-    /// Native import alias → the classes its package declares, by the name
+    /// Rust package alias → the classes its package exports, by the name
     /// written after the alias.
     native_types: HashMap<String, HashMap<String, String>>,
-    /// pkgid → the symbols that package's `[symbols]` table declares. A pkgid
-    /// that is absent is one with nothing to check against, and its references
-    /// pass through as they always did.
+    /// pkgid → the names that Rust package exports.
     native_symbols: HashMap<u32, HashSet<String>>,
     /// Undeclared symbols found while renaming, reported after the walk.
     ///
@@ -1007,18 +816,22 @@ impl Renamer {
         None
     }
 
-    /// Resolve `alias.field` where `alias` is a native package import → the
+    /// Resolve `alias.field` where `alias` is a Rust package import → the
     /// canonical `__native$<pkgid>$<field>` ref, unless `alias` is shadowed.
     ///
-    /// This is also where a call into a C-ABI dependency is checked against the
-    /// symbols its manifest declares. Its `.jde` sibling [`ref_value_qual`] has
-    /// always asked whether the module exports the field; the native path never
-    /// did, which is the whole reason a mistyped symbol reached run time.
+    /// This is also where the name is checked against what the package exports,
+    /// as its `.jde` sibling [`ref_value_qual`] asks whether a module exports the
+    /// field, so a mistyped function is refused with the closest name.
     fn ref_native_qual(&mut self, alias: &str, field: &str, span: Span) -> Option<String> {
         if self.is_shadowed(alias) {
             return None;
         }
         let id = *self.native_aliases.get(alias)?;
+        // A struct the package exports is a class, which `ref_type` names.
+        let class = field.split_once("::").map_or(field, |(c, _)| c);
+        if self.native_types.get(alias).is_some_and(|t| t.contains_key(class)) {
+            return None;
+        }
         if let Some(declared) = self.native_symbols.get(&id)
             && !declared.contains(field)
         {
@@ -1707,23 +1520,23 @@ mod tests {
 }
 
 #[cfg(test)]
-mod ffi_symbol_tests {
+mod rust_symbol_tests {
     use super::*;
-    use crate::project::{Abi, CSymbol, DependencyEntry, LibraryEntry, ProjectManifest};
 
     const SPAN: Span = Span { line: 4, col: 7 };
 
-    fn sym() -> CSymbol {
-        CSymbol { args: vec![], ret: "int".to_string(), fails_when: None, frees_with: None }
-    }
-
-    /// A renamer holding one native import under `gfx` (pkgid 0) that declares
-    /// exactly `names`.
+    /// A renamer holding one Rust package under `gfx` (pkgid 0) that exports
+    /// exactly `names`, and the struct `Point`.
     fn native_renamer(names: &[&str]) -> Renamer {
         let mut native_aliases = HashMap::new();
         native_aliases.insert("gfx".to_string(), 0u32);
         let mut native_symbols = HashMap::new();
         native_symbols.insert(0u32, names.iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        let mut native_types = HashMap::new();
+        native_types.insert(
+            "gfx".to_string(),
+            [("Point".to_string(), "Point$rgfx".to_string())].into_iter().collect(),
+        );
         Renamer {
             self_id: None,
             self_values: HashSet::new(),
@@ -1734,7 +1547,7 @@ mod ffi_symbol_tests {
             native_aliases,
             native_from: HashMap::new(),
             hidden: HashMap::new(),
-            native_types: HashMap::new(),
+            native_types,
             native_symbols,
             errors: Vec::new(),
             locals: Vec::new(),
@@ -1742,161 +1555,107 @@ mod ffi_symbol_tests {
     }
 
     #[test]
-    fn a_declared_symbol_rewrites_and_reports_nothing() {
-        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
-        assert_eq!(
-            r.ref_native_qual("gfx", "jade_gfx_init", SPAN).as_deref(),
-            Some("__native$0$jade_gfx_init")
-        );
+    fn an_exported_function_rewrites_and_reports_nothing() {
+        let mut r = native_renamer(&["init", "key_pressed"]);
+        assert_eq!(r.ref_native_qual("gfx", "init", SPAN).as_deref(), Some("__native$0$init"));
         assert!(r.errors.is_empty());
     }
 
-    /// The bug this whole check exists for: a symbol nothing declares used to
-    /// rewrite silently and fail the first time the line ran.
+    /// A name the package does not export is refused when the program is
+    /// checked, not the first time the line runs.
     #[test]
-    fn an_undeclared_symbol_is_reported() {
-        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
-        r.ref_native_qual("gfx", "jade_gfx_nope", SPAN);
+    fn a_name_the_package_does_not_export_is_reported() {
+        let mut r = native_renamer(&["init", "key_pressed"]);
+        r.ref_native_qual("gfx", "nope", SPAN);
         assert_eq!(r.errors.len(), 1);
         let msg = &r.errors[0];
         assert!(msg.contains("[4:7]"), "no span in: {msg}");
-        assert!(msg.contains("jade_gfx_nope"), "no symbol name in: {msg}");
-        assert!(msg.contains("gfx"), "no module name in: {msg}");
+        assert!(msg.contains("nope"), "no name in: {msg}");
+        assert!(msg.contains("gfx"), "no package name in: {msg}");
     }
 
     #[test]
-    fn a_near_miss_suggests_the_real_symbol() {
-        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
-        r.ref_native_qual("gfx", "jade_gfx_key_press", SPAN);
-        assert!(
-            r.errors[0].contains("did you mean 'jade_gfx_key_pressed'?"),
-            "no suggestion in: {}",
-            r.errors[0]
-        );
+    fn a_near_miss_suggests_the_real_name() {
+        let mut r = native_renamer(&["init", "key_pressed"]);
+        r.ref_native_qual("gfx", "key_press", SPAN);
+        assert!(r.errors[0].contains("did you mean 'key_pressed'?"), "{}", r.errors[0]);
     }
 
-    /// A name nothing resembles gets the manifest instruction instead of a
-    /// suggestion — proposing an unrelated symbol would be worse than silence.
+    /// A name nothing resembles names the fix in the package instead of a
+    /// suggestion — proposing an unrelated name would be worse than silence.
     #[test]
-    fn a_wild_miss_names_the_manifest_instead_of_guessing() {
-        let mut r = native_renamer(&["jade_gfx_init"]);
+    fn a_wild_miss_names_the_attribute_instead_of_guessing() {
+        let mut r = native_renamer(&["init"]);
         r.ref_native_qual("gfx", "totally_unrelated_thing", SPAN);
         assert!(!r.errors[0].contains("did you mean"), "guessed: {}", r.errors[0]);
-        assert!(r.errors[0].contains("[dependencies.gfx.symbols]"), "{}", r.errors[0]);
+        assert!(r.errors[0].contains("#[jade::export]"), "{}", r.errors[0]);
     }
 
     /// A local of the same name is not the import, so nothing about it is
     /// checked — the same rule the rewrite itself has always followed.
     #[test]
     fn a_shadowed_alias_is_left_alone() {
-        let mut r = native_renamer(&["jade_gfx_init"]);
+        let mut r = native_renamer(&["init"]);
         r.push_scope();
         r.bind_local("gfx");
         assert_eq!(r.ref_native_qual("gfx", "anything_at_all", SPAN), None);
         assert!(r.errors.is_empty());
     }
 
-    /// A package with no declared table is one there is nothing to check
-    /// against. It must pass through, or every Jade-ABI package breaks.
+    /// `gfx.Point` names the struct's class, which `ref_type` resolves, so the
+    /// function path neither claims it nor reports it.
     #[test]
-    fn a_package_with_no_declared_symbols_is_not_checked() {
-        let mut r = native_renamer(&["x"]);
-        r.native_symbols.remove(&0);
-        assert_eq!(
-            r.ref_native_qual("gfx", "anything_at_all", SPAN).as_deref(),
-            Some("__native$0$anything_at_all")
-        );
+    fn a_struct_name_is_left_to_the_type_path() {
+        let mut r = native_renamer(&["init", "Point"]);
+        assert_eq!(r.ref_native_qual("gfx", "Point", SPAN), None);
         assert!(r.errors.is_empty());
+        assert_eq!(r.ref_type("gfx.Point").as_deref(), Some("Point$rgfx"));
     }
 
-    // ── declared_c_symbols ────────────────────────────────────────────────────
+    // ── Rust structs as classes ───────────────────────────────────────────────
 
-    fn manifest_with(deps: Vec<(&str, DependencyEntry)>) -> ProjectManifest {
-        ProjectManifest {
-            dependencies: Some(deps.into_iter().map(|(n, d)| (n.to_string(), d)).collect()),
-            ..Default::default()
+    fn point() -> crate::rustpkg::Struct {
+        crate::rustpkg::Struct {
+            krate: "geo".into(),
+            name: "Point".into(),
+            size: 40,
+            align: 8,
+            fields: vec![
+                crate::rustpkg::meta::Field { name: "x".into(), ty: "float".into(), offset: 0 },
+                crate::rustpkg::meta::Field {
+                    name: "near".into(),
+                    ty: "[geo::Point]?".into(),
+                    offset: 8,
+                },
+            ],
         }
     }
 
-    fn c_dep(names: &[&str]) -> DependencyEntry {
-        DependencyEntry {
-            abi: Abi::C,
-            symbols: Some(names.iter().map(|n| (n.to_string(), sym())).collect()),
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn c_dependencies_contribute_their_symbol_names() {
-        let m = manifest_with(vec![("gfx", c_dep(&["a", "b"]))]);
-        let out = declared_c_symbols(&m);
-        assert_eq!(out["gfx"], ["a", "b"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
-    }
-
-    /// A Jade-ABI package declares its exports in its own project, which this
-    /// manifest cannot see. Recording an empty set for it would reject every
-    /// call it has ever served.
-    #[test]
-    fn a_jade_abi_dependency_contributes_nothing() {
-        let d = DependencyEntry { abi: Abi::Jade, ..Default::default() };
-        assert!(declared_c_symbols(&manifest_with(vec![("pkg", d)])).is_empty());
-    }
-
-    #[test]
-    fn an_empty_symbol_table_contributes_nothing() {
-        let d = DependencyEntry {
-            abi: Abi::C,
-            symbols: Some(std::collections::HashMap::new()),
-            ..Default::default()
+    fn a_rust_struct_becomes_a_class_with_public_required_fields() {
+        let classes: HashMap<String, String> = [
+            ("geo::Point".to_string(), "Point$rgeo".to_string()),
+            ("Point$rgeo".to_string(), "Point$rgeo".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let TStmt::StructDef { name, fields, members, .. } = rust_class(&point(), &classes) else {
+            panic!("a struct becomes a class");
         };
-        assert!(declared_c_symbols(&manifest_with(vec![("gfx", d)])).is_empty());
+        assert_eq!(name, "Point$rgeo");
+        assert!(fields.iter().all(|f| matches!(f, StructFieldDef::Required(_))));
+        assert!(members.is_public("x") && members.is_public("near"));
+        let near = members.decorators.iter().find(|(f, _)| f == "near").map(|(_, d)| d.clone());
+        assert_eq!(near, Some(vec!["public".to_string(), "[Point$rgeo]?".to_string()]));
     }
 
-    /// `pkg::resolved_libraries` lets a `[lib]` of the same name win the import,
-    /// so the dependency's table describes a library this build is not using.
     #[test]
-    fn a_lib_shadowing_a_dependency_disables_the_check() {
-        let mut m = manifest_with(vec![("gfx", c_dep(&["a"]))]);
-        let mut libs = HashMap::new();
-        libs.insert(
-            "gfx".to_string(),
-            LibraryEntry { path: "other.dylib".to_string(), ..Default::default() },
-        );
-        m.lib = Some(libs);
-        assert!(declared_c_symbols(&m).is_empty());
-    }
-
-    // ── Registry: dependency name → pkgid ─────────────────────────────────────
-
-    /// The glue between the manifest and the renamer. `native_pkg_id` is handed
-    /// the `use` path, and that is the only place the dependency's name and its
-    /// pkgid are both in scope — get the keying wrong and the table is built
-    /// correctly and then never consulted.
-    #[test]
-    fn registering_a_native_package_carries_its_symbols_to_the_pkgid() {
-        let mut reg = Registry::new();
-        reg.dep_symbols
-            .insert("gfx".to_string(), ["jade_gfx_init"].iter().map(|s| s.to_string()).collect());
-
-        let id = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
-        assert_eq!(reg.native_symbols[&id], ["jade_gfx_init".to_string()].into_iter().collect());
-
-        // A library with no declared table records nothing, so the renamer has
-        // nothing to check it against and lets its references through.
-        let other = reg.native_pkg_id(Path::new("/tmp/other.dylib"), "other");
-        assert!(!reg.native_symbols.contains_key(&other));
-    }
-
-    /// A second import of the same library reuses the pkgid, and must not lose
-    /// the symbols the first one recorded.
-    #[test]
-    fn reimporting_a_package_keeps_its_symbols() {
-        let mut reg = Registry::new();
-        reg.dep_symbols.insert("gfx".to_string(), ["a".to_string()].into_iter().collect());
-        let first = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
-        let second = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
-        assert_eq!(first, second);
-        assert!(reg.native_symbols.contains_key(&first));
+    fn struct_names_inside_a_type_are_written_as_classes() {
+        let classes: HashMap<String, String> =
+            [("geo::Point".to_string(), "Point$rgeo".to_string())].into_iter().collect();
+        assert_eq!(class_type_text("[geo::Point]?", &classes), "[Point$rgeo]?");
+        assert_eq!(class_type_text("geo::Pointy", &classes), "geo::Pointy");
+        assert_eq!(class_type_text("str", &classes), "str");
     }
 
     // ── closest_symbol ────────────────────────────────────────────────────────
@@ -1941,45 +1700,5 @@ mod ffi_symbol_tests {
         assert_eq!(edit_distance("abc", "abd"), 1);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("", "abc"), 3);
-    }
-
-    #[test]
-    fn a_lib_declares_records_its_functions_return() {
-        use crate::typechecker::infer::Ty;
-        let m: ProjectManifest = toml::from_str(
-            "[lib.gfx]\npath = \".\"\n\
-             [lib.gfx.symbols.cursor]\nargs = []\nret = \"Point\"\n\
-             [lib.gfx.structs.Point]\nfields = [[\"x\", \"float\"], [\"tags\", \"[str]\"]]\n",
-        )
-        .unwrap();
-        let decls = native_declarations(&m).unwrap();
-        let gfx = &decls["gfx"];
-        assert_eq!(gfx.sigs["cursor"].ret, Some(Ty::Struct("Point$ngfx".into())));
-        assert_eq!(gfx.records["Point"].len(), 2);
-
-        // The class has public, typed fields, and a zero default where the type has one.
-        let TStmt::StructDef { name, fields, members, .. } =
-            record_class("Point$ngfx", &gfx.records["Point"])
-        else {
-            panic!("a record becomes a class");
-        };
-        assert_eq!(name, "Point$ngfx");
-        assert!(matches!(fields[0], StructFieldDef::Let { .. }));
-        assert!(members.is_public("x") && members.is_public("tags"));
-
-        let bad: ProjectManifest = toml::from_str(
-            "[lib.gfx]\npath = \".\"\n[lib.gfx.structs.Point]\nfields = [[\"x\", \"pointer\"]]\n",
-        )
-        .unwrap();
-        let err = native_declarations(&bad).err().unwrap();
-        assert!(err.contains("[lib.gfx.structs.Point]"), "{err}");
-    }
-
-    #[test]
-    fn record_names_inside_a_type_are_renamed() {
-        let names: HashMap<String, String> =
-            [("Point".to_string(), "Point$ngfx".to_string())].into_iter().collect();
-        assert_eq!(rename_idents("[Point]", &names), "[Point$ngfx]");
-        assert_eq!(rename_idents("Pointy", &names), "Pointy");
     }
 }

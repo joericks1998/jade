@@ -1,0 +1,74 @@
+// A Rust package's functions, called like any package's.
+//
+// `values` is the crate in values/, named in jade.toml with abi = "rust". Each
+// function below exports one kind of value: numbers of every width, bool, char,
+// text, bytes, arrays, a struct, an optional, and a Result whose error is caught
+// here. Text that comes back from Rust is tainted, as all text from outside the
+// program is.
+
+use values
+
+// Numbers, bool and char.
+print(values.add(40, 2))
+print(values.is_even(7))
+print(values.next_char(toChar("a")))
+
+// A literal takes a sized parameter's type, as it does in an assignment.
+print(values.widths(1, -2, 3, -4, 5, 6))
+print(values.halve(5.0))
+
+// Text and bytes, lent to Rust for the call.
+print(values.greet("Jade"))
+print(values.first_word("hello wide world"))
+let reversed = values.reversed("abc".encode())
+print(reversed.decode())
+
+// Arrays both ways.
+print(values.lengths(["one", "three", "日本"]))
+
+// A struct is a class with public fields.
+let a = values.Point { x: 0.0, y: 0.0, name: "a" }
+let b = values.Point { x: 2.0, y: 4.0, name: "b" }
+let m = values.midpoint(a, b)
+print(m.x)
+print(m.y)
+print(m.name)
+
+// Arrays of structs, and a struct holding arrays, an optional and a bool, both
+// ways.
+let tri = values.polygon("tri", [a, b, values.Point { x: 4.0, y: 0.0, name: "c" }])
+print(tri.name)
+print(len(tri.corners))
+print(tri.corners[2].name)
+print(tri.tags)
+print(tri.closed)
+print(values.perimeter_names(tri))
+print(values.polygon("line", [a, b]).tags)
+
+// Optional arguments, and arrays of bools and chars.
+print(values.double_or_zero(21))
+print(values.double_or_zero(nil))
+print(values.marks([true, false, true]))
+
+// An optional comes back as nil or a value.
+let found = values.find(["apple", "banana"], "ban")
+if found != nil {
+    print(found)
+}
+print(values.find(["apple"], "kiwi"))
+print(values.checked_div(7, 2))
+print(values.checked_div(7, 0))
+
+// An Err raises its text, and a panic raises naming the function.
+print(values.parse_port("8080"))
+try {
+    print(values.parse_port("eighty"))
+} catch e {
+    print(e.message)
+}
+try {
+    print(values.explode(3))
+} catch e {
+    print(e.message)
+}
+print(values.explode(0))
