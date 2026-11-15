@@ -1,6 +1,9 @@
 # Rust packages
 
-Status: decided 2026-11-14 for jade 2.0.4, and built on branch `2.0.4`. Joe decided that
+Status: decided 2026-11-14 for jade 2.0.4, and built on branch `2.0.4`, tested on macOS
+on Apple Silicon. The Linux link path is written and unit-tested against a fake file
+system, but no program with a Rust package has been linked on Linux yet; CI will be the
+first to. Joe decided that
 Rust replaces Jade's C foreign function interface and agreed the points marked *agreed*
 below. Every other decision here was made while building it; each says why, and the
 list at the end names them for review.
@@ -111,20 +114,24 @@ On `pub fn resize(img: &[u8], width: u32) -> Result<Vec<u8>, String>` in crate
 `imgtools`:
 
 ```rust
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __jade_imgtools_resize(
-    a0: *const jade::__private::Vec<u8>,   // the C form of `bytes`
+    a0: *const jade::__private::CVec<u8>,  // the C form of `bytes`
     a1: *const u32,
-    out: *mut jade::__private::Vec<u8>,
-    err: *mut jade::__private::Vec<u8>,
+    out: *mut jade::__private::CVec<u8>,
+    err: *mut jade::__private::CVec<u8>,
 ) -> i32 { /* lift, call inside catch_unwind, lower */ }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __jade_imgtools_resize__free(
-    out: *mut jade::__private::Vec<u8>,
-    err: *mut jade::__private::Vec<u8>,
+    out: *mut jade::__private::CVec<u8>,
+    err: *mut jade::__private::CVec<u8>,
 ) { /* drop what the call handed over */ }
 ```
+
+`#[unsafe(no_mangle)]` is what edition 2024 requires, and Rust accepts it in every
+edition from 1.82, so a package needs Rust 1.82 or later. The tokens the macro writes take
+the package's edition, so they are written to compile under all of them.
 
 plus a description record (decision 7). The status is 0 when the call returned, and 1
 when it raised, with the message in `err`.
@@ -137,12 +144,16 @@ On a struct, the macro requires named fields, every one `pub`, and no generics o
 lifetimes, and generates the mirror, the conversions both ways, and a record.
 
 *Refused at compile time, each with the fix named:* generic functions and structs,
-`impl Trait` arguments, `&mut` arguments ("Jade cannot see what the function changes;
-return the new value instead"), a borrowed result, `async fn`, methods, a struct with a
-private field, and any type with no Jade form. The last is a trait bound, so the message
-comes from `#[diagnostic::on_unimplemented]` on the trait and names the types that do
-cross. A borrow that outlives the call cannot be written at all, since every argument is
-lifted for one call and the result must be an owned type.
+`impl Trait` in an argument or the result, `&mut` arguments ("the Jade program would not
+see what the function changes; take the value and return the new one instead"), raw
+pointers, `async fn`, `unsafe fn`, an `extern` function, a variadic, a parameter written
+as a pattern, methods, a struct with a private field or no named fields, and any type
+with no Jade form. The last is a trait bound, so the message comes from
+`#[diagnostic::on_unimplemented]` on the traits and names the types that do cross.
+
+A borrow cannot outlive the call. Every argument is lifted for one call, and a borrowed
+result, such as `fn first(s: &str) -> &str`, is copied into its C form before the
+arguments it may borrow from are let go, so it is accepted rather than refused.
 
 ### 4. The types that cross (*agreed*)
 
@@ -268,6 +279,10 @@ string that is not UTF-8, raises before the function runs. The program raises th
 kind of error a failing `std` call does, so `try` and `catch` treat a Rust package like
 any other code, and an uncaught one prints `jade: <message>` and exits with status 1.
 
+A struct literal of a Rust struct's class must give every field, since Rust gives none a
+default. The per-file type pass cannot see a class from another file, so the
+whole-program member check reports a missing field of one, where it used to reach MIR.
+
 Rust's default panic hook prints to stderr before the panic is caught. The runtime
 installs a hook once, on the first call, that stays quiet while an exported call is
 running on that thread and passes every other panic to the hook that was there before, so
@@ -301,8 +316,12 @@ cargo rustc --release --lib --message-format=json-render-diagnostics \
 ```
 
 and reads the staticlib's path from cargo's JSON and the system libraries it needs from
-the `native-static-libs` note. Cargo prints a build that failed as rustc renders it, and
-the compiler passes that through.
+the `native-static-libs` note, which cargo prints again when the crate is already built.
+Cargo prints a build that failed as rustc renders it, and the compiler passes that
+through without cargo's progress lines. A first build prints a note, since fetching and
+compiling the crates takes a while; a later one is silent. `cargo metadata --offline`
+then says which crate each dependency is, since a package may name its library apart
+from itself and a record carries the library's name.
 
 ### 11. Linking
 
@@ -351,7 +370,9 @@ build time and pins the versions in the generated crate's `Cargo.lock`.
 to default to. `abi = "c"` and `abi = "jade"` are refused with a message pointing here.
 
 `jade pkg add <name> --path <dir>` writes a Rust dependency when the directory holds a
-`Cargo.toml`, and `--rust` marks a `--git` or `--version` source as one.
+`Cargo.toml`, and `--rust` marks a `--git` or `--version` source as one. It builds the
+package on the spot, so it reports what the package exports and refuses one that does not
+compile, taking its entry back out of `jade.toml`.
 
 ### 14. Naming in a program
 
@@ -373,6 +394,10 @@ exported name suggested, as before.
 - `pkg/`: Rust dependencies are skipped by the lock; `jade pkg add` detects a crate.
 - `typechecker/infer/native.rs`: a signature is always complete, read from the record's
   type strings, so the checker no longer infers what an undeclared native call returns.
+  A call passes each argument through `accept`, so a number literal takes a sized
+  parameter's type. `typechecker/infer/members.rs` reports a missing public field of a
+  class from another file.
+- `typechecker/tir.rs` loses `JadeType::Handle`, so `CACHE_FORMAT_VERSION` is 18.
 - `mir/`: a `NativeCall` names its symbol; `NativeLib` and runtime loading are gone.
 - `backend/native.rs`: rewritten. Builds each argument's C form, calls the symbol, reads
   the result's C form into Jade values, calls `__free`, and raises on status 1.
@@ -419,6 +444,9 @@ path, nothing can produce or type one, so the loader went with them.
    git, at the tag of the compiler it targets.
 5. Lend arrays of numbers without a copy: an `[int]` argument's elements are already
    `int64_t`s in a row.
+6. Link a program with a Rust package on Linux, glibc and musl, which CI's first run
+   will do for glibc; the search for `native-static-libs` libraries is untested on a real
+   system.
 
 ## Decisions made while building, for review
 
@@ -435,3 +463,12 @@ Joe did not make these; each is above with its reason.
 - Rust dependencies are pinned by cargo, not by `jade.lock` (decision 13).
 - Text from a Rust package stays tainted (decision 6).
 - A panic's message names the function: `<package>.<function> panicked: ...` (decision 9).
+- A borrowed result, such as `-> &str`, is accepted and copied, rather than refused
+  (decision 3).
+- A Jade literal of a Rust struct's class gives every field, since Rust gives none a
+  default (decision 9).
+- Handles and callbacks, which the C path had, are dropped for now rather than carried
+  over, since neither has a Rust shape yet that the rest of this design settles; both are
+  follow-ups (*Out of scope*).
+- `jade check` builds the Rust, and `jade pkg add` builds a Rust package to report what
+  it exports (decisions 7 and 13).
