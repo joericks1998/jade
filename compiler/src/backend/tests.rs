@@ -15,6 +15,8 @@ fn mir_of(src: &str) -> mir::Program {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
     let mut tree = crate::typechecker::resolve::resolve(program).expect("resolve");
+    // A std package written in Jade is loaded the way a build loads it.
+    tree.stmts = crate::aot::imports::namespace_program(tree.stmts).expect("imports");
     crate::typechecker::resolve::fill_struct_literal_defaults(&mut tree).expect("defaults");
     let typed = crate::typechecker::infer::check_program(&tree).expect("check");
     mir::lower_program(&tree, &typed).expect("lowers")
@@ -101,7 +103,13 @@ fn a_child_struct_runs_its_own_method_through_a_parent() {
 fn a_program_declares_nothing_but_c_library_functions() {
     let src = "use std::time\nasync fn nap(n) {\n    time.sleep(0.01)\n    return n\n}\n\
                let d = {\"k\": \"v\"}\nlet a = [1.5, 2.5]\na.sort()\nprint(f\"{d} {a} {\"x\".upper()}\")\n\
-               print(toInt(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
+               print(toInt(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n\
+               use std::fs\nuse std::sh\nuse std::env\nuse std::random\nuse std::uhttp\n\
+               fs.mkdir(\"/x\")\nfs.copy(\"/x\", \"/y\")\nfs.rename(\"/x\", \"/y\")\nfs.delete(\"/x\")\nfs.rmdir(\"/x\")\n\
+               print(fs.read(\"/x\") + toString(fs.size(\"/x\")) + toString(fs.list_dir(\"/x\")))\n\
+               fs.write_stdout_bytes(fs.read_stdin_bytes())\nprint(sh.output(\"true\").code + sh.run(\"true\"))\n\
+               print(env.get(\"X\"))\nenv.set(\"X\", \"y\")\nprint(env.args())\nrandom.seed(1)\nprint(random.float())\n\
+               print(uhttp.post(\"unix:///s:/\", \"b\", {\"k\": \"v\"}).status)\nuhttp.stream(\"unix:///s:/\", print)\n";
     let ctx = Context::create();
     let module = build_module(&ctx, &mir_of(src)).expect("builds");
     let allowed = [

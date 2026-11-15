@@ -1,0 +1,41 @@
+true
+true
+1.5
+2.5
+0
+true
+true
+1.0
+true
+9223372036854775807
+-9223372036854775808
+true
+-1.0
+inf
+-inf
+1.5707963267948966
+inf
+10.0
+-0.0
+0.0
+0.0
+0
+0
+-0.0
+-0.0
+3.141592653589793
+-3.141592653589793
+0.0
+-0.0
+9007199254740993
+9223372036854775807
+-1
+3
+7.0
+10
+4611686018427387904
+-9223372036854775808
+0.5
+integer overflow
+integer overflow
+math.pow of two ints needs an exponent of 0 or more; pass a float to get a fraction

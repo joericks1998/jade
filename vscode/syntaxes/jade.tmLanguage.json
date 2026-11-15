@@ -487,8 +487,8 @@
       ]
     },
     "is-test": {
-      "comment": "x is Dog, a class test, where the class may be qualified: x is shapes.Dog.",
-      "match": "\\b(is)\\s+(?:[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*)*([A-Za-z_][A-Za-z0-9_]*)\\b",
+      "comment": "x is Dog, a class test, where the class may be qualified: x is shapes.Dog. The std library's own `x is nil` is left to the nil rule.",
+      "match": "\\b(is)\\s+(?!(?:nil|None|null)\\b)(?:[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*)*([A-Za-z_][A-Za-z0-9_]*)\\b",
       "captures": {
         "1": {
           "name": "keyword.operator.word.jade"

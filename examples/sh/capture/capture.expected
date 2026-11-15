@@ -1,0 +1,30 @@
+a
+a
+ b 
+2
+6
+0
+0
+a�b
+a�
+I/O error: sh.exec: command exited with code 3: oops
+I/O error: sh.exec: command exited with code 1: spaced
+I/O error: sh.exec: command exited with code 4: 
+I/O error: sh.exec: command exited with code -1: 
+7
+0
+-1
+out
+
+err
+
+2
+true
+-1
+93000
+93000
+refused tainted string in sh.exec(cmd) — value derived from an untrusted source (LLM, network, file, stdin) and cannot flow to a code-execution sink
+refused tainted string in sh.run(cmd) — value derived from an untrusted source (LLM, network, file, stdin) and cannot flow to a code-execution sink
+refused tainted string in sh.output(cmd) — value derived from an untrusted source (LLM, network, file, stdin) and cannot flow to a code-execution sink
+stdout is refused
+stderr is refused

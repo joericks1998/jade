@@ -390,7 +390,14 @@ impl<'a> Lowerer<'a> {
         let v = fx.coerce(v, &t, ret, span)?;
         let v = fx.consume(v);
         fx.terminate(Term::Return(v));
-        Ok(Func { name, params: nparams, locals: fx.locals, ret: ret.clone(), blocks: fx.blocks })
+        Ok(Func {
+            name,
+            params: nparams,
+            locals: fx.locals,
+            ret: ret.clone(),
+            blocks: fx.blocks,
+            library: false,
+        })
     }
 }
 

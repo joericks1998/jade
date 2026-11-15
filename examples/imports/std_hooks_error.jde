@@ -1,0 +1,9 @@
+// `__sys` is the hook package the std library written in Jade calls into for
+// what Jade cannot do itself, such as reading a clock. A program cannot name
+// it, any more than it can name `__infer`, and is told the name is undefined.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+use std::__sys
+
+print(__sys.now())

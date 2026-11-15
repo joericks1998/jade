@@ -1,0 +1,44 @@
+true
+I/O error: mkdir '/tmp/jade_fs_edges/file': File exists (os error 17)
+I/O error: mkdir '/tmp/jade_fs_edges/file/sub': Not a directory (os error 20)
+I/O error: read '/tmp/jade_fs_edges/missing.txt': No such file or directory (os error 2)
+I/O error: read '/tmp/jade_fs_edges': Is a directory (os error 21)
+I/O error: read_bytes '/tmp/jade_fs_edges/missing.bin': No such file or directory (os error 2)
+3
+I/O error: read '/tmp/jade_fs_edges/bad.txt': stream did not contain valid UTF-8
+0
+0
+200000
+I/O error: write '/tmp/jade_fs_edges/nope/x.txt': No such file or directory (os error 2)
+I/O error: append '/tmp/jade_fs_edges/nope/x.txt': No such file or directory (os error 2)
+I/O error: write_bytes '/tmp/jade_fs_edges/nope/x.bin': No such file or directory (os error 2)
+I/O error: append_bytes '/tmp/jade_fs_edges/nope/x.bin': No such file or directory (os error 2)
+one two
+I/O error: delete '/tmp/jade_fs_edges/missing': No such file or directory (os error 2)
+I/O error: rmdir '/tmp/jade_fs_edges/missing': No such file or directory (os error 2)
+I/O error: rmdir '/tmp/jade_fs_edges/file': Not a directory (os error 20)
+I/O error: rename '/tmp/jade_fs_edges/missing': No such file or directory (os error 2)
+I/O error: copy '/tmp/jade_fs_edges/missing': No such file or directory (os error 2)
+I/O error: copy '/tmp/jade_fs_edges/file': No such file or directory (os error 2)
+I/O error: size '/tmp/jade_fs_edges/missing': No such file or directory (os error 2)
+list_dir: could not read directory
+200000
+false
+200000
+true false true
+true true false
+false false false
+false false false
+["a", "bad.txt", "big", "empty", "file", "new.txt"]
+[]
+a file's text is refused
+a file's bytes are refused
+from a file
+from a file
+refused tainted string in fs.read(path) — value derived from an untrusted source (LLM, network, file, stdin) and cannot flow to a code-execution sink
+refused tainted string in fs.read_bytes(path) — value derived from an untrusted source (LLM, network, file, stdin) and cannot flow to a code-execution sink
+echo from a file
+16
+true
+c
+false

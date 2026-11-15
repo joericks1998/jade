@@ -63,7 +63,10 @@ impl<'ctx> Cx<'ctx> {
             let bad = f.call_int(f.cx.utf8_invalid_at_fn(), &[b.into()]);
             f.if_(f.sge(bad, f.i64(0)), |f| {
                 let m = f.format(
-                    &format!("{}bytes.decode(): not valid UTF-8 at byte %lld", super::fs::IO_ERROR),
+                    &format!(
+                        "{}bytes.decode(): not valid UTF-8 at byte %lld",
+                        super::errors::IO_ERROR
+                    ),
                     &[bad],
                 );
                 f.fail_str(m);

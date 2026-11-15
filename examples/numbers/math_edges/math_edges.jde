@@ -1,0 +1,88 @@
+// std::math at its edges: NaN, the infinities, the sign of zero, ints at the
+// ends of their range, and the errors. 2.0.8 moved std::math from the backend
+// into Jade source (compiler/src/lib/math.jde), each one-instruction function
+// a call to the LLVM intrinsic behind it, and every answer here is what the
+// backend's version gave.
+
+use std::math
+
+let nan = math.nan()
+let inf = math.inf()
+
+// ── NaN ──────────────────────────────────────────────────────────────────────
+
+// NaN stays NaN through sign and abs, and gives way to the other operand in
+// min and max. A float that is not a number becomes the int 0.
+print(math.is_nan(math.sign(nan)))
+print(math.is_nan(math.abs(nan)))
+print(math.min(nan, 1.5))
+print(math.max(2.5, nan))
+print(math.floor(nan))
+print(math.is_nan(math.sqrt(-1)))
+print(math.is_nan(math.pow(-8.0, 0.5)))
+print(math.pow(nan, 0))
+print(math.is_nan(nan) and not math.is_inf(nan))
+
+// ── Infinity ─────────────────────────────────────────────────────────────────
+
+// An infinite float becomes the int at that end of the range, and the
+// functions that reach infinity say so.
+print(math.floor(inf))
+print(math.ceil(0.0 - inf))
+print(math.is_inf(0.0 - inf))
+print(math.sign(0.0 - inf))
+print(math.exp(1000))
+print(math.ln(0))
+print(math.atan(inf))
+print(math.hypot(inf, nan))
+print(math.clamp(inf, 0, 10))
+
+// ── The sign of zero ─────────────────────────────────────────────────────────
+
+// -0.0 prints with its sign. abs clears it, sign gives 0.0 for either zero,
+// and rounding a small negative keeps it.
+print(-0.0)
+print(math.abs(-0.0))
+print(math.sign(-0.0))
+print(math.round(-0.4))
+print(math.trunc(-0.9))
+print(math.sqrt(-0.0))
+print(math.pow(-0.0, 3))
+print(math.atan2(0.0, -0.0))
+print(math.atan2(-0.0, -1))
+print(math.min(0.0, -0.0))
+print(math.max(-0.0, 0.0))
+
+// ── Ints ─────────────────────────────────────────────────────────────────────
+
+// An int stays an int where the answer can be one, so a large one keeps every
+// digit; a float anywhere makes the answer a float.
+print(math.floor(9007199254740993))
+print(math.abs(-9223372036854775807))
+print(math.sign(-9223372036854775807 - 1))
+print(math.min(3, 7))
+print(math.max(3, 7.0))
+print(math.clamp(15, 0, 10))
+print(math.pow(2, 62))
+print(math.pow(-2, 63))
+print(math.pow(2.0, -1))
+
+// ── Errors ───────────────────────────────────────────────────────────────────
+
+// The most negative int has no positive twin, an int power past the range
+// overflows, and a negative int exponent has no int answer.
+try {
+    print(math.abs(-9223372036854775807 - 1))
+} catch e {
+    print(e)
+}
+try {
+    print(math.pow(2, 63))
+} catch e {
+    print(e)
+}
+try {
+    print(math.pow(3, -1))
+} catch e {
+    print(e.message)
+}

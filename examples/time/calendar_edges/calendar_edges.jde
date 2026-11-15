@@ -1,0 +1,53 @@
+// The calendar arithmetic's edges: leap years, the dates before 1970, the far
+// ends of the int range, and fields far out of range. 2.0.8 moved std::time's
+// calendar from the backend into Jade source (compiler/src/lib/time.jde), and
+// every answer here is what the backend's version gave.
+
+use std::time
+
+// ── Leap years ───────────────────────────────────────────────────────────────
+
+// A year divisible by 4 is a leap year, unless it is divisible by 100, unless
+// it is also divisible by 400. February 29th of a common year carries into
+// March 1st, and December 31st is day 366 of a leap year.
+for y in [1600, 1700, 1900, 1996, 2000, 2023, 2024, 2100, 2400, -4, -100, -400] {
+    let feb29 = time.stamp(y, 2, 29)
+    let dec31 = time.parts(time.stamp(y, 12, 31))
+    print(f"{y}: {time.utc(feb29)} day {dec31.yearday}")
+}
+
+// ── Before 1970 ──────────────────────────────────────────────────────────────
+
+// A negative timestamp floors to the day before, rather than truncating to the
+// epoch's day. 1969-12-31 was a Wednesday, weekday 3.
+for ts in [-1, -86400, -86401, -2208988800, -62135596800, -62167219200, -62198755200] {
+    let p = time.parts(ts)
+    print(f"{ts}: {time.utc(ts)} weekday {p.weekday} day {p["yearday"]}")
+}
+print(time.stamp(1969, 12, 31, 23, 59, 59))
+print(time.stamp(1, 1, 1))
+print(time.stamp(0, 3, 1) - time.stamp(0, 2, 28))
+
+// ── The ends of the int range ────────────────────────────────────────────────
+
+// Every timestamp has calendar fields, the largest and smallest included, and
+// a year past 9999 or before 0 is written in full.
+for ts in [253402300799, 253402300800, 9223372036854775807, -9223372036854775807 - 1] {
+    print(f"{ts}: {time.utc(ts)}")
+}
+
+// ── Fields out of range ──────────────────────────────────────────────────────
+
+// Each field carries into the next one up, in both directions.
+print(time.utc(time.stamp(2026, 0, 1)))
+print(time.utc(time.stamp(2026, -11, 1)))
+print(time.utc(time.stamp(2026, 25, 1)))
+print(time.utc(time.stamp(2026, 1, -30)))
+print(time.utc(time.stamp(2026, 1, 1, 25, 61, 61)))
+print(time.utc(time.stamp(2026, 1, 1, -1, -1, -1)))
+
+// A sum past the int range saturates rather than raising.
+print(time.stamp(2026, 1, 1, 9223372036854775807))
+print(time.stamp(2026, 1, 1, 0, 0, -9223372036854775807 - 1))
+print(time.stamp(300000000000, 1, 1))
+print(time.stamp(9223372036854775807, 1, 1) == time.stamp(9223372036854775807, 1, 1, 0, 0, 0))

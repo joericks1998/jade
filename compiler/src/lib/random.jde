@@ -1,0 +1,61 @@
+// std::random: one generator for the whole program.
+//
+// The generator is v1's xoshiro256**, seeded through splitmix64 from the clock
+// and the process id until `seed` fixes it, so a seeded program draws the same
+// values it drew under v1. Tasks share it, so its state stays behind a hook,
+// under the hook's own lock: `rand_below` draws one value below a bound, and
+// `rand_seed` reseeds. Everything built on a draw is here, and draws exactly
+// what the backend's version drew.
+//
+// `int` and `float` are this module's own functions, so inside it the int
+// type function is spelled `long`, its other name.
+
+use std::__sys
+
+// Purpose: This function draws an int from `lo` to `hi`, both ends included.
+fn int(lo, hi) {
+    let a = long(lo)
+    let b = long(hi)
+    if a > b {
+        raise f"random.int: min ({a}) > max ({b})"
+    }
+    // How many values there are to draw from, which wraps to 0 for the whole
+    // int range, where a draw is all 64 bits. Adding the draw wraps back.
+    let size = __sys.wrap_add(__sys.wrap_sub(b, a), 1)
+    return __sys.wrap_add(a, __sys.rand_below(size))
+}
+
+// Purpose: This function draws a float from 0 up to but not including 1: the
+// top 53 bits of a draw, which a float holds exactly, scaled down.
+fn float() {
+    let bits = (__sys.rand_below(0) >> 11) & 0x1FFFFFFFFFFFFF
+    return toFloat(bits) / 9007199254740992.0
+}
+
+// Purpose: This function picks one element of an array.
+fn choice(a) {
+    let n = len(a)
+    if n == 0 {
+        raise "random.choice: the array is empty"
+    }
+    return a[__sys.rand_below(n)]
+}
+
+// Purpose: This function shuffles an array in place, Fisher-Yates from the
+// last element down.
+fn shuffle(a) {
+    let i = len(a) - 1
+    while i > 0 {
+        let j = __sys.rand_below(i + 1)
+        let held = a[i]
+        a[i] = a[j]
+        a[j] = held
+        i = i - 1
+    }
+}
+
+// Purpose: This function fixes the sequence: every program seeded with the
+// same number draws the same values.
+fn seed(n) {
+    __sys.rand_seed(long(n))
+}

@@ -139,7 +139,9 @@ pub fn check(p: &Program) -> Result<(), JadeError> {
 /// Purpose: This function gives a function's name as its source writes it.
 fn fn_name(f: &Func) -> String {
     let base = f.name.split('(').next().unwrap_or(&f.name);
-    crate::typechecker::infer::display_type_name(base).to_string()
+    // A library function by the name a program calls it, `random.shuffle`.
+    crate::stdlib::display(base)
+        .unwrap_or_else(|| crate::typechecker::infer::display_type_name(base).to_string())
 }
 
 /// Purpose: This function gives a global's name as its source writes it.

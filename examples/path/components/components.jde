@@ -1,0 +1,72 @@
+// std::path, which 2.0.8 moved from the backend into Jade source
+// (compiler/src/lib/path.jde). Every answer here is what the backend's version
+// gave, which followed Rust's std::path::Path on Unix.
+//
+// A path's components are what lies between slashes: repeated slashes count as
+// one, a trailing slash adds nothing, and a `.` component is dropped everywhere
+// but at the start.
+
+use std::path
+use std::env
+use std::sh
+
+// ── The edge cases ───────────────────────────────────────────────────────────
+
+// An empty path, the root, doubled and trailing slashes, a leading `./`, and
+// the `.` and `..` components. Each line is the path, then its basename,
+// dirname, extension and stem.
+let cases = ["", "/", "//", "a//b/", "./x", "x/.", ".", "..", "a/..", "/a/b/", "a/b/c.tar.gz", ".hidden", "a.b/", "café/naïve.txt"]
+for c in cases {
+    print(f"[{c}] [{path.basename(c)}] [{path.dirname(c)}] [{path.ext(c)}] [{path.stem(c)}] {path.is_abs(c)}")
+}
+
+// ── join ─────────────────────────────────────────────────────────────────────
+
+// One slash between the parts, none added after one already there, and an
+// absolute part replaces everything before it.
+print(path.join("a", "b"))
+print(path.join("a/", "b"))
+print(path.join("", "b"))
+print(path.join("a", ""))
+print(path.join("a", "/b"))
+
+// More than two parts fold left: join(a, b, c) is join(join(a, b), c).
+print(path.join("a", "b", "c"))
+print(path.join("a", "b", "/c", "d"))
+
+// ── abs ──────────────────────────────────────────────────────────────────────
+
+// An absolute path keeps its own components; a relative one is put after the
+// working directory. Neither resolves `..`, and a trailing slash stays.
+print(path.abs("/a//b/./c/"))
+print(path.abs("/"))
+print(path.abs(""))
+print(path.abs("x/./y") == path.join(env.cwd(), "x/y"))
+
+// ── Trust ────────────────────────────────────────────────────────────────────
+
+// A result carries the trust of the paths it came from, even when it keeps
+// none of their text, so a path built from outside data stays out of a shell.
+fn trusted(s) {
+    try {
+        sh.exec("true" + s.slice(0, 0))
+        return "trusted"
+    } catch e {
+        return "tainted"
+    }
+}
+
+let outside = sh.exec("echo /etc/x.conf")
+print(trusted(path.basename(outside)))
+print(trusted(path.dirname(outside)))
+print(trusted(path.join(outside, "y")))
+print(trusted(path.join(outside, "/y")))
+print(trusted(path.abs(outside)))
+print(trusted(path.basename("/etc/x.conf")))
+
+// A `str?`, such as what env.get gives, is read as the str it holds.
+let home = env.get("PATH")
+if home != nil {
+    print(path.is_abs(home.split(":")[0]))
+}
+print(path.basename(env.get("PATH")) != "")

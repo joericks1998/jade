@@ -154,6 +154,11 @@ pub struct Func {
     pub locals: Vec<LocalDecl>,
     pub ret: Ty,
     pub blocks: Vec<Block>,
+    /// Whether the function is the std library's, written in Jade under
+    /// `src/lib/`. A call to one does not count against the recursion limit,
+    /// as a call to a built-in never did, so the optimizer can inline it to
+    /// nothing beyond what it computes.
+    pub library: bool,
 }
 
 /// Purpose: This struct holds one local's type and, for a variable, its name.
@@ -492,27 +497,6 @@ pub enum Op {
     MaxTasks,
     /// `(n: int) -> int`: set the concurrency limit, clamped to 1..=512.
     SetMaxTasks,
-    /// `(secs: float) -> future of nil`: a task that finishes after a delay.
-    After,
-
-    // ── time ─────────────────────────────────────────────────────────────
-    /// `() -> int`: Unix seconds, from the wall clock.
-    Now,
-    /// `() -> int`: Unix milliseconds, from the wall clock.
-    NowMs,
-    /// `() -> float`: seconds on a clock that never moves backwards.
-    Monotonic,
-    /// `(secs: float) -> nil`: pause the running thread.
-    Sleep,
-    /// `(ts: int) -> str`: ISO 8601 in UTC.
-    TimeUtc,
-    /// `(ts: int) -> TimeParts`: UTC calendar fields.
-    TimeParts,
-    /// `(y, mo, d, h, mi, s: int) -> int`: the inverse of `TimeParts`.
-    TimeStamp,
-    /// `(tz: str?) -> str`: the local time, formatted as `date` formats it,
-    /// in a named zone or the system's. It is tainted, as in v1.
-    TimeLocal,
 
     // ── bytes ────────────────────────────────────────────────────────────
     /// `(b: bytes, i: int) -> int`: one octet.
@@ -534,25 +518,10 @@ pub enum Op {
     /// `(a: bytes, b: bytes) -> bytes`.
     BytesConcat,
 
-    // ── math ─────────────────────────────────────────────────────────────
-    /// A `std::math` function on numbers whose kinds are settled; see [`MathFn`].
-    Math(MathFn),
-
-    // ── files ────────────────────────────────────────────────────────────
-    /// A `std::fs` function; see [`FsFn`].
-    Fs(FsFn),
-
-    // ── the shell ────────────────────────────────────────────────────────
-    /// A `std::sh` function; see [`ShFn`].
-    Sh(ShFn),
-
-    // ── env, path and random ─────────────────────────────────────────────
-    /// A `std::env` function; see [`EnvFn`].
-    Env(EnvFn),
-    /// A `std::path` function; see [`PathFn`].
-    Path(PathFn),
-    /// A `std::random` function; see [`RandomFn`].
-    Random(RandomFn),
+    // ── the std library's hooks ──────────────────────────────────────────
+    /// What a std package written in Jade asks of the C library or LLVM;
+    /// see [`SysFn`].
+    Sys(SysFn),
 
     // ── inference ────────────────────────────────────────────────────────
     /// What the inference prelude asks of the backend; see [`InferFn`].
@@ -560,58 +529,9 @@ pub enum Op {
     /// `(b: bytes) -> [int]`: each octet, for a `for` loop over bytes.
     BytesInts,
 
-    // ── http ─────────────────────────────────────────────────────────────
-    /// An `std::http` request, or with `true` an `std::uhttp` one; see
-    /// [`HttpFn`]. The operands are the url, the body when the method has one,
-    /// and the headers, a `{str}` or nil.
-    Http(HttpFn, bool),
     /// A call into a Rust package, with each argument passed in its C form;
     /// see [`NativeCall`].
     Native(Box<NativeCall>),
-    /// `(url: str, handler: fn(str) -> T, headers: {str}?) -> nil`:
-    /// `uhttp.stream`, calling the handler once a line until the stream ends
-    /// or the handler returns `false`. `T` is the handler's result type.
-    UhttpStream(Ty),
-}
-
-/// Purpose: This enum lists the request functions `std::http` and `std::uhttp`
-/// share. A transport failure raises; a 4xx or 5xx is an ordinary status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpFn {
-    Get,
-    Delete,
-    Head,
-    Post,
-    Put,
-    /// Like `Get` and `Post`, with a `bytes` body.
-    GetBytes,
-    PostBytes,
-}
-
-impl HttpFn {
-    /// Purpose: This function returns the HTTP method.
-    pub fn method(self) -> &'static str {
-        match self {
-            HttpFn::Get | HttpFn::GetBytes => "GET",
-            HttpFn::Delete => "DELETE",
-            HttpFn::Head => "HEAD",
-            HttpFn::Post | HttpFn::PostBytes => "POST",
-            HttpFn::Put => "PUT",
-        }
-    }
-
-    /// Purpose: This function says whether the request sends a body.
-    pub fn has_body(self) -> bool {
-        matches!(self, HttpFn::Post | HttpFn::Put | HttpFn::PostBytes)
-    }
-
-    /// Purpose: This function returns the class the response comes back as.
-    pub fn result(self) -> Ty {
-        match self {
-            HttpFn::GetBytes => Ty::Struct("HttpBytesResponse".into()),
-            _ => Ty::Struct("HttpResponse".into()),
-        }
-    }
 }
 
 /// Purpose: This enum lists what the inference prelude, `src/infer/prelude.jde`,
@@ -648,179 +568,421 @@ pub enum InferFn {
     SetMaxTokens,
 }
 
-/// Purpose: This enum lists the `std::env` functions.
+/// Purpose: This enum lists the hooks: what the std library written in Jade,
+/// `src/lib/`, asks of the C library and LLVM through the `__sys` package.
+///
+/// Each hook is one operation, typed exactly: a hook taking a float refuses
+/// an int, so library code says `float(x)`. Only library modules can name
+/// `__sys`. A hook that brings outside text in marks it tainted, a hook that
+/// runs a command or reads a path refuses tainted text itself, and state the
+/// whole program shares stays behind a hook, under the hook's own lock.
+/// [`SysFn::params`] and [`SysFn::result`] are the one place a hook's type is
+/// written; the checker and MIR both read them.
+///
+/// A hook whose C library call can fail returns an empty value when it does
+/// and leaves the C library's error code in the thread's slot, which
+/// [`SysFn::OsError`] reads; library code turns it into the error v1 raised.
+/// Only hooks write the slot, so nothing between the hook and the read can
+/// change it, as an allocation can change C's `errno`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnvFn {
-    /// `(name: str) -> str?`: a variable's value, tainted, or nil.
-    Get,
-    /// `(name: str, value: str) -> nil`.
-    Set,
-    /// `() -> [str]`: the program's arguments, its own path first.
-    Args,
-    /// `() -> str`: the working directory.
-    Cwd,
-}
-
-/// Purpose: This enum lists the `std::path` functions, which follow Rust's
-/// `Path` on Unix and give results the trust of their inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathFn {
-    /// `(a: str, b: str) -> str`: `b` after `a`; an absolute `b` replaces it.
-    Join,
-    /// `(p: str) -> str`: the last component, or "".
-    Basename,
-    /// `(p: str) -> str`: everything before it, or ".".
-    Dirname,
-    /// `(p: str) -> str`: the last component without its extension.
-    Stem,
-    /// `(p: str) -> str?`: the extension with its dot, or nil.
-    Ext,
-    /// `(p: str) -> str`: an absolute form, without resolving links.
-    Abs,
-    /// `(p: str) -> bool`.
-    IsAbs,
-}
-
-/// Purpose: This enum lists the `std::random` operations: a xoshiro256**
-/// generator shared by the whole program, seeded from the clock until
-/// `random.seed` is called.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RandomFn {
-    /// `(lo: int, hi: int) -> int`, both ends included; `lo > hi` raises.
-    Int,
-    /// `() -> float` in `[0, 1)`.
-    Float,
-    /// `(n: int) -> int` in `[0, n)`, for `random.choice`; 0 raises.
-    Index,
-    /// `(a: [T]) -> nil`: shuffle in place.
-    Shuffle,
-    /// `(n: int) -> nil`.
-    Seed,
-}
-
-/// Purpose: This enum lists the `std::sh` functions. Each runs `sh -c cmd`,
-/// refuses a tainted command, and gives back tainted output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShFn {
-    /// `(cmd: str) -> str`: stdout without trailing newlines; a non-zero exit
-    /// raises with stderr in the message.
-    Exec,
-    /// `(cmd: str) -> int`: the exit code, with output going to the program's.
-    Run,
-    /// `(cmd: str) -> ShOutput`: stdout, stderr and the code.
-    Output,
-}
-
-impl ShFn {
-    /// Purpose: This function returns the type a `std::sh` function returns.
-    pub fn result(self) -> Ty {
-        match self {
-            ShFn::Exec => Ty::Str,
-            ShFn::Run => Ty::Int,
-            ShFn::Output => Ty::Struct("ShOutput".into()),
-        }
-    }
-}
-
-/// Purpose: This enum lists the `std::fs` functions. A failure raises
-/// `I/O error: <op> '<path>': <reason> (os error <n>)`, as v1 did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsFn {
-    /// `(path: str, trust: bool) -> str`: the file as UTF-8 text, tainted
-    /// unless `trust` is true. A tainted path is refused unless `trust` is.
-    Read,
-    /// `(path: str, trust: bool) -> bytes`: the same, as octets.
-    ReadBytes,
-    /// `(path: str, text: str) -> nil`.
-    Write,
-    Append,
-    /// `(path: str, data: bytes) -> nil`.
-    WriteBytes,
-    AppendBytes,
-    /// `() -> bytes`: all of standard input, tainted.
-    ReadStdinBytes,
-    /// `(data: bytes) -> nil`.
-    WriteStdoutBytes,
-    /// `(path: str) -> bool`; these never raise.
-    Exists,
-    IsFile,
-    IsDir,
-    /// `(path: str) -> nil`.
-    Delete,
-    /// Makes missing parents too, and succeeds when the directory exists.
-    Mkdir,
-    /// Removes an empty directory only.
-    Rmdir,
-    /// `(path: str) -> [str]`: entry names, without `.` and `..`.
-    ListDir,
-    /// `(path: str) -> int`: the size in bytes.
-    Size,
-    /// `(src: str, dst: str) -> nil`.
-    Copy,
-    Rename,
-}
-
-impl FsFn {
-    /// Purpose: This function returns the type a `std::fs` function returns.
-    pub fn result(self) -> Ty {
-        match self {
-            FsFn::Read => Ty::Str,
-            FsFn::ReadBytes | FsFn::ReadStdinBytes => Ty::Bytes,
-            FsFn::Exists | FsFn::IsFile | FsFn::IsDir => Ty::Bool,
-            FsFn::ListDir => Ty::Array(Box::new(Ty::Str)),
-            FsFn::Size => Ty::Int,
-            _ => Ty::Nil,
-        }
-    }
-}
-
-/// Purpose: This enum lists the `std::math` operations, each for one set of
-/// operand kinds. The lowering picks the variant from the argument types, and
-/// gives an int argument to a float-only function as a float.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MathFn {
-    /// `(x: float) -> int`, saturating as v1's `as i64` did.
+pub enum SysFn {
+    // ── floats, each one LLVM intrinsic or C library function ────────────
+    /// `(x: float) -> float`: `llvm.floor`.
     Floor,
+    /// `llvm.ceil`.
     Ceil,
-    /// Halves round away from zero.
+    /// `llvm.round`, halves away from zero.
     Round,
+    /// `llvm.trunc`.
     Trunc,
-    /// `(x: float) -> float`.
+    /// `llvm.sqrt`.
     Sqrt,
+    /// `llvm.log`.
     Ln,
+    /// `llvm.log2`.
     Log2,
+    /// `llvm.log10`.
     Log10,
+    /// `llvm.exp`.
     Exp,
+    /// `llvm.sin`.
     Sin,
+    /// `llvm.cos`.
     Cos,
+    /// C's `tan`, which LLVM 18 has no intrinsic for.
     Tan,
+    /// C's `asin`.
     Asin,
+    /// C's `acos`.
     Acos,
+    /// C's `atan`.
     Atan,
-    /// `(a: float, b: float) -> float`.
+    /// `llvm.fabs`.
+    Fabs,
+    /// `(y: float, x: float) -> float`: C's `atan2`.
     Atan2,
+    /// `(a: float, b: float) -> float`: C's `hypot`.
     Hypot,
+    /// `(base: float, exp: float) -> float`: `llvm.pow`.
     Pow,
-    /// `(base: float, exp: int) -> float`.
-    PowI,
-    /// `(base: int, exp: int) -> int`; overflow or a negative exponent raises.
-    PowInt,
-    /// `(a: int, b: int) -> int`.
-    MinInt,
-    MaxInt,
-    /// `(a: float, b: float) -> float`; a NaN operand gives the other.
-    MinFloat,
-    MaxFloat,
-    /// `(x: int) -> int`; the most negative int raises.
-    AbsInt,
-    AbsFloat,
-    /// `(x: int) -> int`: -1, 0 or 1.
-    SignInt,
-    /// `(x: float) -> float`: -1.0, 0.0 or 1.0, and NaN for NaN.
-    SignFloat,
-    /// `(x: float) -> bool`.
-    IsNan,
-    IsInf,
+    /// `(a: float, b: float) -> float`: `llvm.minnum`, where a NaN gives
+    /// way to the other operand.
+    Minnum,
+    /// `llvm.maxnum`.
+    Maxnum,
+    /// `(mag: float, sign: float) -> float`: `llvm.copysign`.
+    Copysign,
+    /// `(base: float, exp: int) -> float`: `llvm.powi`, with the exponent
+    /// cut to 32 bits as v1 passed it.
+    Powi,
+    /// `(x: float) -> int`: `llvm.fptosi.sat`, saturating at the ends of the
+    /// int range and giving 0 for NaN.
+    ToInt,
+    /// `(bits: int) -> float`: the float with these bits, for the infinity
+    /// and NaN no literal can write.
+    FloatBits,
+
+    // ── ints ─────────────────────────────────────────────────────────────
+    /// `(a: int, b: int) -> int`: `llvm.sadd.sat`, saturating.
+    AddSat,
+    /// `(a: int, b: int) -> int`: a multiply that saturates at the end of
+    /// the range the true product lies past.
+    MulSat,
+    /// `(a: int, b: int) -> int`: LLVM's `add`, which wraps on overflow, for
+    /// arithmetic that v1 let wrap, such as `time.stamp`'s calendar sums.
+    WrapAdd,
+    /// LLVM's `sub`, which wraps.
+    WrapSub,
+    /// LLVM's `mul`, which wraps.
+    WrapMul,
+
+    // ── clocks, sleeping and the time zone ───────────────────────────────
+    /// `() -> int`: Unix seconds, from the wall clock.
+    Now,
+    /// `() -> int`: Unix milliseconds, from the wall clock.
+    NowMs,
+    /// `() -> float`: seconds on a clock that never moves backwards.
+    Monotonic,
+    /// `(secs: float) -> nil`: pause the running thread; a delay that is not
+    /// positive returns at once.
+    Sleep,
+    /// `(secs: float) -> future of nil`: a task that only sleeps, from
+    /// `backend/tasks.rs`.
+    After,
+    /// `(tz: str?, ts: int) -> int`: seconds east of UTC at an instant, in a
+    /// named zone or the system's. `TZ` is set for the moment it takes, under
+    /// a lock, since the environment is the whole program's.
+    LocalOffset,
+    /// `(tz: str?, ts: int) -> str`: the zone's abbreviation at an instant,
+    /// such as `PST`, tainted, under the same lock.
+    LocalZone,
+
+    // ── errors and text ──────────────────────────────────────────────────
+    /// `() -> int`: the C library's error code the last fallible hook on this
+    /// thread failed with, or 0 when it succeeded.
+    OsError,
+    /// `(code: int) -> str`: the C library's text for an error code.
+    Strerror,
+    /// `(b: bytes) -> str`: the octets as text, each invalid UTF-8 sequence
+    /// replaced by U+FFFD, with Rust's rule for how much one covers, keeping
+    /// their trust.
+    Lossy,
+    /// `(d: {str: str}) -> [str]`: a dict's keys in the order they were
+    /// added, which a `for` loop, sorting them, does not give.
+    KeysInOrder,
+
+    // ── the environment ──────────────────────────────────────────────────
+    /// `(name: str) -> str?`: a variable's value, tainted, or nil when it is
+    /// not set or its value is not UTF-8, as Rust's `env::var` gave.
+    Getenv,
+    /// `(name: str, value: str) -> nil`.
+    Setenv,
+    /// `() -> [str]`: the program's arguments, its own path first, trusted.
+    Args,
+    /// `() -> str`: the working directory, or "" when it cannot be read,
+    /// trusted.
+    Cwd,
+
+    // ── the file system ──────────────────────────────────────────────────
+    /// `(path: str, trust: bool, sink: str) -> str?`: a file's text, tainted
+    /// unless `trust`, or nil when it is not UTF-8. A tainted path is refused
+    /// unless `trust`, naming the library function `sink`, such as `fs.read`,
+    /// as `fs.read(path)`. Fallible.
+    ReadText,
+    /// `(path: str, trust: bool, sink: str) -> bytes`: a file's octets, the
+    /// same way. Fallible.
+    ReadFile,
+    /// `(path: str, data: bytes, append: bool) -> nil`: write a file, or add
+    /// to its end, making it when it is not there. Fallible.
+    WriteFile,
+    /// `(path: str) -> [int]`: `stat`'s mode and size. Fallible.
+    Stat,
+    /// `(path: str) -> nil`: `unlink`. Fallible.
+    Unlink,
+    /// `(path: str) -> nil`: `rmdir`, an empty directory only. Fallible.
+    Rmdir,
+    /// `(path: str) -> nil`: `mkdir`, one level, mode 0777. Fallible.
+    Mkdir,
+    /// `(src: str, dst: str) -> nil`: `rename`. Fallible.
+    Rename,
+    /// `(src: str, dst: str) -> nil`: copy a file's octets in 64 KiB pieces,
+    /// with v1's errors. Fallible.
+    CopyFile,
+    /// `(path: str) -> [str]`: every entry's name, `.` and `..` included, as
+    /// the file system orders them, trusted. Fallible.
+    ReadDir,
+
+    // ── processes and descriptors ────────────────────────────────────────
+    /// `(cmd: str, sink: str, capture: bool) -> [int]`: start `/bin/sh -c
+    /// cmd`, refusing a tainted command and naming the library function
+    /// `sink`, such as `sh.exec`, as `sh.exec(cmd)`.
+    /// Gives the pid and, when `capture`, the read ends of its standard output
+    /// and standard error, else -1 for each. Fallible.
+    Shell,
+    /// `(argv: [str], input: bool) -> [int]`: start `argv[0]`, found on
+    /// `PATH`, with its standard output a pipe, its standard error going
+    /// nowhere, and with `input` its standard input a pipe. A tainted program
+    /// name is refused. Gives the pid, the write end of its input or -1, and
+    /// the read end of its output. Fallible.
+    Spawn,
+    /// `(fd: int) -> bytes`: read to the end, tainted, keeping what came
+    /// before a failure. Fallible.
+    ReadAll,
+    /// `(fd: int) -> bytes`: one read of up to 64 KiB, tainted; empty at the
+    /// end or on a failure.
+    ReadChunk,
+    /// `(out: int, err: int) -> [bytes]`: read two pipes to their ends
+    /// together, so a writer that fills one cannot stall, both tainted.
+    Drain,
+    /// `(fd: int, data: bytes) -> nil`: one `write`. Fallible.
+    WriteFd,
+    /// `(fd: int, data: bytes) -> nil`: one `write` to a child's input, with
+    /// `SIGPIPE` ignored, so a child that exits early does not end the
+    /// program. A failure is not reported.
+    WriteChild,
+    /// `(fd: int) -> nil`: `close`.
+    Close,
+    /// `(pid: int) -> int`: wait for a child, giving its exit code, or -1
+    /// when a signal ended it.
+    Wait,
+    /// `(pid: int) -> nil`: send a child `SIGTERM`.
+    Kill,
+
+    // ── the random generator ─────────────────────────────────────────────
+    /// `(n: int) -> int`: a draw from v1's xoshiro256** generator, which the
+    /// whole program shares under a lock: a value from 0 up to `n`, read as
+    /// an unsigned number, without modulo bias, or all 64 bits when `n` is 0.
+    /// The generator seeds itself from the clock and the process id the
+    /// first time, unless it was seeded.
+    RandBelow,
+    /// `(n: int) -> nil`: seed the generator through splitmix64.
+    RandSeed,
+}
+
+impl SysFn {
+    /// Every hook, for listing them.
+    pub const ALL: &'static [SysFn] = &[
+        SysFn::Floor,
+        SysFn::Ceil,
+        SysFn::Round,
+        SysFn::Trunc,
+        SysFn::Sqrt,
+        SysFn::Ln,
+        SysFn::Log2,
+        SysFn::Log10,
+        SysFn::Exp,
+        SysFn::Sin,
+        SysFn::Cos,
+        SysFn::Tan,
+        SysFn::Asin,
+        SysFn::Acos,
+        SysFn::Atan,
+        SysFn::Fabs,
+        SysFn::Atan2,
+        SysFn::Hypot,
+        SysFn::Pow,
+        SysFn::Minnum,
+        SysFn::Maxnum,
+        SysFn::Copysign,
+        SysFn::Powi,
+        SysFn::ToInt,
+        SysFn::FloatBits,
+        SysFn::AddSat,
+        SysFn::MulSat,
+        SysFn::WrapAdd,
+        SysFn::WrapSub,
+        SysFn::WrapMul,
+        SysFn::Now,
+        SysFn::NowMs,
+        SysFn::Monotonic,
+        SysFn::Sleep,
+        SysFn::After,
+        SysFn::LocalOffset,
+        SysFn::LocalZone,
+        SysFn::OsError,
+        SysFn::Strerror,
+        SysFn::Lossy,
+        SysFn::KeysInOrder,
+        SysFn::Getenv,
+        SysFn::Setenv,
+        SysFn::Args,
+        SysFn::Cwd,
+        SysFn::ReadText,
+        SysFn::ReadFile,
+        SysFn::WriteFile,
+        SysFn::Stat,
+        SysFn::Unlink,
+        SysFn::Rmdir,
+        SysFn::Mkdir,
+        SysFn::Rename,
+        SysFn::CopyFile,
+        SysFn::ReadDir,
+        SysFn::Shell,
+        SysFn::Spawn,
+        SysFn::ReadAll,
+        SysFn::ReadChunk,
+        SysFn::Drain,
+        SysFn::WriteFd,
+        SysFn::WriteChild,
+        SysFn::Close,
+        SysFn::Wait,
+        SysFn::Kill,
+        SysFn::RandBelow,
+        SysFn::RandSeed,
+    ];
+
+    /// Purpose: This function returns the name library code calls a hook by,
+    /// as in `__sys.to_int(x)`.
+    pub fn name(self) -> &'static str {
+        match self {
+            SysFn::Floor => "floor",
+            SysFn::Ceil => "ceil",
+            SysFn::Round => "round",
+            SysFn::Trunc => "trunc",
+            SysFn::Sqrt => "sqrt",
+            SysFn::Ln => "ln",
+            SysFn::Log2 => "log2",
+            SysFn::Log10 => "log10",
+            SysFn::Exp => "exp",
+            SysFn::Sin => "sin",
+            SysFn::Cos => "cos",
+            SysFn::Tan => "tan",
+            SysFn::Asin => "asin",
+            SysFn::Acos => "acos",
+            SysFn::Atan => "atan",
+            SysFn::Fabs => "fabs",
+            SysFn::Atan2 => "atan2",
+            SysFn::Hypot => "hypot",
+            SysFn::Pow => "pow",
+            SysFn::Minnum => "minnum",
+            SysFn::Maxnum => "maxnum",
+            SysFn::Copysign => "copysign",
+            SysFn::Powi => "powi",
+            SysFn::ToInt => "to_int",
+            SysFn::FloatBits => "float_bits",
+            SysFn::AddSat => "add_sat",
+            SysFn::MulSat => "mul_sat",
+            SysFn::WrapAdd => "wrap_add",
+            SysFn::WrapSub => "wrap_sub",
+            SysFn::WrapMul => "wrap_mul",
+            SysFn::Now => "now",
+            SysFn::NowMs => "now_ms",
+            SysFn::Monotonic => "monotonic",
+            SysFn::Sleep => "sleep",
+            SysFn::After => "after",
+            SysFn::LocalOffset => "local_offset",
+            SysFn::LocalZone => "local_zone",
+            SysFn::OsError => "os_error",
+            SysFn::Strerror => "strerror",
+            SysFn::Lossy => "lossy",
+            SysFn::KeysInOrder => "keys_in_order",
+            SysFn::Getenv => "getenv",
+            SysFn::Setenv => "setenv",
+            SysFn::Args => "args",
+            SysFn::Cwd => "cwd",
+            SysFn::ReadText => "read_text",
+            SysFn::ReadFile => "read_file",
+            SysFn::WriteFile => "write_file",
+            SysFn::Stat => "stat",
+            SysFn::Unlink => "unlink",
+            SysFn::Rmdir => "rmdir",
+            SysFn::Mkdir => "mkdir",
+            SysFn::Rename => "rename",
+            SysFn::CopyFile => "copy_file",
+            SysFn::ReadDir => "read_dir",
+            SysFn::Shell => "shell",
+            SysFn::Spawn => "spawn",
+            SysFn::ReadAll => "read_all",
+            SysFn::ReadChunk => "read_chunk",
+            SysFn::Drain => "drain",
+            SysFn::WriteFd => "write_fd",
+            SysFn::WriteChild => "write_child",
+            SysFn::Close => "close",
+            SysFn::Wait => "wait",
+            SysFn::Kill => "kill",
+            SysFn::RandBelow => "rand_below",
+            SysFn::RandSeed => "rand_seed",
+        }
+    }
+
+    /// Purpose: This function finds a hook by the name library code calls it by.
+    pub fn from_name(name: &str) -> Option<SysFn> {
+        SysFn::ALL.iter().copied().find(|h| h.name() == name)
+    }
+
+    /// Purpose: This function returns the type of each argument a hook takes.
+    pub fn params(self) -> Vec<Ty> {
+        use SysFn::*;
+        let (int, str, bool, bytes) = (Ty::Int, Ty::Str, Ty::Bool, Ty::Bytes);
+        match self {
+            Floor | Ceil | Round | Trunc | Sqrt | Ln | Log2 | Log10 | Exp | Sin | Cos | Tan
+            | Asin | Acos | Atan | Fabs | ToInt | Sleep | After => vec![Ty::Float],
+            Atan2 | Hypot | Pow | Minnum | Maxnum | Copysign => vec![Ty::Float, Ty::Float],
+            Powi => vec![Ty::Float, int],
+            FloatBits | Strerror | ReadAll | ReadChunk | Close | Wait | Kill | RandBelow
+            | RandSeed => vec![int],
+            AddSat | MulSat | WrapAdd | WrapSub | WrapMul | Drain => vec![int.clone(), int],
+            Now | NowMs | Monotonic | OsError | Args | Cwd => Vec::new(),
+            LocalOffset | LocalZone => vec![Ty::opt(str), int],
+            Lossy => vec![bytes],
+            KeysInOrder => vec![Ty::Map(Box::new(str))],
+            Getenv | Stat | Unlink | Rmdir | Mkdir | ReadDir => vec![str],
+            Setenv | Rename | CopyFile => vec![str.clone(), str],
+            ReadText | ReadFile => vec![str.clone(), bool, str],
+            WriteFile => vec![str, bytes, bool],
+            Shell => vec![str.clone(), str, bool],
+            Spawn => vec![Ty::Array(Box::new(str)), bool],
+            WriteFd | WriteChild => vec![int, bytes],
+        }
+    }
+
+    /// Purpose: This function returns the type a hook returns.
+    pub fn result(self) -> Ty {
+        use SysFn::*;
+        match self {
+            ToInt | AddSat | MulSat | WrapAdd | WrapSub | WrapMul | Now | NowMs | LocalOffset
+            | OsError | Wait | RandBelow => Ty::Int,
+            Sleep | Setenv | WriteFile | Unlink | Rmdir | Mkdir | Rename | CopyFile | WriteFd
+            | WriteChild | Close | Kill | RandSeed => Ty::Nil,
+            After => Ty::Future(Box::new(Ty::Nil)),
+            LocalZone | Cwd | Strerror | Lossy => Ty::Str,
+            Getenv | ReadText => Ty::opt(Ty::Str),
+            ReadFile | ReadAll | ReadChunk => Ty::Bytes,
+            KeysInOrder | Args | ReadDir => Ty::Array(Box::new(Ty::Str)),
+            Stat | Shell | Spawn => Ty::Array(Box::new(Ty::Int)),
+            Drain => Ty::Array(Box::new(Ty::Bytes)),
+            Floor | Ceil | Round | Trunc | Sqrt | Ln | Log2 | Log10 | Exp | Sin | Cos | Tan
+            | Asin | Acos | Atan | Fabs | Atan2 | Hypot | Pow | Minnum | Maxnum | Copysign
+            | Powi | FloatBits | Monotonic => Ty::Float,
+        }
+    }
+
+    /// Purpose: This function says whether a hook can raise. Only a hook that
+    /// refuses tainted text does; every other failure is left in the error
+    /// slot for library code to raise.
+    pub fn may_raise(self) -> bool {
+        matches!(self, SysFn::ReadText | SysFn::ReadFile | SysFn::Shell | SysFn::Spawn)
+    }
 }
 
 /// Purpose: This enum lists the string methods the static backend has.
@@ -878,6 +1040,9 @@ impl Op {
     ///
     /// Outputs: true when it can fail, such as an index past the end.
     pub fn may_raise(&self) -> bool {
+        if let Op::Sys(h) = self {
+            return h.may_raise();
+        }
         matches!(
             self,
             Op::StrIndex
@@ -892,37 +1057,15 @@ impl Op {
                 | Op::Fail(_)
                 | Op::Await(_)
                 | Op::Join(_)
-                | Op::Math(MathFn::PowInt | MathFn::AbsInt)
                 | Op::BytesGet
                 | Op::BytesSet
                 | Op::BytesDecode
                 | Op::BytesZeros
                 | Op::BytesFromInts
                 | Op::BytesConcat
-                | Op::Sh(_)
-                | Op::Random(RandomFn::Int | RandomFn::Index)
                 | Op::ToDict(_)
                 | Op::Infer(InferFn::Map | InferFn::Setup | InferFn::Next)
-                | Op::Http(..)
-                | Op::UhttpStream(_)
                 | Op::Native(_)
-                | Op::Fs(
-                    FsFn::Read
-                        | FsFn::ReadBytes
-                        | FsFn::Write
-                        | FsFn::Append
-                        | FsFn::WriteBytes
-                        | FsFn::AppendBytes
-                        | FsFn::ReadStdinBytes
-                        | FsFn::WriteStdoutBytes
-                        | FsFn::Delete
-                        | FsFn::Mkdir
-                        | FsFn::Rmdir
-                        | FsFn::ListDir
-                        | FsFn::Size
-                        | FsFn::Copy
-                        | FsFn::Rename
-                )
                 | Op::Str(StrMethod::Repeat | StrMethod::PadStart | StrMethod::PadEnd)
         )
     }
@@ -939,6 +1082,13 @@ impl Rvalue {
         match self {
             Rvalue::Call(..) | Rvalue::CallIndirect(..) => true,
             Rvalue::Op(op, _) => op.may_raise(),
+            // Dividing by a constant other than 0 and -1 can neither divide by
+            // zero nor overflow.
+            Rvalue::Bin(
+                BinOp::Arith(ArithOp::Div | ArithOp::Rem, NumTy::Int),
+                _,
+                Operand::Const(Const::Int(d)),
+            ) => *d == 0 || *d == -1,
             Rvalue::Bin(BinOp::Arith(_, NumTy::Int), ..) => true,
             Rvalue::Bin(BinOp::Arith(ArithOp::Div | ArithOp::Rem, NumTy::Float), ..) => true,
             Rvalue::Bin(BinOp::Arith(op, NumTy::Sized(s)), ..) => {

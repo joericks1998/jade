@@ -28,8 +28,10 @@ trap 'rm -rf "$WORK"' EXIT
 # Keep this list short and justified: an entry here is a blind spot.
 skip_reason() {
   case "$1" in
-    # Reach the real network; output depends on the environment.
-    examples/http/*|examples/uhttp/*)
+    # Reach the real network or a Docker socket; output depends on the
+    # environment. http/local and uhttp/local drive the same request path
+    # against a stand-in for curl, so they run.
+    examples/http/basic/*|examples/uhttp/basic/*|examples/uhttp/stream/*)
       echo "needs the network" ;;
     # Fixtures that document rejected programs. `jade check` in CI asserts they fail.
     *_error.jde)

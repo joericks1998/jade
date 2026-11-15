@@ -1,0 +1,205 @@
+// std::fs at its edges: every failure's message, word for word, and what is
+// trusted. 2.0.8 moved std::fs from the backend into Jade source
+// (compiler/src/lib/fs.jde), with the C library calls behind hooks, and every
+// line here is what the backend's version printed.
+//
+// Only errors whose text is the same on macOS and Linux are printed: a missing
+// file, a directory read as a file, a path through a file, and a file where a
+// directory should be.
+
+use std::bytes
+use std::fs
+use std::sh
+
+let dir = "/tmp/jade_fs_edges"
+sh.run("rm -rf /tmp/jade_fs_edges")
+
+// ── mkdir ────────────────────────────────────────────────────────────────────
+
+// Parents are made too, and a directory that is already there is fine, with
+// or without a trailing slash.
+fs.mkdir(dir + "/a/b/c")
+fs.mkdir(dir + "/a/b/c")
+fs.mkdir(dir + "/a/b/c/")
+print(fs.is_dir(dir + "/a/b/c"))
+
+// A file where the directory should be is an error, and so is a path that
+// runs through a file.
+fs.write(dir + "/file", "echo from a file")
+try {
+    fs.mkdir(dir + "/file")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.mkdir(dir + "/file/sub")
+} catch e {
+    print(e.message)
+}
+
+// ── Reading ──────────────────────────────────────────────────────────────────
+
+try {
+    fs.read(dir + "/missing.txt")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.read(dir)
+} catch e {
+    print(e.message)
+}
+try {
+    fs.read_bytes(dir + "/missing.bin")
+} catch e {
+    print(e.message)
+}
+
+// Bytes that are not UTF-8 read as bytes, and refuse to read as text.
+fs.write_bytes(dir + "/bad.txt", bytes.from_ints([104, 105, 255]))
+print(len(fs.read_bytes(dir + "/bad.txt")))
+try {
+    fs.read(dir + "/bad.txt")
+} catch e {
+    print(e.message)
+}
+
+// An empty file reads as empty, either way.
+fs.write(dir + "/empty", "")
+print(len(fs.read(dir + "/empty")))
+print(len(fs.read_bytes(dir + "/empty")))
+
+// A file larger than one read of the C library's comes back whole.
+fs.write(dir + "/big", "0123456789".repeat(20000))
+print(len(fs.read(dir + "/big")))
+
+// ── Writing ──────────────────────────────────────────────────────────────────
+
+try {
+    fs.write(dir + "/nope/x.txt", "x")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.append(dir + "/nope/x.txt", "x")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.write_bytes(dir + "/nope/x.bin", "x".encode())
+} catch e {
+    print(e.message)
+}
+try {
+    fs.append_bytes(dir + "/nope/x.bin", "x".encode())
+} catch e {
+    print(e.message)
+}
+
+// Appending to a file that is not there makes it.
+fs.append(dir + "/new.txt", "one")
+fs.append(dir + "/new.txt", " two")
+print(fs.read(dir + "/new.txt"))
+
+// ── Everything else ──────────────────────────────────────────────────────────
+
+try {
+    fs.delete(dir + "/missing")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.rmdir(dir + "/missing")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.rmdir(dir + "/file")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.rename(dir + "/missing", dir + "/other")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.copy(dir + "/missing", dir + "/other")
+} catch e {
+    print(e.message)
+}
+// A destination that cannot be opened names the source, as v1 did.
+try {
+    fs.copy(dir + "/file", dir + "/nope/other")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.size(dir + "/missing")
+} catch e {
+    print(e.message)
+}
+try {
+    fs.list_dir(dir + "/missing")
+} catch e {
+    print(e.message)
+}
+
+// A copy larger than one chunk is whole, and a rename moves it.
+fs.copy(dir + "/big", dir + "/big2")
+print(fs.size(dir + "/big2"))
+fs.rename(dir + "/big2", dir + "/a/big3")
+print(fs.exists(dir + "/big2"))
+print(fs.size(dir + "/a/big3"))
+
+// The three questions never raise.
+for p in [dir, dir + "/file", dir + "/missing", dir + "/file/sub"] {
+    print(f"{fs.exists(p)} {fs.is_file(p)} {fs.is_dir(p)}")
+}
+
+// Entry names, without . and .., in an order that depends on the file
+// system, so sorted here.
+let names = fs.list_dir(dir)
+names.sort()
+print(names)
+print(fs.list_dir(dir + "/a/b/c"))
+
+// ── Trust ────────────────────────────────────────────────────────────────────
+
+// What a file holds is tainted, unless the call says it is trusted.
+try {
+    sh.exec(fs.read(dir + "/file"))
+    print("NOT REFUSED")
+} catch e {
+    print("a file's text is refused")
+}
+try {
+    sh.exec(fs.read_bytes(dir + "/file").decode())
+    print("NOT REFUSED")
+} catch e {
+    print("a file's bytes are refused")
+}
+print(sh.exec(fs.read(dir + "/file", trust = true)))
+print(sh.exec(fs.read_bytes(dir + "/file", trust = true).decode()))
+
+// A tainted path is refused for reading, unless the call says the same.
+let tainted = sh.exec("echo /tmp/jade_fs_edges/file")
+try {
+    fs.read(tainted)
+} catch e {
+    print(e.message)
+}
+try {
+    fs.read_bytes(tainted)
+} catch e {
+    print(e.message)
+}
+print(fs.read(tainted, trust = true))
+print(len(fs.read_bytes(tainted, trust = true)))
+print(fs.exists(tainted))
+
+// Entry names are the program's own.
+print(sh.exec("echo " + fs.list_dir(dir + "/a/b")[0]))
+
+sh.run("rm -rf /tmp/jade_fs_edges")
+print(fs.exists(dir))

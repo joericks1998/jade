@@ -205,11 +205,51 @@ as instructions for building a loop.
   reader for each value type, and calls that are one instruction, such as `math.sqrt`.
   Bytes stays because it is a core value type, like a string.
 
+### What was built
+
+The plan held, with these decisions made while building it:
+
+- *`math` moved whole.* Every `math` function is Jade, including `sqrt`, `floor` and the
+  trigonometry. The ones with an LLVM instruction call a hook that is that instruction,
+  and LLVM inlines the one-line Jade wrapper at `-O2`, so `math.sqrt(x)` still compiles
+  to one `sqrt`.
+- *Hooks have one source of type.* `SysFn` in `mir/mod.rs` names each hook and gives its
+  parameter and result types; the checker, MIR and `backend/sys.rs`, `sys_fs.rs`,
+  `sys_proc.rs` and `sys_rand.rs` all read it. A failing hook stores the C error code in
+  a slot only hooks write, and Jade reads it with `__sys.os_error()`, so an allocation
+  between the call and the check cannot overwrite it.
+- *Type tests in library code.* Inside library code, `x is int` and the like are answered
+  for each instance, so one function can accept a `str` or a `str?` and say which it
+  got. User code still has no such test on a static type.
+- *Errors name the library function.* A type error inside library code is reported at
+  the user's first call into it, as `in fs.read(int, bool): str() needs a str, got int`.
+  Calls into library code do not count toward the recursion limit.
+- *What stayed in Rust:* every system call, every trust check and taint mark, the random
+  generator's state, lock and unbiased draw, `copy_file` as one hook to keep v1's error
+  timing, and `keys_in_order`, since a `for` over a dict sorts its keys and curl's
+  headers keep their insertion order.
+- *Library modules can call each other's `_` functions,* so `uhttp` goes through
+  `http._fetch` and both return the same classes. User code cannot call them.
+- *`time.local` is two hooks,* one for the offset and one for the zone's name, since a
+  hook returns one value. They can only disagree when another task changes `TZ` between
+  them, and `env.set` already races there.
+
 ### What changes for programs
 
-Nothing visible. Builds compile the library source each time, which costs little: with
-a debug build of the compiler, a program that uses JSON builds in 0.11 seconds today,
-with 59 of its 60 functions coming from the library.
+Almost nothing at run time: every run-time message is byte-identical, and seeded
+`random` sequences are bit-identical. The changes:
+
+- Compile errors for misusing a library function use the wording above.
+- Some calls now compile that did not: `math.pi` as a value, `from std::math use floor`,
+  `random.choice("abc")`, `random.shuffle` on bytes, `fs.read(p, true)` with `trust`
+  passed by position, and `print` as a `uhttp.stream` handler.
+- A task that calls `random.shuffle` on a global array is refused at compile time,
+  because the task check now reads library code. It was a silent data race before.
+- A `uhttp.stream` handler typed `bool?` now stops on `false`, as documented.
+- Builds are slower. With a debug build of the compiler, `path/components` went from
+  112 to 194 ms and `fs/basic` from 73 to 101 ms. The front end adds 4 to 6 ms of that;
+  the rest is LLVM compiling the library functions a program uses, with the reference
+  counting and error checks the hand-written code skipped. Part 4 removes that cost.
 
 ## Part 4: the cached, precompiled library (2.0.9)
 

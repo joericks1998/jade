@@ -116,6 +116,10 @@ pub struct Names {
     /// last, so a default that builds its own class is refused rather than
     /// filled forever.
     filling: Vec<String>,
+    /// Whether this file is a std package written in Jade, `src/lib/`, which
+    /// may name the hook package `__sys` and test a value's built-in type
+    /// with `x is int`. A program's own files may not.
+    library: bool,
 }
 
 impl Default for Names {
@@ -140,6 +144,7 @@ impl Names {
             imported_packages: HashSet::new(),
             next_pipe: 0,
             filling: Vec::new(),
+            library: false,
         };
         builtins::register_core_names(&mut names);
         names
@@ -249,7 +254,24 @@ fn is_grammar_new(callee: &Expr) -> bool {
 ///
 /// Outputs: the rewritten file, which holds no `RawPipe`, or the first error.
 pub fn resolve(program: Program) -> Result<Program> {
+    resolve_with(program, Names::new())
+}
+
+/// Purpose: This function runs the per-file pass over a std package written
+/// in Jade, which may name `__sys` and test a value's built-in type.
+///
+/// Inputs:
+/// - `program`: the module as the parser built it.
+///
+/// Outputs: the rewritten module, or the first error.
+pub fn resolve_library(program: Program) -> Result<Program> {
     let mut ctx = Names::new();
+    ctx.library = true;
+    resolve_with(program, ctx)
+}
+
+/// Purpose: This function runs the per-file pass with a name table to start from.
+fn resolve_with(program: Program, mut ctx: Names) -> Result<Program> {
     pre_pass(&program.stmts, &mut ctx);
     resolve_inheritance(&mut ctx)?;
     let stmts = resolve_stmts(program.stmts, &mut ctx)?;
@@ -859,7 +881,31 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut Names) {
 /// `[lib]` or a dependency — contributes top-level names that only exist once
 /// the importer merges the modules, well after this runs.
 fn import_is_opaque(path: &str) -> bool {
-    builtins::find_package(path).is_none()
+    !builtins::is_std_package(path) && path != SYS_PATH
+}
+
+/// The path a library module's `use std::__sys` names.
+const SYS_PATH: &str = "std/__sys";
+
+/// Purpose: This function refuses a program's `use` of the hook package,
+/// which only the std library written in Jade may name. The program is told
+/// the name is undefined, as it is told for `__infer`.
+///
+/// Inputs:
+/// - `path`: the path the `use` names.
+/// - `span`: where the `use` is.
+/// - `ctx`: the name table, which says whether this file is library code.
+///
+/// Outputs: `Ok(true)` when the `use` names the hook package in library
+/// code, `Ok(false)` for any other path, or the error.
+fn sys_use(path: &str, span: Span, ctx: &Names) -> Result<bool> {
+    if path != SYS_PATH {
+        return Ok(false);
+    }
+    if !ctx.library {
+        return Err(JadeError::UndefinedVariable { name: crate::stdlib::SYS.to_string(), span });
+    }
+    Ok(true)
 }
 
 /// Purpose: This function refuses a `use` of a std package that was removed,
@@ -1058,10 +1104,12 @@ fn resolve_stmt(stmt: Stmt, ctx: &mut Names) -> Result<Stmt> {
             if let Some(e) = removed_package(&path, span) {
                 return Err(e);
             }
-            if let Some(pkg) = builtins::find_package(&path) {
+            if sys_use(&path, span, ctx)? {
+                ctx.define(crate::stdlib::SYS.to_string(), NameKind::Package);
+            } else if let Some(name) = builtins::std_global_name(&path) {
                 // After `define`, which would otherwise clear the association.
-                ctx.define(pkg.global_name.to_string(), NameKind::Package);
-                ctx.imported_packages.insert(pkg.global_name.to_string());
+                ctx.define(name.to_string(), NameKind::Package);
+                ctx.imported_packages.insert(name.to_string());
             }
             Stmt::Use { path, as_name: None, path_is_string: false, span }
         }
@@ -1074,8 +1122,10 @@ fn resolve_stmt(stmt: Stmt, ctx: &mut Names) -> Result<Stmt> {
             if let Some(e) = removed_package(&path, span) {
                 return Err(e);
             }
-            if let Some(pkg) = builtins::find_package(&path) {
-                ctx.define(pkg.global_name.to_string(), NameKind::Package);
+            if sys_use(&path, span, ctx)? {
+                ctx.define(crate::stdlib::SYS.to_string(), NameKind::Package);
+            } else if let Some(name) = builtins::std_global_name(&path) {
+                ctx.define(name.to_string(), NameKind::Package);
             }
             Stmt::FromUse { path, names, path_is_string: false, span }
         }
@@ -1176,7 +1226,14 @@ fn resolve_expr(expr: Expr, ctx: &mut Names) -> Result<Expr> {
         // Whether the class is related to the value's is the whole-program
         // checker's question; a class this file does not know may be imported.
         ExprKind::Is { value, class } => {
-            if !class.contains('.') && !ctx.struct_defs.contains_key(&class) && !ctx.opaque_imports
+            // Library code may test a built-in type: `x is int`.
+            let builtin = ctx.library
+                && crate::typechecker::infer::builtin_test_type(&class).is_some()
+                && !ctx.struct_defs.contains_key(&class);
+            if !builtin
+                && !class.contains('.')
+                && !ctx.struct_defs.contains_key(&class)
+                && !ctx.opaque_imports
             {
                 return Err(JadeError::UndefinedType { name: class, span });
             }
@@ -1240,18 +1297,16 @@ fn resolve_expr(expr: Expr, ctx: &mut Names) -> Result<Expr> {
         // ── Field access ──────────────────────────────────────────────────────
         ExprKind::FieldAccess { object, field } => {
             // `math.round` — a std package's contents are fixed and known now,
-            // so a name it does not have is settled here.
+            // so a name it does not have is settled here. Library code may
+            // also reach another library module's private functions, such as
+            // `http._fetch`; the import pass checks those.
             if let ExprKind::Identifier(name) = &object.kind
                 && ctx.imported_packages.contains(name)
-                && let Some(pkg) = builtins::package_by_global_name(name)
-                && !pkg.has_fn(&field)
+                && let Some((package, available)) = builtins::std_functions(name)
+                && !available.contains(&field)
+                && !(ctx.library && field.starts_with('_'))
             {
-                return Err(JadeError::UnknownPackageFn {
-                    package: pkg.import_name.replace('/', "::"),
-                    name: field,
-                    available: pkg.fns.iter().map(|f| f.to_string()).collect(),
-                    span,
-                });
+                return Err(JadeError::UnknownPackageFn { package, name: field, available, span });
             }
             ExprKind::FieldAccess { object: boxed(*object, ctx)?, field }
         }

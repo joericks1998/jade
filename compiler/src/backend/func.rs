@@ -18,8 +18,8 @@ use inkwell::{FloatPredicate, IntPredicate};
 use super::layout::{self, ARR_DATA, LEN, TYPE_ID};
 use super::{Cx, F, tasks};
 use crate::mir::{
-    ArithOp, BinOp, BitOp, CmpOp, Const, EnvFn, Func, NumTy, Op, Operand, PathFn, Place, Program,
-    RandomFn, Rvalue, Stmt, StrMethod, Term, Ty, UnOp, is_heap,
+    ArithOp, BinOp, BitOp, CmpOp, Const, Func, NumTy, Op, Operand, Place, Program, Rvalue, Stmt,
+    StrMethod, Term, Ty, UnOp, is_heap,
 };
 
 /// Purpose: This struct holds what every function's lowering needs from the
@@ -68,6 +68,14 @@ pub fn lower<'a, 'ctx>(
         }
         slots.push(p);
     }
+    let blocks: Vec<BasicBlock> = func.blocks.iter().map(|_| f.block()).collect();
+    // A library function's call does not count, as a built-in's never did.
+    if func.library {
+        f.br(blocks[0]);
+        let lw = Lw { f, env, func, slots, blocks };
+        lw.lower_blocks();
+        return;
+    }
     // Count the call against the recursion limit, raising past it as v1 did.
     // The top level is not a call, so it does not count.
     let d = cx.depth_slot();
@@ -75,7 +83,6 @@ pub fn lower<'a, 'ctx>(
     let depth = f.add(f.load_i64(d), f.i64(counts));
     f.store(d, depth);
     let too_deep = f.sgt(depth, f.i64(super::errors::RECURSION_LIMIT));
-    let blocks: Vec<BasicBlock> = func.blocks.iter().map(|_| f.block()).collect();
     let refuse = f.block();
     f.cond_br(too_deep, refuse, blocks[0]);
     f.position(refuse);
@@ -89,22 +96,27 @@ pub fn lower<'a, 'ctx>(
     f.store(d, f.sub(f.load_i64(d), f.i64(1)));
     f.ret(layout::zero(cx.llty(&func.ret)));
     let lw = Lw { f, env, func, slots, blocks };
-    for (i, b) in func.blocks.iter().enumerate() {
-        lw.f.position(lw.blocks[i]);
-        for s in &b.stmts {
-            lw.stmt(s);
-            if lw.f.terminated() {
-                let dead = lw.f.block();
-                lw.f.position(dead);
-            }
-        }
-        lw.term(&b.term);
-    }
+    lw.lower_blocks();
 }
 
 impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
     fn cx(&self) -> &'b Cx<'ctx> {
         self.f.cx
+    }
+
+    /// Purpose: This function lowers each of the function's blocks in turn.
+    fn lower_blocks(&self) {
+        for (i, b) in self.func.blocks.iter().enumerate() {
+            self.f.position(self.blocks[i]);
+            for s in &b.stmts {
+                self.stmt(s);
+                if self.f.terminated() {
+                    let dead = self.f.block();
+                    self.f.position(dead);
+                }
+            }
+            self.term(&b.term);
+        }
     }
 
     // ── places and operands ──────────────────────────────────────────────
@@ -360,6 +372,9 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 let old = f.load(self.cx().llty(&l.ty), self.slots[i]);
                 f.release(&l.ty, old);
             }
+        }
+        if self.func.library {
+            return;
         }
         let d = self.cx().depth_slot();
         let counts = if self.func.name == "main" { 0 } else { 1 };
@@ -820,23 +835,6 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Op::Cancelled => (f.cancelled().into(), Ty::Bool),
             Op::MaxTasks => (f.max_tasks().into(), Ty::Int),
             Op::SetMaxTasks => (f.set_max_tasks(arg(0).into_int_value()).into(), Ty::Int),
-            Op::After => (f.callv(cx.after_fn(), &[arg(0)]), Ty::Future(Box::new(Ty::Nil))),
-            Op::Sleep => {
-                f.call(cx.sleep_fn(), &[arg(0)]);
-                (self.nil(), Ty::Nil)
-            }
-            Op::Now => (f.clock(false, 1).into(), Ty::Int),
-            Op::NowMs => (f.clock(false, 1000).into(), Ty::Int),
-            Op::Monotonic => (f.monotonic().into(), Ty::Float),
-            Op::TimeUtc => (f.callv(cx.time_utc_fn(), &[arg(0)]), Ty::Str),
-            Op::TimeLocal => (f.callv(cx.time_local_fn(), &[arg(0)]), Ty::Str),
-            Op::TimeParts => {
-                (f.callv(cx.time_parts_fn(), &[arg(0)]), Ty::Struct("TimeParts".into()))
-            }
-            Op::TimeStamp => {
-                let vals: Vec<BasicValueEnum> = (0..6).map(arg).collect();
-                (f.callv(cx.time_stamp_fn(), &vals), Ty::Int)
-            }
             Op::BytesGet => (f.callv(cx.bytes_get_fn(), &[arg(0), arg(1)]), Ty::Int),
             Op::BytesSet => {
                 f.call(cx.bytes_set_fn(), &[arg(0), arg(1), arg(2)]);
@@ -851,64 +849,11 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Op::BytesZeros => (f.callv(cx.bytes_zeros_fn(), &[arg(0)]), Ty::Bytes),
             Op::BytesFromInts => (f.callv(cx.bytes_from_ints_fn(), &[arg(0)]), Ty::Bytes),
             Op::BytesConcat => (f.callv(cx.bytes_concat_fn(), &[arg(0), arg(1)]), Ty::Bytes),
-            Op::Fs(m) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                let r = f.call(cx.fs_fn(*m), &vals).unwrap_or_else(|| self.nil());
-                (r, m.result())
-            }
-            Op::Sh(m) => (f.callv(cx.sh_fn(*m), &[arg(0)]), m.result()),
-            Op::Env(m) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                let r = f.call(cx.env_fn(*m), &vals).unwrap_or_else(|| self.nil());
-                let t = match m {
-                    EnvFn::Get => Ty::opt(Ty::Str),
-                    EnvFn::Set => Ty::Nil,
-                    EnvFn::Args => Ty::Array(Box::new(Ty::Str)),
-                    EnvFn::Cwd => Ty::Str,
-                };
-                (r, t)
-            }
-            Op::Path(m) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                let t = match m {
-                    PathFn::Ext => Ty::opt(Ty::Str),
-                    PathFn::IsAbs => Ty::Bool,
-                    _ => Ty::Str,
-                };
-                (f.callv(cx.path_fn(*m), &vals), t)
-            }
-            Op::Random(RandomFn::Shuffle) => {
-                let el = match self.op_ty(&args[0]) {
-                    Ty::Array(el) => *el,
-                    _ => Ty::Int,
-                };
-                let size = f.size_of(cx.llty(&el));
-                f.call(cx.random_fn(RandomFn::Shuffle), &[arg(0), size.into()]);
-                (self.nil(), Ty::Nil)
-            }
-            Op::Random(m) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                let r = f.call(cx.random_fn(*m), &vals).unwrap_or_else(|| self.nil());
-                let t = match m {
-                    RandomFn::Float => Ty::Float,
-                    RandomFn::Seed | RandomFn::Shuffle => Ty::Nil,
-                    _ => Ty::Int,
-                };
-                (r, t)
-            }
             Op::Infer(m) => {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
                 cx.infer_op(f, *m, &vals)
             }
             Op::ToDict(t) => (f.callv(cx.todict_fn(t), &[arg(0)]), t.clone()),
-            Op::Http(m, unix) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                (f.callv(cx.http_fn(*m, *unix), &vals), m.result())
-            }
-            Op::UhttpStream(t) => {
-                f.call(cx.uhttp_stream_fn(t), &[arg(0), arg(1), arg(2)]);
-                (self.nil(), Ty::Nil)
-            }
             Op::Native(c) => {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
                 (f.callv(cx.native_call_fn(c), &vals), c.ret.clone())
@@ -925,9 +870,9 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 f.store(f.at_c(a, LEN), n);
                 (a.into(), Ty::Array(Box::new(Ty::Int)))
             }
-            Op::Math(m) => {
+            Op::Sys(h) => {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                f.math(*m, &vals)
+                cx.sys_op(f, *h, &vals)
             }
         }
     }

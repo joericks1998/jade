@@ -42,25 +42,22 @@
 mod bytes;
 mod collections;
 mod compare;
-mod env;
 mod errors;
 mod fb;
 mod format;
-mod fs;
 mod func;
-mod http;
 mod infer;
 mod layout;
 mod link;
-mod math;
 mod native;
-mod random;
 mod rc;
-mod sh;
 mod sized;
+mod sys;
+mod sys_fs;
+mod sys_proc;
+mod sys_rand;
 mod tasks;
 mod text;
-mod time;
 mod todict;
 mod unicode;
 
@@ -445,8 +442,8 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
         cx.module.set_inline_assembly(start);
     }
     let f = F::new(cx, main);
-    // `env.args()` reads the arguments from where `main` leaves them.
-    if cx.module.get_function("jade.env.args").is_some() {
+    // `env.args()`'s hook reads the arguments from where `main` leaves them.
+    if cx.module.get_function("jade.sys.args").is_some() {
         let (argc, argv) = cx.args_globals();
         f.store(argc, f.sext(f.param_int(0), cx.i64t()));
         f.store(argv, f.param_ptr(1));

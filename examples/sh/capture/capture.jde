@@ -1,0 +1,99 @@
+// std::sh at its edges: what exec trims, what each function gives back, and
+// the exact text of every failure. 2.0.8 moved std::sh from the backend into
+// Jade source (compiler/src/lib/sh.jde), with starting the shell, reading its
+// output and the trust check behind hooks, and every line here is what the
+// backend's version printed.
+
+use std::sh
+
+// ── exec ─────────────────────────────────────────────────────────────────────
+
+// exec drops trailing newlines, and only those: not a carriage return, not
+// spaces, and not a newline in the middle.
+print(sh.exec("printf 'a\\n\\n\\n'"))
+print(sh.exec("printf 'a\\n b \\n'"))
+print(len(sh.exec("printf 'x\\r\\n'")))
+print(len(sh.exec("printf '  lead'")))
+print(len(sh.exec("printf ''")))
+print(len(sh.exec("printf '\\n\\n'")))
+
+// Output that is not UTF-8 has each bad sequence replaced.
+print(sh.exec("printf 'a\\377b'"))
+print(sh.exec("printf 'a\\342\\202'"))
+
+// A command that fails raises, with its standard error in the message, white
+// space trimmed from both ends, Unicode's included.
+try {
+    sh.exec("echo '  oops  ' >&2; exit 3")
+} catch e {
+    print(e.message)
+}
+try {
+    sh.exec("printf '\\342\\200\\203spaced\\342\\200\\203\\n' >&2; exit 1")
+} catch e {
+    print(e.message)
+}
+try {
+    sh.exec("exit 4")
+} catch e {
+    print(e.message)
+}
+// A command a signal stopped has no exit code, which reads as -1.
+try {
+    sh.exec("kill -9 $$")
+} catch e {
+    print(e.message)
+}
+
+// ── run and output ───────────────────────────────────────────────────────────
+
+print(sh.run("exit 7"))
+print(sh.run("true"))
+print(sh.run("kill -9 $$"))
+
+let o = sh.output("echo out; echo err >&2; exit 2")
+print(o.stdout)
+print(o.stderr)
+print(o.code)
+print(o["code"] == o.code)
+print(sh.output("kill -9 $$").code)
+
+// A command that fills both pipes at once does not stall.
+let fill = "i=0; while [ $i -lt 3000 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; "
+let big = sh.output(fill + "echo yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy >&2; i=$((i+1)); done")
+print(len(big.stdout))
+print(len(big.stderr))
+
+// ── Trust ────────────────────────────────────────────────────────────────────
+
+// The refusal names the function a tainted command reached.
+let tainted = sh.exec("echo echo hi")
+try {
+    sh.exec(tainted)
+} catch e {
+    print(e.message)
+}
+try {
+    sh.run(tainted)
+} catch e {
+    print(e.message)
+}
+try {
+    sh.output(tainted)
+} catch e {
+    print(e.message)
+}
+
+// What output gives back is tainted, standard error included.
+try {
+    sh.exec(sh.output("echo echo hi").stdout.trim())
+    print("NOT REFUSED")
+} catch e {
+    print("stdout is refused")
+}
+try {
+    sh.exec(sh.output("echo echo hi >&2").stderr.trim())
+    print("NOT REFUSED")
+} catch e {
+    print("stderr is refused")
+}

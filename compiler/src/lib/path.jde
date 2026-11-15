@@ -1,0 +1,137 @@
+// std::path: paths as text, following Rust's std::path::Path on Unix, as v1
+// did.
+//
+// A path's components are what lies between slashes, where repeated slashes
+// count as one, a trailing slash adds nothing, and a `.` component is dropped
+// everywhere but at the start.
+//
+// Every result carries the trust of the paths it came from. A slice of a
+// string keeps its trust and a concatenation takes the most tainted of its
+// parts, so most of that is free; where a result keeps none of a path's text,
+// such as an absolute `b` replacing `a` in `join`, an empty slice of the path
+// is added to carry its trust. A literal such as "." is trusted.
+//
+// Only `abs` asks the system anything, for the working directory.
+
+use std::__sys
+
+// Purpose: This function joins two paths: `b` after `a`, with one slash
+// between them, unless `b` is absolute, which replaces `a`. A call with more
+// paths folds left, so `join(a, b, c)` is `join(join(a, b), c)`.
+fn join(a, b) {
+    let head = _text(a)
+    let tail = _text(b)
+    if tail.starts_with("/") {
+        return head.slice(0, 0) + tail
+    }
+    if head == "" or head.ends_with("/") {
+        return head + tail
+    }
+    return head + "/" + tail
+}
+
+// Purpose: This function returns a path's last component, or "" when it
+// ends in the root, `.` or `..`, or is empty.
+fn basename(p) {
+    return _name(_text(p))
+}
+
+// Purpose: This function returns everything before a path's last component,
+// or "." when nothing is.
+fn dirname(p) {
+    let s = _trim(_text(p))
+    if s == "" or s == "/" {
+        return "."
+    }
+    let parent = _trim(s.slice(0, s.last_index_of("/") + 1))
+    if parent == "" {
+        return "."
+    }
+    return parent
+}
+
+// Purpose: This function returns the last component's extension, with its
+// dot, or nil when it has none. A dot that starts the name, as in
+// `.hidden`, is not one.
+fn ext(p) {
+    let name = _name(_text(p))
+    let dot = name.last_index_of(".")
+    if dot <= 0 {
+        return nil
+    }
+    return name.slice(dot, len(name))
+}
+
+// Purpose: This function returns the last component without its extension.
+fn stem(p) {
+    let name = _name(_text(p))
+    let dot = name.last_index_of(".")
+    if dot <= 0 {
+        return name
+    }
+    return name.slice(0, dot)
+}
+
+// Purpose: This function makes a path absolute against the working
+// directory, dropping empty and `.` components, without resolving links or
+// `..`. An empty path stays empty.
+fn abs(p) {
+    let s = _text(p)
+    if s == "" {
+        return s
+    }
+    let out = s.slice(0, 0)
+    if not s.starts_with("/") {
+        out = out + __sys.cwd()
+    }
+    for part in s.split("/") {
+        if part != "" and part != "." {
+            out = out + "/" + part
+        }
+    }
+    if out == "" or s.ends_with("/") {
+        out = out + "/"
+    }
+    return out
+}
+
+// Purpose: This function says whether a path starts at the root.
+fn is_abs(p) {
+    return _text(p).starts_with("/")
+}
+
+// Purpose: This function checks that a path is a str. A `str?` holding one
+// is read as one, as it always was; a nil raises, and anything else is a
+// type error.
+fn _text(p) {
+    if p is str {
+        return p
+    } elif p is nil {
+        // A `str?` that holds nil here. The raise leaves; the return after it
+        // gives the branch a str's type, as the others have.
+        raise "a path is nil; check a value that may be nil with 'if p != nil' before using it as a path"
+        return ""
+    } else {
+        return str(p)
+    }
+}
+
+// Purpose: This function drops a path's trailing slashes and trailing `.`
+// components, keeping a lone leading slash and a leading `.`.
+fn _trim(s) {
+    while len(s) > 1 and (s.ends_with("/") or s.ends_with("/.")) {
+        s = s.slice(0, len(s) - 1)
+    }
+    return s
+}
+
+// Purpose: This function returns a path's last component when it is a name,
+// and "" when the path is empty or ends in the root, `.` or `..`.
+fn _name(p) {
+    let s = _trim(p)
+    let name = s.slice(s.last_index_of("/") + 1, len(s))
+    if name == "" or name == "." or name == ".." {
+        return ""
+    }
+    return name
+}
