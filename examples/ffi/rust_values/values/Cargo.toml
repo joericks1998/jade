@@ -1,0 +1,11 @@
+# The Rust package examples/ffi/rust_values calls: one exported function for each kind
+# of value that crosses between Rust and Jade.
+[package]
+name = "values"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Outside this repo, a package names jade-rs by git at the compiler's tag.
+jade-rs = { path = "../../../../jade-rs" }
