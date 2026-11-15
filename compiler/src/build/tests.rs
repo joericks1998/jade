@@ -51,7 +51,7 @@ impl Drop for Source {
 #[test]
 fn building_ir_does_not_write_an_output_file() {
     let src = Source::new("ir", "fn f() { return 1 }\n");
-    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Ir)
+    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Ir, None)
         .expect("IR emission should succeed");
 
     assert!(!src.out().exists(), "emitting IR must not produce an artifact");
@@ -60,7 +60,8 @@ fn building_ir_does_not_write_an_output_file() {
 #[test]
 fn building_a_binary_writes_an_artifact() {
     let src = Source::new("bin", "fn f() { return 1 }\n");
-    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Binary)
+    let cache = src.dir.join("lib");
+    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Binary, Some(&cache))
         .expect("binary build should succeed");
 
     assert!(src.out().exists(), "no binary produced at {}", src.out().display());
@@ -74,6 +75,7 @@ fn a_missing_source_file_is_an_error() {
         Path::new("/nonexistent/nope.jde"),
         Path::new("/tmp/jade_build_never"),
         Emit::Ir,
+        None,
     );
     assert!(result.is_err(), "expected an error for a missing source file");
 }

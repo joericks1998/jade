@@ -112,6 +112,7 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: the named LLVM struct type, made the first time.
     pub fn struct_ty(&self, name: &str) -> StructType<'ctx> {
+        self.mark_program_dependent();
         if let Some(t) = self.struct_tys.borrow().get(name) {
             return *t;
         }
@@ -129,6 +130,7 @@ impl<'ctx> Cx<'ctx> {
 
     /// Purpose: This function returns a struct's fields with their types.
     pub fn struct_fields(&self, name: &str) -> Vec<Ty> {
+        self.mark_program_dependent();
         self.structs
             .iter()
             .find(|s| s.name == name)

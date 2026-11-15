@@ -26,8 +26,27 @@ use crate::mir::{
 /// whole program.
 pub struct Env<'a, 'ctx> {
     pub prog: &'a Program,
-    pub funcs: &'a [FunctionValue<'ctx>],
+    /// Each function's LLVM function, by id. A library instance's module
+    /// declares only the functions it calls; the rest are `None`.
+    pub funcs: &'a [Option<FunctionValue<'ctx>>],
     pub globals: &'a [GlobalValue<'ctx>],
+}
+
+impl<'ctx> Env<'_, 'ctx> {
+    /// Purpose: This function returns a function's LLVM function.
+    ///
+    /// Inputs:
+    /// - `id`: the function.
+    ///
+    /// Outputs: the function. Every module declares each function it calls
+    /// before lowering any body, so a missing one is a bug in this backend.
+    fn func(&self, id: crate::mir::FuncId) -> FunctionValue<'ctx> {
+        self.funcs
+            .get(id.0 as usize)
+            .copied()
+            .flatten()
+            .expect("the static backend declares every function a module calls")
+    }
 }
 
 /// Purpose: This struct holds the state of lowering one function.
@@ -414,7 +433,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             }
             Rvalue::Call(id, args) => {
                 let vals: Vec<BasicValueEnum> = args.iter().map(|a| self.operand(a)).collect();
-                let callee = self.env.funcs[id.0 as usize];
+                let callee = self.env.func(*id);
                 let ret = self.env.prog.funcs[id.0 as usize].ret.clone();
                 (f.callv(callee, &vals), ret)
             }
@@ -434,6 +453,15 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 let pairs: Vec<(BasicValueEnum, BasicValueEnum)> =
                     entries.iter().map(|(k, v)| (self.consume(k), self.consume(v))).collect();
                 (f.dict_literal(t, &pairs).into(), Ty::Map(Box::new(t.clone())))
+            }
+            // A library object cannot know `RuntimeError`'s type id, so it
+            // asks the program to build one; see `shared.rs`.
+            Rvalue::Struct(name, fields)
+                if cx.is_library() && name == "RuntimeError" && fields.len() == 1 =>
+            {
+                let msg = self.consume(&fields[0]);
+                let p = f.call_ptr(cx.new_error_fn(), &[msg]);
+                (p.into(), Ty::Struct(name.clone()))
             }
             Rvalue::Struct(name, fields) => {
                 let st = cx.struct_ty(name);
@@ -467,7 +495,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 (f.is_nil(&t, self.operand(op)).into(), Ty::Bool)
             }
             Rvalue::Spawn(id, args) => {
-                let target = self.env.funcs[id.0 as usize];
+                let target = self.env.func(*id);
                 let mf = &self.env.prog.funcs[id.0 as usize];
                 let params: Vec<Ty> =
                     mf.locals[..mf.params as usize].iter().map(|l| l.ty.clone()).collect();
@@ -483,7 +511,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 (job.into(), Ty::Future(Box::new(mf.ret.clone())))
             }
             Rvalue::FnAddr(id) => {
-                (self.env.funcs[id.0 as usize].as_global_value().as_pointer_value().into(), Ty::Nil)
+                (self.env.func(*id).as_global_value().as_pointer_value().into(), Ty::Nil)
             }
             Rvalue::CallIndirect(c, args) => {
                 let Ty::Fn(ft) = self.op_ty(c) else {

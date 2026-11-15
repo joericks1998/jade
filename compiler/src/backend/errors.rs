@@ -15,10 +15,10 @@
 //! An error nothing catches reaches the top of the program, which reports it
 //! the way v1 did, `jade: <message>`, and exits with status 1.
 
-use inkwell::module::Linkage;
 use inkwell::values::{FunctionValue, GlobalValue, IntValue, PointerValue};
 
 use super::layout::{self, TYPE_ID};
+use super::shared::{SharedFn, Slot, State};
 use super::{Cx, F};
 use crate::mir::Ty;
 
@@ -30,7 +30,8 @@ pub const RECURSION_LIMIT: i64 = 10_000;
 pub const IO_ERROR: &str = "I/O error: ";
 
 impl<'ctx> Cx<'ctx> {
-    /// Purpose: This function returns a thread-local global, made the first time.
+    /// Purpose: This function returns a thread-local global, made the first
+    /// time through [`Cx::state`], so it is defined once, in the program.
     ///
     /// Inputs:
     /// - `name`: the global's name.
@@ -38,21 +39,7 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: the global.
     pub(super) fn thread_global(&self, name: &str, ptr: bool) -> GlobalValue<'ctx> {
-        if let Some(g) = self.module.get_global(name) {
-            return g;
-        }
-        let g = if ptr {
-            let g = self.module.add_global(self.ptrt(), None, name);
-            g.set_initializer(&self.ptrt().const_null());
-            g
-        } else {
-            let g = self.module.add_global(self.i64t(), None, name);
-            g.set_initializer(&self.i64t().const_zero());
-            g
-        };
-        g.set_thread_local(true);
-        g.set_linkage(Linkage::Internal);
-        g
+        self.state(name, State::thread(if ptr { Slot::Ptr } else { Slot::Word(0) }))
     }
 
     /// Purpose: This function returns the thread's error slot.
@@ -68,7 +55,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.set_err(e)`, which raises a class
     /// value it takes the reference of, replacing any error already there.
     pub fn set_err_fn(&self) -> FunctionValue<'ctx> {
-        self.support("jade.set_err", None, &[self.ptrt().into()], |f| {
+        self.shared_fn(SharedFn::SetErr, None, &[self.ptrt().into()], |f| {
             let slot = f.cx.err_slot();
             let old = f.load_ptr(slot);
             f.store(slot, f.param_ptr(0));
@@ -80,7 +67,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.raise_msg(msg)`, which raises a
     /// `RuntimeError` carrying the message. The message is borrowed.
     pub fn raise_msg_fn(&self) -> FunctionValue<'ctx> {
-        self.support("jade.raise_msg", None, &[self.ptrt().into()], |f| {
+        self.shared_fn(SharedFn::RaiseMsg, None, &[self.ptrt().into()], |f| {
             let msg = f.param_ptr(0);
             let st = f.cx.struct_ty("RuntimeError");
             let size = f.size_of(st.into());
@@ -91,6 +78,23 @@ impl<'ctx> Cx<'ctx> {
             f.store(f.field(st, p, 2), msg);
             f.call(f.cx.set_err_fn(), &[p.into()]);
             f.ret_void();
+        })
+    }
+
+    /// Purpose: This function returns `jade.new_error(msg) -> ptr`: a
+    /// `RuntimeError` holding a message whose reference it takes. Library
+    /// code's `raise "text"` calls it, since a library object cannot know
+    /// the class's type id; the program's own code builds the object inline.
+    pub fn new_error_fn(&self) -> FunctionValue<'ctx> {
+        let p = self.ptrt();
+        self.shared_fn(SharedFn::NewError, Some(p.into()), &[p.into()], |f| {
+            let st = f.cx.struct_ty("RuntimeError");
+            let size = f.size_of(st.into());
+            let obj = f.call_ptr(f.cx.libc("malloc"), &[size.into()]);
+            f.store(obj, f.i64(1));
+            f.store(f.at_c(obj, TYPE_ID), f.i64(f.cx.struct_id("RuntimeError") as i64));
+            f.store(f.field(st, obj, 2), f.param_ptr(0));
+            f.ret(obj);
         })
     }
 
@@ -106,6 +110,7 @@ impl<'ctx> Cx<'ctx> {
     /// Outputs: the function. Its result is owned.
     pub fn error_message_fn(&self, uncaught: bool) -> FunctionValue<'ctx> {
         let name = if uncaught { "jade.error_report" } else { "jade.error_message" };
+        self.mark_program_dependent();
         self.support(name, Some(self.ptrt().into()), &[self.ptrt().into()], |f| {
             let e = f.param_ptr(0);
             let tid = f.type_id(e);
@@ -141,6 +146,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.class_name(id) -> str`: a class's
     /// name as the program wrote it.
     fn class_name_fn(&self) -> FunctionValue<'ctx> {
+        self.mark_program_dependent();
         self.support("jade.class_name", Some(self.ptrt().into()), &[self.i64t().into()], |f| {
             let id = f.param_int(0);
             let default = f.block();

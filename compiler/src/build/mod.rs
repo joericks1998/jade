@@ -24,10 +24,18 @@ pub use crate::aot::Emit;
 /// Compile `program` to `out`.
 ///
 /// `source_path` anchors import resolution: imports resolve relative to the file
-/// being compiled, not the working directory. An IR or MIR emit is written to
-/// stdout.
-pub fn build(program: &Program, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
-    let outcome = crate::aot::compile(program.clone(), Some(source_path), out, emit)?;
+/// being compiled, not the working directory. `lib_cache` is where compiled std
+/// library instances are kept, `crate::backend::default_lib_cache()` for the
+/// CLI; tests pass a directory of their own, or `None` for no cache. An IR or
+/// MIR emit is written to stdout.
+pub fn build(
+    program: &Program,
+    source_path: &Path,
+    out: &Path,
+    emit: Emit,
+    lib_cache: Option<&Path>,
+) -> Result<(), String> {
+    let outcome = crate::aot::compile(program.clone(), Some(source_path), out, emit, lib_cache)?;
     if let Some(text) = outcome.ir {
         crate::stdio::write_str(&text);
         crate::stdio::flush();

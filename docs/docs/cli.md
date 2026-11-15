@@ -257,6 +257,18 @@ jade cache clean --dry-run
 | `--older-than <DAYS>` | Also remove entries older than this many days. |
 | `--dry-run` | Show what would be removed without deleting. |
 
+### The std library cache
+
+`jade build`, `jade run` and `jade test` compile each std library function a program uses once per machine, for each set of argument types it is called with, and keep the object files in `~/.jade/lib/<version>/<target>/`. A later build of any program that uses the same functions links those files instead of compiling the functions again. The first build that uses a function pays for it; the files are a few kilobytes each.
+
+`jade cache clean` does not touch this directory, and no command removes the directories older versions of Jade left there. To clear it, remove it:
+
+```bash
+rm -rf ~/.jade/lib
+```
+
+A build never fails because of this cache. When the directory cannot be made or written, the object files go beside the output and are deleted after linking.
+
 ## `jade pkg`
 
 Manage the dependencies declared in the `[dependencies]` section of `jade.toml`. A dependency is a Jade source package, pinned by `jade.lock` and installed into a project-local `libs/` directory, or a Rust package, which cargo builds into the program. `jade run`, `jade test`, and `jade build` install anything missing on their own.

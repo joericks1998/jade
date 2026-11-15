@@ -36,11 +36,59 @@
 use inkwell::values::{BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 
 use super::layout::{ARR_DATA, DICT_KEYS, LEN};
+use super::shared::{Slot, State};
 use super::{Cx, F};
 use crate::mir::{SysFn, Ty};
 
 /// The bytes a `struct tm` is given: more than any C library's needs.
 const TM_SIZE: u32 = 128;
+
+/// Purpose: This function says whether `Cx::sys_op` emits a hook as one
+/// instruction, one LLVM intrinsic or one C math call, with no support
+/// function behind it. A library function made of such hooks is small enough
+/// that it is copied into its callers rather than cached; see `libplan.rs`.
+///
+/// Inputs:
+/// - `h`: the hook.
+///
+/// Outputs: true for the float and int hooks and `os_error`.
+pub fn is_one_op(h: SysFn) -> bool {
+    use SysFn::*;
+    matches!(
+        h,
+        Floor
+            | Ceil
+            | Round
+            | Trunc
+            | Sqrt
+            | Ln
+            | Log2
+            | Log10
+            | Exp
+            | Sin
+            | Cos
+            | Tan
+            | Asin
+            | Acos
+            | Atan
+            | Fabs
+            | Atan2
+            | Hypot
+            | Pow
+            | Minnum
+            | Maxnum
+            | Copysign
+            | Powi
+            | ToInt
+            | FloatBits
+            | AddSat
+            | MulSat
+            | WrapAdd
+            | WrapSub
+            | WrapMul
+            | OsError
+    )
+}
 
 /// Where `tm_gmtoff` sits in a `struct tm`, after nine ints and padding, in
 /// glibc, musl and macOS alike.
@@ -173,7 +221,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns the thread's error slot, which the
     /// fallible hooks write and `os_error` reads.
     pub fn os_err_slot(&self) -> PointerValue<'ctx> {
-        self.thread_global("jade.oserr", false).as_pointer_value()
+        self.state("jade.oserr", State::thread(Slot::Word(0))).as_pointer_value()
     }
 
     /// Purpose: This function returns `jade.sys.strerror(code) -> str`: the C
@@ -212,16 +260,10 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns the globals the C `main` stores its
     /// `argc` and `argv` in, for the `args` hook.
     pub fn args_globals(&self) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
-        let get = |name: &str, t: inkwell::types::BasicTypeEnum<'ctx>| {
-            if let Some(g) = self.module.get_global(name) {
-                return g.as_pointer_value();
-            }
-            let g = self.module.add_global(t, None, name);
-            g.set_initializer(&super::layout::zero(t));
-            g.set_linkage(inkwell::module::Linkage::Internal);
-            g.as_pointer_value()
-        };
-        (get("jade.argc", self.i64t().into()), get("jade.argv", self.ptrt().into()))
+        (
+            self.state("jade.argc", State::global(Slot::Word(0))).as_pointer_value(),
+            self.state("jade.argv", State::global(Slot::Ptr)).as_pointer_value(),
+        )
     }
 
     /// Purpose: This function returns `jade.sys.getenv(name) -> str?`: a
@@ -348,13 +390,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns the lock the time-zone hooks hold while
     /// `TZ` is changed.
     fn time_lock(&self) -> PointerValue<'ctx> {
-        if let Some(g) = self.module.get_global("jade.time.lock") {
-            return g.as_pointer_value();
-        }
-        let g = self.module.add_global(self.i64t(), None, "jade.time.lock");
-        g.set_initializer(&self.i64t().const_zero());
-        g.set_linkage(inkwell::module::Linkage::Internal);
-        g.as_pointer_value()
+        self.state("jade.time.lock", State::global(Slot::Word(0))).as_pointer_value()
     }
 }
 

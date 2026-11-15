@@ -38,6 +38,14 @@
 //! `text.rs` (strings), `format.rs` (printing and conversions),
 //! `collections.rs` (arrays and dicts), `unicode.rs` (case tables) and
 //! `errors.rs` (runtime errors).
+//!
+//! ## The library cache
+//!
+//! A binary build compiles each std library instance whose types are built in
+//! once per machine and links its cached object (`libcache.rs`); `libplan.rs`
+//! decides which, and `shared.rs` makes the program define, once, the state
+//! and the class-dependent functions those objects use. `--emit ir`, and a
+//! build given no cache root, put everything in one module.
 
 mod bytes;
 mod collections;
@@ -48,9 +56,12 @@ mod format;
 mod func;
 mod infer;
 mod layout;
+mod libcache;
+mod libplan;
 mod link;
 mod native;
 mod rc;
+mod shared;
 mod sized;
 mod sys;
 mod sys_fs;
@@ -64,8 +75,8 @@ mod unicode;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use inkwell::context::Context;
@@ -81,6 +92,7 @@ use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 
 pub use fb::F;
+pub use libcache::default_root as default_lib_cache;
 
 use crate::mir;
 
@@ -110,6 +122,15 @@ pub struct Cx<'ctx> {
     pub drops: HashMap<String, Vec<FunctionValue<'ctx>>>,
     /// The model the program runs, when it dereferences a prompt.
     pub infer: Option<crate::infer::plan::InferPlan>,
+    /// Which kind of module this is: the program's, or a cached library
+    /// instance's; see `shared.rs`.
+    role: shared::Role,
+    /// In a library module, each shared name it declared, for the program's
+    /// module to define.
+    refs: RefCell<BTreeMap<String, shared::Shared>>,
+    /// In a library module, whether anything asked for what only the program
+    /// knows, such as a class's layout.
+    dependent: Cell<bool>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -118,9 +139,11 @@ impl<'ctx> Cx<'ctx> {
     /// Inputs:
     /// - `ctx`: the LLVM context.
     /// - `prog`: the program, for its struct types.
+    /// - `role`: the program built whole, or the program's module beside
+    ///   library objects, with what they need of it.
     ///
     /// Outputs: the module context.
-    fn new(ctx: &'ctx Context, prog: &mir::Program) -> Self {
+    fn new(ctx: &'ctx Context, prog: &mir::Program, role: shared::Role) -> Self {
         let struct_ids =
             prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i as u32)).collect();
         Cx {
@@ -133,6 +156,35 @@ impl<'ctx> Cx<'ctx> {
             lits: RefCell::new(HashMap::new()),
             drops: HashMap::new(),
             infer: prog.infer.clone(),
+            role,
+            refs: RefCell::new(BTreeMap::new()),
+            dependent: Cell::new(false),
+        }
+    }
+
+    /// Purpose: This function makes an empty module for one library instance.
+    /// It knows none of the program's classes, so nothing it builds can
+    /// depend on them without being caught.
+    ///
+    /// Inputs:
+    /// - `ctx`: the LLVM context, the module's alone.
+    /// - `name`: the module's name.
+    ///
+    /// Outputs: the module context.
+    fn library(ctx: &'ctx Context, name: &str) -> Self {
+        Cx {
+            ctx,
+            module: ctx.create_module(name),
+            structs: Vec::new(),
+            struct_ids: HashMap::new(),
+            struct_tys: RefCell::new(HashMap::new()),
+            support: RefCell::new(HashMap::new()),
+            lits: RefCell::new(HashMap::new()),
+            drops: HashMap::new(),
+            infer: None,
+            role: shared::Role::Library,
+            refs: RefCell::new(BTreeMap::new()),
+            dependent: Cell::new(false),
         }
     }
 
@@ -189,12 +241,33 @@ impl<'ctx> Cx<'ctx> {
         if let Some(f) = self.support.borrow().get(name) {
             return *f;
         }
+        self.define_fn(name, ret, params, Linkage::Internal, build)
+    }
+
+    /// Purpose: This function adds a support function with a linkage and
+    /// builds its body. It is recorded before its body is built, so a body
+    /// that asks for itself gets itself.
+    ///
+    /// Inputs:
+    /// - `name`, `ret`, `params`, `build`: as for [`Cx::support`].
+    /// - `linkage`: internal for a private copy, external for a function a
+    ///   library object calls.
+    ///
+    /// Outputs: the function.
+    fn define_fn(
+        &self,
+        name: &str,
+        ret: Option<BasicTypeEnum<'ctx>>,
+        params: &[BasicTypeEnum<'ctx>],
+        linkage: Linkage,
+        build: impl FnOnce(&F<'_, 'ctx>),
+    ) -> FunctionValue<'ctx> {
         let ps: Vec<BasicMetadataTypeEnum> = params.iter().map(|p| (*p).into()).collect();
         let fn_ty = match ret {
             Some(r) => r.fn_type(&ps, false),
             None => self.ctx.void_type().fn_type(&ps, false),
         };
-        let f = self.module.add_function(name, fn_ty, Some(Linkage::Internal));
+        let f = self.module.add_function(name, fn_ty, Some(linkage));
         self.support.borrow_mut().insert(name.to_string(), f);
         let fb = F::new(self, f);
         build(&fb);
@@ -349,6 +422,7 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: its index in the program's struct list.
     pub fn struct_id(&self, name: &str) -> u32 {
+        self.mark_program_dependent();
         self.struct_ids.get(name).copied().unwrap_or(u32::MAX)
     }
 }
@@ -374,7 +448,8 @@ fn libc_symbol(name: &str) -> &str {
     }
 }
 
-/// Purpose: This function builds a program's LLVM module.
+/// Purpose: This function builds a program's LLVM module, whole: every
+/// function in it, the library's included, as `--emit ir` shows it.
 ///
 /// Inputs:
 /// - `ctx`: the LLVM context.
@@ -382,7 +457,28 @@ fn libc_symbol(name: &str) -> &str {
 ///
 /// Outputs: the verified module, or LLVM's complaint about it.
 pub fn build_module<'ctx>(ctx: &'ctx Context, prog: &mir::Program) -> Result<Module<'ctx>, String> {
-    let mut cx = Cx::new(ctx, prog);
+    build_program_module(ctx, prog, &libplan::LibPlan::whole(prog), shared::Role::Whole)
+}
+
+/// Purpose: This function builds the program's module: its own functions,
+/// a private copy of each small library instance, and a declaration of each
+/// library instance a cached object holds.
+///
+/// Inputs:
+/// - `ctx`: the LLVM context.
+/// - `prog`: the MIR program.
+/// - `plan`: how each function is compiled.
+/// - `role`: whole, or the program beside library objects, with what they
+///   refer to.
+///
+/// Outputs: the verified module, or LLVM's complaint about it.
+fn build_program_module<'ctx>(
+    ctx: &'ctx Context,
+    prog: &mir::Program,
+    plan: &libplan::LibPlan,
+    role: shared::Role,
+) -> Result<Module<'ctx>, String> {
+    let mut cx = Cx::new(ctx, prog, role);
     let globals: Vec<GlobalValue> = prog
         .globals
         .iter()
@@ -394,29 +490,69 @@ pub fn build_module<'ctx>(ctx: &'ctx Context, prog: &mir::Program) -> Result<Mod
             gv
         })
         .collect();
-    let funcs: Vec<FunctionValue> = prog
+    let funcs: Vec<Option<FunctionValue>> = prog
         .funcs
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let params: Vec<BasicMetadataTypeEnum> =
-                f.locals[..f.params as usize].iter().map(|l| cx.llty(&l.ty).into()).collect();
-            let ty = cx.llty(&f.ret).fn_type(&params, false);
-            cx.module.add_function(&format!("jade.fn{i}.{}", f.name), ty, Some(Linkage::Internal))
+            let ty = cx.fn_type(f);
+            match (plan.kind(i), plan.symbol(i)) {
+                (libplan::Kind::Object, Some(sym)) => Some(cx.declare_lib(sym, ty)),
+                _ => Some(cx.module.add_function(
+                    &format!("jade.fn{i}.{}", f.name),
+                    ty,
+                    Some(Linkage::Internal),
+                )),
+            }
         })
         .collect();
     cx.drops = prog
         .drops
         .iter()
-        .map(|(class, ids)| (class.clone(), ids.iter().map(|id| funcs[id.0 as usize]).collect()))
+        .map(|(class, ids)| {
+            (class.clone(), ids.iter().filter_map(|id| funcs[id.0 as usize]).collect())
+        })
         .collect();
     let env = func::Env { prog, funcs: &funcs, globals: &globals };
     for (i, f) in prog.funcs.iter().enumerate() {
-        func::lower(&cx, &env, f, funcs[i]);
+        if plan.kind(i) == libplan::Kind::Object {
+            continue;
+        }
+        if let Some(fv) = funcs[i] {
+            func::lower(&cx, &env, f, fv);
+        }
     }
-    emit_c_main(&cx, funcs[prog.main.0 as usize]);
+    cx.define_exports();
+    let top = funcs
+        .get(prog.main.0 as usize)
+        .copied()
+        .flatten()
+        .ok_or("internal compiler error: the program has no top level")?;
+    emit_c_main(&cx, top);
     cx.module.verify().map_err(|e| e.to_string())?;
     Ok(cx.module)
+}
+
+impl<'ctx> Cx<'ctx> {
+    /// Purpose: This function returns the LLVM type of a MIR function.
+    fn fn_type(&self, f: &mir::Func) -> inkwell::types::FunctionType<'ctx> {
+        let params: Vec<BasicMetadataTypeEnum> =
+            f.locals[..f.params as usize].iter().map(|l| self.llty(&l.ty).into()).collect();
+        self.llty(&f.ret).fn_type(&params, false)
+    }
+
+    /// Purpose: This function declares a library instance a cached object
+    /// defines: external, so the linker finds it, and hidden, so the call is
+    /// direct and the symbol stays inside the program.
+    fn declare_lib(
+        &self,
+        sym: &str,
+        ty: inkwell::types::FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        let f = self.module.add_function(sym, ty, Some(Linkage::External));
+        f.as_global_value().set_visibility(inkwell::GlobalVisibility::Hidden);
+        f
+    }
 }
 
 /// Purpose: This function emits the C `main`, which runs the program's top
@@ -442,14 +578,15 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
         cx.module.set_inline_assembly(start);
     }
     let f = F::new(cx, main);
-    // `env.args()`'s hook reads the arguments from where `main` leaves them.
-    if cx.module.get_function("jade.sys.args").is_some() {
+    // `env.args()`'s hook reads the arguments from where `main` leaves them,
+    // which exist when the program's code or a library object reads them.
+    if cx.module.get_global("jade.argc").is_some() {
         let (argc, argv) = cx.args_globals();
         f.store(argc, f.sext(f.param_int(0), cx.i64t()));
         f.store(argv, f.param_ptr(1));
     }
     // The task lock is set up before any thread runs, when the program has tasks.
-    if cx.module.get_function("jade.task.submit").is_some() {
+    if cx.module.get_function("jade.task.submit").is_some() || cx.exported("jade.task.mutex") {
         f.call(cx.task_init_fn(), &[]);
     }
     // So is the model's, when the program runs one.
@@ -496,43 +633,119 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     f.ret(f.i32(0));
 }
 
+/// The optimization pipeline every module runs, the program's and each
+/// library object's alike.
+pub const PIPELINE: &str = "default<O2>";
+
+/// The CPU and features objects are compiled for: any CPU of the target's
+/// architecture, so a cached object suits every machine of it.
+const CPU: &str = "generic";
+const FEATURES: &str = "";
+
+/// The code-generation options `target_machine` passes LLVM, as they enter
+/// a cached object's key: change one there and change this with it.
+const CODEGEN: &str = "opt=default reloc=pic code-model=default";
+
 /// Purpose: This function compiles a MIR program to a binary, or to IR text.
 ///
 /// Inputs:
 /// - `prog`: the program.
 /// - `out`: where the binary goes.
 /// - `emit`: what to produce.
+/// - `lib_cache`: where compiled library instances are kept,
+///   `~/.jade/lib` for `jade build` (see [`default_lib_cache`]); `None`
+///   compiles every function into the program's module, as `--emit ir`
+///   shows it.
 ///
-/// Outputs: the IR text for `Emit::Ir`, `None` after writing a binary, or the
-/// error.
-pub fn compile(prog: &mir::Program, out: &Path, emit: Emit) -> Result<Option<String>, String> {
-    let ctx = Context::create();
-    let module = build_module(&ctx, prog)?;
+/// Outputs: the IR text for `Emit::Ir`, which never uses the cache, `None`
+/// after writing a binary, or the error.
+pub fn compile(
+    prog: &mir::Program,
+    out: &Path,
+    emit: Emit,
+    lib_cache: Option<&Path>,
+) -> Result<Option<String>, String> {
     if emit == Emit::Ir {
+        let ctx = Context::create();
+        let module = build_module(&ctx, prog)?;
         return Ok(Some(module.print_to_string().to_string()));
     }
-    Target::initialize_native(&InitializationConfig::default())?;
+    match lib_cache {
+        Some(root) => libcache::compile(prog, out, root).map(|_| None),
+        None => compile_whole(prog, out).map(|_| None),
+    }
+}
+
+/// Purpose: This function compiles a program in one module and links it,
+/// as every build did before the library cache.
+///
+/// Inputs:
+/// - `prog`: the program.
+/// - `out`: where the binary goes.
+///
+/// Outputs: `Ok(())`, or the error.
+fn compile_whole(prog: &mir::Program, out: &Path) -> Result<(), String> {
+    let ctx = Context::create();
+    let module = build_module(&ctx, prog)?;
+    let machine = target_machine()?;
+    let obj = out.with_extension("o");
+    write_object(&module, &machine, &obj)?;
+    let linked = link::link(std::slice::from_ref(&obj), out, prog.rust.as_ref());
+    std::fs::remove_file(&obj).ok();
+    linked
+}
+
+/// Purpose: This function sets up LLVM's code generator for this machine,
+/// once per process, so builds on several threads can share it.
+///
+/// Outputs: `Ok(())`, or why LLVM could not.
+fn init_llvm() -> Result<(), String> {
+    static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| Target::initialize_native(&InitializationConfig::default())).clone()
+}
+
+/// Purpose: This function makes a target machine for this machine. Each
+/// thread makes its own, since LLVM's is not shared between threads.
+///
+/// Outputs: the machine, or why LLVM could not make one.
+fn target_machine() -> Result<TargetMachine, String> {
+    init_llvm()?;
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let machine = target
+    target
         .create_target_machine(
             &triple,
-            "generic",
-            "",
+            CPU,
+            FEATURES,
             OptimizationLevel::Default,
             RelocMode::PIC,
             CodeModel::Default,
         )
-        .ok_or("failed to create LLVM target machine")?;
-    module.set_triple(&triple);
+        .ok_or_else(|| "failed to create LLVM target machine".to_string())
+}
+
+/// Purpose: This function gives a module the machine's triple and data
+/// layout, which its IR text then shows.
+fn set_target(module: &Module<'_>, machine: &TargetMachine) {
+    module.set_triple(&machine.get_triple());
     module.set_data_layout(&machine.get_target_data().get_data_layout());
-    module
-        .run_passes("default<O2>", &machine, PassBuilderOptions::create())
-        .map_err(|e| e.to_string())?;
-    let obj = out.with_extension("o");
-    machine.write_to_file(&module, FileType::Object, &obj).map_err(|e| e.to_string())?;
-    let linked = link::link(&obj, out, prog.rust.as_ref());
-    std::fs::remove_file(&obj).ok();
-    linked?;
-    Ok(None)
+}
+
+/// Purpose: This function optimizes a module and writes it as an object.
+///
+/// Inputs:
+/// - `module`: the module.
+/// - `machine`: the target machine.
+/// - `obj`: the object file to write.
+///
+/// Outputs: `Ok(())`, or LLVM's error.
+fn write_object(module: &Module<'_>, machine: &TargetMachine, obj: &Path) -> Result<(), String> {
+    optimize(module, machine)?;
+    machine.write_to_file(module, FileType::Object, obj).map_err(|e| e.to_string())
+}
+
+/// Purpose: This function runs the optimization pipeline over a module.
+fn optimize(module: &Module<'_>, machine: &TargetMachine) -> Result<(), String> {
+    set_target(module, machine);
+    module.run_passes(PIPELINE, machine, PassBuilderOptions::create()).map_err(|e| e.to_string())
 }

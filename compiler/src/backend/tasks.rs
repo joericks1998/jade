@@ -28,6 +28,7 @@ use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
 use super::layout::{ARR_DATA, LEN, TYPE_ID, zero};
+use super::shared::{Slot, State};
 use super::{Cx, F};
 use crate::mir::{Ty, is_heap};
 
@@ -75,52 +76,26 @@ impl<'ctx> Cx<'ctx> {
         )
     }
 
-    /// Purpose: This function returns a process-wide global, made the first time.
-    fn task_global(
-        &self,
-        name: &str,
-        ty: BasicTypeEnum<'ctx>,
-        init: BasicValueEnum<'ctx>,
-    ) -> PointerValue<'ctx> {
-        if let Some(g) = self.module.get_global(name) {
-            return g.as_pointer_value();
-        }
-        let g = self.module.add_global(ty, None, name);
-        g.set_initializer(&init);
-        g.set_linkage(inkwell::module::Linkage::Internal);
-        g.set_alignment(16);
-        g.as_pointer_value()
-    }
-
     fn task_mutex(&self) -> PointerValue<'ctx> {
-        let t = self.i8t().array_type(64);
-        self.task_global("jade.task.mutex", t.into(), t.const_zero().into())
+        self.state("jade.task.mutex", State::aligned(Slot::Bytes(64))).as_pointer_value()
     }
 
     fn task_cond(&self) -> PointerValue<'ctx> {
-        let t = self.i8t().array_type(64);
-        self.task_global("jade.task.cond", t.into(), t.const_zero().into())
+        self.state("jade.task.cond", State::aligned(Slot::Bytes(64))).as_pointer_value()
     }
 
     fn task_counter(&self, name: &str, init: i64) -> PointerValue<'ctx> {
-        self.task_global(name, self.i64t().into(), self.i64t().const_int(init as u64, true).into())
+        self.state(name, State::aligned(Slot::Word(init))).as_pointer_value()
     }
 
     fn task_ptr(&self, name: &str) -> PointerValue<'ctx> {
-        self.task_global(name, self.ptrt().into(), self.ptrt().const_null().into())
+        self.state(name, State::aligned(Slot::Ptr)).as_pointer_value()
     }
 
     /// Purpose: This function returns the thread-local slot naming the job the
     /// thread is running, for `cancelled()`.
     fn task_current(&self) -> PointerValue<'ctx> {
-        if let Some(g) = self.module.get_global("jade.task.current") {
-            return g.as_pointer_value();
-        }
-        let g = self.module.add_global(self.ptrt(), None, "jade.task.current");
-        g.set_initializer(&self.ptrt().const_null());
-        g.set_thread_local(true);
-        g.set_linkage(inkwell::module::Linkage::Internal);
-        g.as_pointer_value()
+        self.state("jade.task.current", State::thread(Slot::Ptr)).as_pointer_value()
     }
 
     /// Purpose: This function returns `jade.task.init()`, which sets up the

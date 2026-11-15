@@ -1,6 +1,6 @@
 # One tree, `toDict`, and libraries written in Jade
 
-Status: planned, 2026-11-14, for jade 2.0.6 to 2.0.9. Joe chose the direction of every
+Status: built, 2026-11-15, as jade 2.0.6 to 2.0.9; planned 2026-11-14. Joe chose the direction of every
 part. Details chosen while planning are marked *default*, and the questions still open
 are listed at the end of each part; both are Joe's to overrule or settle.
 
@@ -277,6 +277,62 @@ Almost nothing at run time: every run-time message is byte-identical, and seeded
   linked in statically.
 - Object files are written to a temporary name and renamed into place, so two builds at
   once never read a half-written file.
+
+### What was built
+
+The plan held, with these decisions made while building it. The code is
+`backend/libplan.rs`, which chooses how each function compiles; `backend/shared.rs`,
+which handles the state a program and its library objects share; and
+`backend/libcache.rs`, which builds, caches and links.
+
+- *The key covers the code.* An object's name is the SHA-256 of the compiler's version,
+  the target, the CPU, features and code-generation options, the pass pipeline, and the
+  instance's LLVM IR before optimization. A compiler built from source whose library or
+  backend changed never links an old object, even at the same version. Every build makes
+  each cached instance's IR, which costs 2 to 4 ms on a warm cache, and runs LLVM's
+  passes only on a miss.
+- *`raise` does not stop an instance from being cached.* Each `raise "text"` builds a
+  `RuntimeError`, which is a class. A library object asks the program for one through
+  `jade.new_error`, which the program defines, so it never needs the class's type id.
+  Without that, most of `fs`, `path`, `sh` and `http` could not be cached.
+- *Small instances are copied, not cached.* An instance that uses only numbers,
+  arithmetic, comparisons and one-instruction hooks, calls only instances like itself,
+  and has at most 20 MIR statements in all gets a private copy in each module that
+  calls it. `math.sqrt(x)` is still one `fsqrt`. A loop of 20 million `math` calls
+  runs in 35 ms, as in 2.0.8. When only instances that call nothing were copied, it
+  took 54 ms, and with nothing copied it took 229 ms.
+- *Shared state goes through one function, `Cx::state`.* The program's module defines
+  each global and a library module declares it. A global is exported with hidden
+  visibility only when a linked object refers to it, so a program's IR is the same as
+  in 2.0.8 when nothing is cached. Thread-locals use the initial-exec model.
+  `emit_c_main` sets up `argc`, `argv` and the task lock when any object needs them.
+- *A safety net.* A library module that asks for something only the program knows is
+  compiled with the program instead, along with its cached callers, and the build warns.
+  No std library function does this.
+- *Failures fall back.* When the cache directory cannot be written, objects go beside
+  the output and are deleted after linking. When a link that used a cached object
+  fails, the build links once more in one module and warns, naming the directory to
+  remove. A file that does not start with an object file's magic number counts as a
+  miss.
+- *Cold builds use threads.* A cold cache compiles one module per instance on up to 8
+  threads, each with its own LLVM context. On one thread, `path/components` took 258 ms.
+- *Nothing prunes old versions' directories,* and `jade cache clean`, which cleans the
+  AST cache, does not touch `~/.jade/lib`.
+
+Build times with a debug compiler, as the median of 7 runs, in ms:
+
+| example | 2.0.7 | 2.0.8 | 2.0.9 cold | 2.0.9 warm |
+|---|---|---|---|---|
+| path/components | 120 | 225 | 140 | 102 |
+| time/calendar | 54 | 76 | 75 | 61 |
+| numbers/math_functions | 64 | 71 | 73 | 73 |
+| fs/basic | 63 | 89 | 64 | 41 |
+| trust/sh_sinks | 70 | 82 | 89 | 61 |
+| random/seeded | 92 | 124 | 118 | 98 |
+
+`numbers/math_functions` gains nothing, because every function it calls is copied.
+`time/calendar` spends its time in `time.utc` and `time.parts`, which return a class and
+so compile with the program.
 
 ## Docs that change
 

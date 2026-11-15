@@ -4,8 +4,9 @@
 //! member rules, fills struct defaults, and asks `typechecker::infer` for every
 //! value's static type. `mir` lowers that answer into typed functions,
 //! `mir::taskcheck` refuses tasks that would race, and `backend` turns MIR
-//! into LLVM IR, an object file and a program linked against the C library
-//! alone. `would_build` runs the same steps short of LLVM, for `jade check`.
+//! into LLVM IR, object files and a program linked against the C library
+//! alone, taking the std library's compiled instances from the cache under
+//! `~/.jade/lib` when the caller names one. `would_build` runs the same steps short of LLVM, for `jade check`.
 //!
 //! Until phase 6 of `design/v2-static-values.md` this file also drove v1's
 //! backend, which compiled bytecode against a runtime library. That backend is
@@ -128,6 +129,10 @@ pub fn would_build(program: &Program, source_path: Option<&Path>) -> Result<(), 
 /// - `source_path`: where it is, which imports resolve from.
 /// - `output_path`: the binary to write.
 /// - `emit`: what to produce.
+/// - `lib_cache`: where compiled std library instances are kept and reused,
+///   `crate::backend::default_lib_cache()` for `jade build`; `None` compiles
+///   the library with the program every time. `--emit ir` and `--emit mir`
+///   never use it.
 ///
 /// Outputs: the IR or MIR text when asked for it, or the first error.
 pub fn compile(
@@ -135,6 +140,7 @@ pub fn compile(
     source_path: Option<&Path>,
     output_path: &Path,
     emit: Emit,
+    lib_cache: Option<&Path>,
 ) -> Result<CompileOutcome, String> {
     let merged = merge(program, source_path).map_err(|e| e.to_string())?;
     let mut mir = lower(&merged)?;
@@ -144,11 +150,11 @@ pub fn compile(
     match emit {
         Emit::Mir => Ok(CompileOutcome { ir: Some(mir.to_string()) }),
         Emit::Ir => {
-            let ir = crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir)?;
+            let ir = crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir, None)?;
             Ok(CompileOutcome { ir })
         }
         Emit::Binary => {
-            crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary)?;
+            crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary, lib_cache)?;
             Ok(CompileOutcome { ir: None })
         }
     }

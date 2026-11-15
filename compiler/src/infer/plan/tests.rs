@@ -264,7 +264,7 @@ fn a_piped_prompt_compiles_against_a_plan() {
     let typed = crate::typechecker::infer::check_program(&tree).unwrap();
     let mut mir = crate::mir::lower_program(&tree, &typed).unwrap();
     mir.infer = Some(plan);
-    let ir = crate::backend::compile(&mir, Path::new("unused"), crate::backend::Emit::Ir)
+    let ir = crate::backend::compile(&mir, Path::new("unused"), crate::backend::Emit::Ir, None)
         .unwrap()
         .unwrap();
     assert!(ir.contains("jade.infer.next.body"), "the token step is in the program");

@@ -1,16 +1,19 @@
-//! Linking an object file into a program, with LLD inside the compiler.
+//! Linking object files into a program, with LLD inside the compiler.
 //!
-//! The static backend writes an object file through LLVM and links it here,
-//! in-process, through `lld.cpp`, the C entry point into LLVM's own linker. No
-//! `cc`, no Xcode and no development packages are needed: a program links the
-//! C library and nothing else, so all the linker needs is that library.
+//! The static backend writes the program's object file through LLVM, beside
+//! the cached objects of the library instances it uses (`libcache.rs`), and
+//! links them here, in-process, through `lld.cpp`, the C entry point into
+//! LLVM's own linker. No `cc`, no Xcode and no development packages are
+//! needed: a program links the C library and nothing else, so all the linker
+//! needs is that library.
 //!
 //! *macOS.* The C library is `libSystem.B.dylib`, which lives in the dyld
 //! shared cache rather than on disk, so a linker normally reads a text stub of
 //! it, `libSystem.tbd`, from Apple's SDK. This file writes that stub itself,
-//! listing exactly the symbols the object imports: what `libSystem` exports is
-//! a fact of the operating system, and the object says which of it the program
-//! uses. LLD signs the binary, as Apple Silicon requires.
+//! listing exactly the symbols the objects import, which is what one leaves
+//! undefined and none defines: what `libSystem` exports is a fact of the
+//! operating system, and the objects say which of it the program uses. LLD
+//! signs the binary, as Apple Silicon requires.
 //!
 //! *Linux.* The C library is glibc's `libc.so.6`, which every glibc system has
 //! as a runtime file, or on a system without glibc, such as Alpine, musl's
@@ -31,7 +34,7 @@
 //! the system's `cc`.
 
 use std::ffi::{CString, c_char, c_int};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::rustpkg::Link;
 
@@ -118,24 +121,51 @@ pub fn start_code() -> Option<&'static str> {
     }
 }
 
-/// Purpose: This function links an object file into a program.
+/// Purpose: This function links object files into a program.
 ///
 /// Inputs:
-/// - `obj`: the object file.
+/// - `objs`: the object files: the program's first, then the cached library
+///   instances it uses, whose shared state the program's defines.
 /// - `out`: the program to write.
 /// - `rust`: the Rust packages' staticlib and its system libraries, when the
 ///   program calls one.
 ///
 /// Outputs: `Ok(())`, or what the linker said.
-pub fn link(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
-    if cfg!(target_os = "macos") { link_macho(obj, out, rust) } else { link_elf(obj, out, rust) }
+pub fn link(objs: &[PathBuf], out: &Path, rust: Option<&Link>) -> Result<(), String> {
+    let first = objs.first().ok_or("internal compiler error: nothing to link")?;
+    if cfg!(target_os = "macos") {
+        link_macho(first, objs, out, rust)
+    } else {
+        link_elf(objs, out, rust)
+    }
 }
 
 /// Purpose: This function links on macOS: against a `libSystem` stub written
-/// for this object, or with a Rust staticlib, against the SDK.
-fn link_macho(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
-    let bytes = std::fs::read(obj).map_err(|e| format!("cannot read {}: {e}", obj.display()))?;
-    let imports = macho_imports(&bytes)?;
+/// for these objects, or with a Rust staticlib, against the SDK.
+///
+/// Inputs:
+/// - `first`: the program's object, beside which the stubs are written.
+/// - `objs`: every object, the first included.
+/// - `out`, `rust`: as for [`link`].
+fn link_macho(
+    first: &Path,
+    objs: &[PathBuf],
+    out: &Path,
+    rust: Option<&Link>,
+) -> Result<(), String> {
+    // What the objects import from the system is what one of them leaves
+    // undefined and none defines: a library object's call into the program's
+    // error slot is not an import.
+    let mut undefined = std::collections::BTreeSet::new();
+    let mut defined = std::collections::BTreeSet::new();
+    for obj in objs {
+        let bytes =
+            std::fs::read(obj).map_err(|e| format!("cannot read {}: {e}", obj.display()))?;
+        let syms = macho_symbols(&bytes)?;
+        undefined.extend(syms.undefined);
+        defined.extend(syms.defined);
+    }
+    let imports: Vec<String> = undefined.difference(&defined).cloned().collect();
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
     let version = macos_version();
     let mut args = vec![
@@ -148,8 +178,8 @@ fn link_macho(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String>
         version,
         "-o".into(),
         out.display().to_string(),
-        obj.display().to_string(),
     ];
+    args.extend(objs.iter().map(|o| o.display().to_string()));
     if let Some(r) = rust {
         args.push(r.staticlib.display().to_string());
         args.extend(["-syslibroot".to_string(), macos_sdk()?, "-lSystem".to_string()]);
@@ -167,7 +197,7 @@ fn link_macho(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String>
     // for a program that runs a model, the Objective-C runtime and Metal.
     let mut stubs = Vec::new();
     for (i, (install, symbols)) in by_library(&imports).iter().enumerate() {
-        let stub = obj.with_extension(format!("{i}.tbd"));
+        let stub = first.with_extension(format!("{i}.tbd"));
         std::fs::write(&stub, stub_tbd(arch, install, symbols))
             .map_err(|e| format!("cannot write {}: {e}", stub.display()))?;
         args.push(stub.display().to_string());
@@ -246,14 +276,23 @@ fn stub_tbd(arch: &str, install: &str, symbols: &[String]) -> String {
     )
 }
 
+/// Purpose: This struct holds a Mach-O object's external symbols.
+#[derive(Debug, Default)]
+struct MachoSymbols {
+    /// What it leaves undefined: what it imports.
+    undefined: Vec<String>,
+    /// What it defines, hidden symbols included.
+    defined: Vec<String>,
+}
+
 /// Purpose: This function lists the external symbols a 64-bit Mach-O object
-/// leaves undefined: what it imports.
+/// leaves undefined and the ones it defines.
 ///
 /// Inputs:
 /// - `b`: the object file's bytes.
 ///
-/// Outputs: the symbol names, or a message when the file is not one.
-fn macho_imports(b: &[u8]) -> Result<Vec<String>, String> {
+/// Outputs: both lists, sorted, or a message when the file is not one.
+fn macho_symbols(b: &[u8]) -> Result<MachoSymbols, String> {
     let bad = || "the object file is not a 64-bit Mach-O file".to_string();
     let u32_at = |o: usize| -> Option<u32> {
         b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
@@ -272,32 +311,37 @@ fn macho_imports(b: &[u8]) -> Result<Vec<String>, String> {
             let symoff = u32_at(at + 8).ok_or_else(bad)? as usize;
             let nsyms = u32_at(at + 12).ok_or_else(bad)? as usize;
             let stroff = u32_at(at + 16).ok_or_else(bad)? as usize;
-            let mut out = Vec::new();
+            let mut out = MachoSymbols::default();
             for i in 0..nsyms {
                 // `nlist_64 { u32 n_strx; u8 n_type; u8 n_sect; u16 n_desc; u64 n_value }`.
                 let e = symoff + 16 * i;
                 let strx = u32_at(e).ok_or_else(bad)? as usize;
                 let ty = *b.get(e + 4).ok_or_else(bad)?;
                 let value = b.get(e + 8..e + 16).ok_or_else(bad)?;
+                // N_STAB, then N_TYPE: N_UNDF is 0 and N_SECT is 0xe; N_EXT.
                 let debug = ty & 0xe0 != 0;
                 let undefined = ty & 0x0e == 0;
+                let in_section = ty & 0x0e == 0x0e;
                 let external = ty & 0x01 != 0;
                 // A common symbol is undefined with a size; LLVM emits none.
                 let common = value.iter().any(|v| *v != 0);
-                if debug || !undefined || !external || common {
+                if debug || !external || (undefined && common) || !(undefined || in_section) {
                     continue;
                 }
                 let name = b.get(stroff + strx..).ok_or_else(bad)?;
                 let end = name.iter().position(|c| *c == 0).ok_or_else(bad)?;
-                out.push(String::from_utf8_lossy(&name[..end]).into_owned());
+                let name = String::from_utf8_lossy(&name[..end]).into_owned();
+                if undefined { out.undefined.push(name) } else { out.defined.push(name) }
             }
-            out.sort();
-            out.dedup();
+            for list in [&mut out.undefined, &mut out.defined] {
+                list.sort();
+                list.dedup();
+            }
             return Ok(out);
         }
         at += size;
     }
-    Ok(Vec::new())
+    Ok(MachoSymbols::default())
 }
 
 /// Purpose: This function finds Apple's SDK, whose library stubs a program with a
@@ -336,8 +380,10 @@ fn macos_version() -> String {
 }
 
 /// Purpose: This function links on Linux, against the system's C library:
-/// glibc, or musl where glibc is not installed.
-fn link_elf(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
+/// glibc, or musl where glibc is not installed. The objects resolve each
+/// other's hidden symbols, the library objects' references to the program's
+/// shared state among them, before any shared library is searched.
+fn link_elf(objs: &[PathBuf], out: &Path, rust: Option<&Link>) -> Result<(), String> {
     let libc = c_library()?;
     let mut args: Vec<String> = vec![
         "ld.lld".into(),
@@ -354,12 +400,14 @@ fn link_elf(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
         libc.loader.clone(),
         "-o".into(),
         out.display().to_string(),
-        obj.display().to_string(),
+    ];
+    args.extend(objs.iter().map(|o| o.display().to_string()));
+    args.extend([
         // libc's own dependencies, the loader among them, are the loader's to
         // find at run time.
-        "--allow-shlib-undefined".into(),
-        "--as-needed".into(),
-    ];
+        "--allow-shlib-undefined".to_string(),
+        "--as-needed".to_string(),
+    ]);
     if let Some(r) = rust {
         args.push(r.staticlib.display().to_string());
         // Rust's standard library on glibc always needs these, its unwinder in
@@ -628,6 +676,6 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_mach_o_is_refused() {
-        assert!(macho_imports(b"\x7fELF").is_err());
+        assert!(macho_symbols(b"\x7fELF").is_err());
     }
 }

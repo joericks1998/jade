@@ -36,7 +36,7 @@ fn run(src: &str) -> (String, String, i32) {
     ));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let bin = dir.join("prog");
-    compile(&mir_of(src), &bin, Emit::Binary).expect("builds");
+    compile(&mir_of(src), &bin, Emit::Binary, None).expect("builds");
     let out = std::process::Command::new(&bin).output().expect("runs");
     let _ = std::fs::remove_dir_all(&dir);
     (

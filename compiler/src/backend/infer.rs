@@ -36,6 +36,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionTy
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 
 use super::layout::{ARR_DATA, LEN};
+use super::shared::{Slot, State};
 use super::{Cx, F};
 use crate::infer::plan::{Addr, InferPlan, KERNELS, MUL_MM, OP_WORDS, threads};
 use crate::mir::{InferFn, Ty};
@@ -83,6 +84,8 @@ impl<'ctx> Cx<'ctx> {
         m: InferFn,
         args: &[BasicValueEnum<'ctx>],
     ) -> (BasicValueEnum<'ctx>, Ty) {
+        // The model's plan is the program's.
+        self.mark_program_dependent();
         let t = match m {
             InferFn::Data | InferFn::Taint | InferFn::Text => Ty::Str,
             InferFn::Config | InferFn::CharClass | InferFn::MaxTokens | InferFn::SetMaxTokens => {
@@ -93,7 +96,7 @@ impl<'ctx> Cx<'ctx> {
             InferFn::Next | InferFn::Conversation => Ty::Int,
         };
         // The reply's length is the one setting a program without a model has.
-        let limit = self.infer_global("jade.infer.max_tokens", self.i64t().into());
+        let limit = self.infer_global("jade.infer.max_tokens", Slot::Word(0));
         match m {
             InferFn::MaxTokens => {
                 let v = f.load_i64(limit);
@@ -165,7 +168,7 @@ impl<'ctx> Cx<'ctx> {
             InferFn::Conversation => {
                 let i64t = self.i64t().into();
                 let fun = self.infer_locked_fn("conversation", Some(i64t), &[], |f, _| {
-                    let at = f.cx.infer_global("jade.infer.conversations", f.cx.i64t().into());
+                    let at = f.cx.infer_global("jade.infer.conversations", Slot::Word(0));
                     let id = f.add(f.load_i64(at), f.i64(1));
                     f.store(at, id);
                     f.ret(id);
@@ -181,25 +184,18 @@ impl<'ctx> Cx<'ctx> {
         self.infer.as_ref().expect("checked by infer_op")
     }
 
-    /// Purpose: This function returns a zeroed internal global for the model's
-    /// state, making it the first time.
-    fn infer_global(&self, name: &str, ty: BasicTypeEnum<'ctx>) -> PointerValue<'ctx> {
-        if let Some(g) = self.module.get_global(name) {
-            return g.as_pointer_value();
-        }
-        let g = self.module.add_global(ty, None, name);
-        g.set_initializer(&super::layout::zero(ty));
-        g.set_linkage(Linkage::Internal);
-        g.set_alignment(16);
-        g.as_pointer_value()
+    /// Purpose: This function returns a zeroed global for the model's state,
+    /// making it the first time through [`Cx::state`].
+    fn infer_global(&self, name: &str, slot: Slot) -> PointerValue<'ctx> {
+        self.state(name, State::aligned(slot)).as_pointer_value()
     }
 
     fn infer_mutex(&self) -> PointerValue<'ctx> {
-        self.infer_global("jade.infer.mutex", self.i8t().array_type(64).into())
+        self.infer_global("jade.infer.mutex", Slot::Bytes(64))
     }
 
     fn infer_ready(&self) -> PointerValue<'ctx> {
-        self.infer_global("jade.infer.ready", self.i64t().into())
+        self.infer_global("jade.infer.ready", Slot::Word(0))
     }
 
     /// Purpose: This function returns one of the per-region arrays: `base`, the
@@ -207,11 +203,11 @@ impl<'ctx> Cx<'ctx> {
     /// mapping; `delta`, how far `base` is past `map`; `buf`, its Metal buffer.
     fn infer_regions(&self, what: &str) -> PointerValue<'ctx> {
         let n = self.plan().regions.len().max(1) as u32;
-        let elem: BasicTypeEnum = match what {
-            "maplen" | "delta" => self.i64t().into(),
-            _ => self.ptrt().into(),
+        let slot = match what {
+            "maplen" | "delta" => Slot::Words(n),
+            _ => Slot::Ptrs(n),
         };
-        self.infer_global(&format!("jade.infer.{what}"), elem.array_type(n).into())
+        self.infer_global(&format!("jade.infer.{what}"), slot)
     }
 
     /// Purpose: This function declares an external function.
@@ -569,7 +565,7 @@ impl<'ctx> Cx<'ctx> {
 
     /// Purpose: This function returns a selector, registered once and kept.
     fn sel(&self, f: &F<'_, 'ctx>, name: &str) -> PointerValue<'ctx> {
-        let g = self.infer_global(&format!("jade.infer.sel.{name}"), self.ptrt().into());
+        let g = self.infer_global(&format!("jade.infer.sel.{name}"), Slot::Ptr);
         let v = f.var(f.load_ptr(g));
         f.if_(f.is_null(f.load_ptr(v)), |f| {
             let s = f.call_ptr(self.objc_fn("sel_registerName"), &[self.cstr(name).into()]);
@@ -651,14 +647,11 @@ impl<'ctx> Cx<'ctx> {
     }
 
     fn infer_obj(&self, name: &str) -> PointerValue<'ctx> {
-        self.infer_global(&format!("jade.infer.{name}"), self.ptrt().into())
+        self.infer_global(&format!("jade.infer.{name}"), Slot::Ptr)
     }
 
     fn infer_pipelines(&self) -> PointerValue<'ctx> {
-        self.infer_global(
-            "jade.infer.pipelines",
-            self.ptrt().array_type(KERNELS.len() as u32).into(),
-        )
+        self.infer_global("jade.infer.pipelines", Slot::Ptrs(KERNELS.len() as u32))
     }
 
     /// Purpose: This function returns the body of `__infer.setup()`, called
@@ -951,8 +944,8 @@ impl<'ctx> Cx<'ctx> {
             let cx = f.cx;
             let p = cx.plan().clone();
             let (ids, conv, prompt_len) = (f.param_ptr(0), f.param_int(1), f.param_int(2));
-            let owner = cx.infer_global("jade.infer.kv_owner", i64t.into());
-            let held = cx.infer_global("jade.infer.kv_len", i64t.into());
+            let owner = cx.infer_global("jade.infer.kv_owner", Slot::Word(0));
+            let held = cx.infer_global("jade.infer.kv_len", Slot::Word(0));
             let n = f.load_i64(f.at_c(ids, LEN));
             f.if_(f.eq(n, f.i64(0)), |f| f.ret(f.i64(-1)));
             f.if_(f.eq(f.load_i64(cx.infer_ready()), f.i64(0)), |f| {

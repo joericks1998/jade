@@ -58,7 +58,9 @@ fn run(tag: &str, src: &str) -> String {
     let ast = crate::frontend::parser::parse(tokens).unwrap();
     let program = crate::typechecker::resolve::resolve(ast).unwrap();
     let bin = dir.join("main");
-    crate::aot::compile(program, Some(&file), &bin, crate::aot::Emit::Binary).unwrap();
+    let cache = dir.join("lib");
+    crate::aot::compile(program, Some(&file), &bin, crate::aot::Emit::Binary, Some(&cache))
+        .unwrap();
     let out = Command::new(&bin).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
