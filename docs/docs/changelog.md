@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.5
+
+*Native packages are Rust crates.* `design/v2-rust-packages.md` has the design.
+
 ## v2.0.4
 
 *A type function checks a value's type; a converter changes it.* Now that Jade only compiles, a type name says what a value is.
