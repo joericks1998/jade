@@ -1,10 +1,9 @@
 //! Resolving a `use` path, and walking the import graph ahead of execution.
 //!
 //! [`resolve_import`] is the single answer to "what does this `use` name?" —
-//! a stdlib package, a native shared library, or a Jade source file. The VM's
-//! `Instr::ImportFile` handler reaches it through `vm::chunk::resolve_user_import`,
-//! and [`walk_imports`] uses it to answer the same question for every import in
-//! a program without running any of them.
+//! a stdlib package, a Rust package, or a Jade source file. [`walk_imports`]
+//! uses it to answer the same question for every import in a program without
+//! running any of them.
 //!
 //! [`walk_imports`] exists because `jade check` could not previously tell you
 //! whether a program's imports resolve. Import resolution was not a compile
@@ -14,12 +13,11 @@
 //! reported `ok` and then failed at run time with "cannot find import". That
 //! made `check` unusable as a gate, which is the one job it has.
 //!
-//! The walk deliberately does **not** load anything. A native module is checked
-//! for existence only, never `dlopen`ed, because opening a shared library runs
-//! its initializer and `check` must not execute a program's code. For the same
-//! reason a Jade module is lexed and parsed to find its own imports, but not
-//! type-checked here — `check` type-checks the entry file, and a module's own
-//! errors surface when it is checked in its own right.
+//! The walk deliberately does **not** load anything. A Rust package is not built
+//! here; the build that types the program does that, and reports a package that
+//! does not compile. A Jade module is lexed and parsed to find its own imports,
+//! but not type-checked here — `check` type-checks the entry file, and a
+//! module's own errors surface when it is checked in its own right.
 
 use std::{
     collections::HashSet,
@@ -41,8 +39,9 @@ use std::collections::HashMap;
 pub enum ImportTarget {
     /// A built-in `std::*` package. Compiled into the binary; nothing on disk.
     Builtin,
-    /// A native C-ABI shared library, loaded over the FFI.
-    Native(PathBuf),
+    /// A Rust package, by its dependency's name; the build compiles it into the
+    /// program.
+    Rust(String),
     /// A Jade source module.
     Jade(PathBuf),
 }
@@ -68,10 +67,9 @@ pub struct ImportContext<'a> {
 /// then a file sitting beside the importer. Neither of the latter two touches
 /// disk beyond `exists()`.
 ///
-/// A returned [`ImportTarget::Native`] or [`ImportTarget::Jade`] path is a
-/// *candidate*: the underlying resolvers hand back a `.jde` candidate when
-/// nothing is on disk, so the caller still has to confirm the file is there.
-/// [`walk_imports`] does.
+/// A returned [`ImportTarget::Jade`] path is a *candidate*: the underlying
+/// resolvers hand back a `.jde` candidate when nothing is on disk, so the caller
+/// still has to confirm the file is there. [`walk_imports`] does.
 pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, String> {
     // Stdlib packages are compiled in and always win — the VM binds them under
     // their own global name before it ever consults the filesystem.
@@ -89,7 +87,7 @@ pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, S
         && let Some(r) = resolve_library_import(libs, path, &pkg_root)?
     {
         return Ok(match r.kind {
-            ImportKind::Native => ImportTarget::Native(r.path),
+            ImportKind::Rust => ImportTarget::Rust(r.path.to_string_lossy().into_owned()),
             ImportKind::Jade => ImportTarget::Jade(r.path),
         });
     }
@@ -100,7 +98,7 @@ pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, S
         }
         if let Some(r) = resolve_library_import(ctx.libraries, path, root)? {
             return Ok(match r.kind {
-                ImportKind::Native => ImportTarget::Native(r.path),
+                ImportKind::Rust => ImportTarget::Rust(r.path.to_string_lossy().into_owned()),
                 ImportKind::Jade => ImportTarget::Jade(r.path),
             });
         }
@@ -108,7 +106,7 @@ pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, S
 
     let r = resolve_relative_import(&ctx.source_dir, path);
     Ok(match r.kind {
-        ImportKind::Native => ImportTarget::Native(r.path),
+        ImportKind::Rust => ImportTarget::Rust(r.path.to_string_lossy().into_owned()),
         ImportKind::Jade => ImportTarget::Jade(r.path),
     })
 }
@@ -197,14 +195,8 @@ fn walk(
         let file = match target {
             // Compiled in — nothing to look for.
             ImportTarget::Builtin => continue,
-            // Existence only. Opening it would run the library's initializer,
-            // and `check` does not execute the program it is checking.
-            ImportTarget::Native(p) => {
-                if !p.exists() {
-                    return Err(JadeError::ImportNotFound { path, span });
-                }
-                continue;
-            }
+            // Built with the program, which reports one that does not compile.
+            ImportTarget::Rust(_) => continue,
             ImportTarget::Jade(p) => p,
         };
 

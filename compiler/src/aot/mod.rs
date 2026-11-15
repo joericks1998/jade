@@ -14,7 +14,7 @@
 pub mod imports;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::typechecker::infer::native::NativeSig;
 use crate::typechecker::tir::TProgram;
@@ -36,16 +36,14 @@ pub enum Emit {
 pub struct CompileOutcome {
     /// The IR or MIR text, when that was asked for.
     pub ir: Option<String>,
-    /// The native packages from the project's `libs/` the binary will look
-    /// for beside itself, for the caller to copy there.
-    pub dependencies: Vec<PathBuf>,
 }
 
 /// Purpose: This struct holds a program with its imports merged and its
 /// defaults filled, ready for the checker.
 struct Merged {
     program: TProgram,
-    natives: Vec<imports::NativePkg>,
+    /// The Rust packages' staticlib, when the program calls one.
+    rust: Option<crate::rustpkg::Link>,
     sigs: HashMap<String, NativeSig>,
 }
 
@@ -60,12 +58,12 @@ struct Merged {
 /// Outputs: the merged program, or why import resolution or the class rules
 /// refused it.
 fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, imports::ResolveError> {
-    let (mut program, natives, sigs) = match source_path {
+    let (mut program, rust, sigs) = match source_path {
         Some(src) => {
             let r = imports::resolve_and_namespace(program.stmts, src)?;
-            (TProgram { stmts: r.stmts }, r.native_pkgs, r.native_sigs)
+            (TProgram { stmts: r.stmts }, r.rust, r.native_sigs)
         }
-        None => (program, Vec::new(), HashMap::new()),
+        None => (program, None, HashMap::new()),
     };
     // Class member rules read what literals wrote, so they run before the
     // defaults are filled in. See `typechecker::infer::members`.
@@ -76,7 +74,7 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
     // Each `?p` becomes a call into the inference prelude, added here.
     program.stmts =
         crate::infer::rewrite::inject(program.stmts).map_err(imports::ResolveError::Program)?;
-    Ok(Merged { program, natives, sigs })
+    Ok(Merged { program, rust, sigs })
 }
 
 /// Purpose: This function lowers a merged program to MIR and runs the passes
@@ -89,17 +87,7 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
 fn lower(m: &Merged) -> Result<crate::mir::Program, String> {
     let typed = crate::typechecker::infer::check_program_with(&m.program, &m.sigs)
         .map_err(|e| e.to_string())?;
-    let libs = m
-        .natives
-        .iter()
-        .map(|p| crate::mir::NativeLib {
-            id: p.id,
-            name: p.name.clone(),
-            rel: p.rel.clone(),
-            abs: p.abs.clone(),
-        })
-        .collect();
-    let mir = crate::mir::lower_program_with(&m.program, &typed, libs, &m.sigs)
+    let mir = crate::mir::lower_program_with(&m.program, &typed, m.rust.clone(), &m.sigs)
         .map_err(|e| e.to_string())?;
     crate::mir::taskcheck::check(&mir).map_err(|e| e.to_string())?;
     Ok(mir)
@@ -132,8 +120,7 @@ pub fn would_build(program: &TProgram, source_path: Option<&Path>) -> Result<(),
 /// - `output_path`: the binary to write.
 /// - `emit`: what to produce.
 ///
-/// Outputs: the IR or MIR text when asked for it, and after writing a binary,
-/// the native packages it will look for beside itself; or the first error.
+/// Outputs: the IR or MIR text when asked for it, or the first error.
 pub fn compile(
     program: TProgram,
     source_path: Option<&Path>,
@@ -146,22 +133,14 @@ pub fn compile(
         mir.infer = Some(model_plan(source_path)?);
     }
     match emit {
-        Emit::Mir => Ok(CompileOutcome { ir: Some(mir.to_string()), dependencies: Vec::new() }),
+        Emit::Mir => Ok(CompileOutcome { ir: Some(mir.to_string()) }),
         Emit::Ir => {
             let ir = crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir)?;
-            Ok(CompileOutcome { ir, dependencies: Vec::new() })
+            Ok(CompileOutcome { ir })
         }
         Emit::Binary => {
             crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary)?;
-            // Only the packages from the project's `libs/` are the caller's to
-            // copy beside the artifact.
-            let dependencies = merged
-                .natives
-                .iter()
-                .filter(|p| p.rel.is_some())
-                .map(|p| PathBuf::from(&p.abs))
-                .collect();
-            Ok(CompileOutcome { ir: None, dependencies })
+            Ok(CompileOutcome { ir: None })
         }
     }
 }

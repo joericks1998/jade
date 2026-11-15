@@ -6,7 +6,6 @@
 name = "jade-rs-macros"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
 authors = ["JADE OS Contributors"]
 license = "MIT"
 description = "The #[jade::export] attribute of jade-rs"

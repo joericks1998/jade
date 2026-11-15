@@ -7,9 +7,10 @@
 name = "jade-rs"
 version = "0.1.0"
 edition = "2021"
-# The generated code writes `#[unsafe(no_mangle)]`, which edition 2024 requires and
-# Rust accepts in every edition from 1.82.
-rust-version = "1.82"
+# Needs Rust 1.82 or later: the generated code writes `#[unsafe(no_mangle)]`, which
+# edition 2024 requires and Rust accepts in every edition from 1.82. Not declared as
+# `rust-version`, because the workspace's resolver would then prefer dependency
+# versions for 1.82 across every member, the compiler included.
 authors = ["JADE OS Contributors"]
 license = "MIT"
 description = "Write Jade packages in Rust: #[jade::export] and the runtime it calls"

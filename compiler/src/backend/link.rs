@@ -20,9 +20,20 @@
 //! `START_X86_64`), so linking needs nothing a minimal system lacks. musl's
 //! `__libc_start_main` reads only `main`, `argc` and `argv`, the first three of
 //! the arguments glibc's takes, so one `_start` serves both.
+//!
+//! *A program with a Rust package* is linked with the project's staticlib too
+//! (`crate::rustpkg`), and with the system libraries rustc's `native-static-libs`
+//! note names for it. On Linux each is found as a shared object beside the C
+//! library. On macOS a staticlib imports from whatever its `-sys` crates link,
+//! and which archive member imports what is the linker's decision, so such a
+//! program links against Apple's SDK stubs instead of a stub written here. Cargo
+//! needs that SDK already: rustc links every build script and proc macro with
+//! the system's `cc`.
 
 use std::ffi::{CString, c_char, c_int};
 use std::path::Path;
+
+use crate::rustpkg::Link;
 
 unsafe extern "C" {
     /// Runs LLD on a command line; see `lld.cpp`.
@@ -112,15 +123,17 @@ pub fn start_code() -> Option<&'static str> {
 /// Inputs:
 /// - `obj`: the object file.
 /// - `out`: the program to write.
+/// - `rust`: the Rust packages' staticlib and its system libraries, when the
+///   program calls one.
 ///
 /// Outputs: `Ok(())`, or what the linker said.
-pub fn link(obj: &Path, out: &Path) -> Result<(), String> {
-    if cfg!(target_os = "macos") { link_macho(obj, out) } else { link_elf(obj, out) }
+pub fn link(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
+    if cfg!(target_os = "macos") { link_macho(obj, out, rust) } else { link_elf(obj, out, rust) }
 }
 
-/// Purpose: This function links on macOS, against a `libSystem` stub written
-/// for this object.
-fn link_macho(obj: &Path, out: &Path) -> Result<(), String> {
+/// Purpose: This function links on macOS: against a `libSystem` stub written
+/// for this object, or with a Rust staticlib, against the SDK.
+fn link_macho(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
     let bytes = std::fs::read(obj).map_err(|e| format!("cannot read {}: {e}", obj.display()))?;
     let imports = macho_imports(&bytes)?;
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
@@ -137,6 +150,19 @@ fn link_macho(obj: &Path, out: &Path) -> Result<(), String> {
         out.display().to_string(),
         obj.display().to_string(),
     ];
+    if let Some(r) = rust {
+        args.push(r.staticlib.display().to_string());
+        args.extend(["-syslibroot".to_string(), macos_sdk()?, "-lSystem".to_string()]);
+        for (install, _) in by_library(&imports).iter().skip(1) {
+            if install.ends_with("libobjc.A.dylib") {
+                args.push("-lobjc".into());
+            } else if install.contains("Metal.framework") {
+                args.extend(["-framework".to_string(), "Metal".to_string()]);
+            }
+        }
+        args.extend(r.native_libs.iter().cloned());
+        return run_lld(&args);
+    }
     // One stub per library the object reaches into: the C library always, and
     // for a program that runs a model, the Objective-C runtime and Metal.
     let mut stubs = Vec::new();
@@ -274,6 +300,28 @@ fn macho_imports(b: &[u8]) -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
 
+/// Purpose: This function finds Apple's SDK, whose library stubs a program with a
+/// Rust package links against.
+///
+/// Outputs: the SDK's path, or a message naming how to get one.
+fn macos_sdk() -> Result<String, String> {
+    let asked = std::process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && Path::new(s).is_dir());
+    let fallback = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk";
+    asked.or_else(|| Path::new(fallback).is_dir().then(|| fallback.to_string())).ok_or_else(|| {
+        "linking a program that uses a Rust package needs Apple's SDK, which cargo's own builds \
+         need too, and none was found; install the Command Line Tools with \
+         `xcode-select --install`"
+            .to_string()
+    })
+}
+
 /// Purpose: This function returns the running macOS version as
 /// `major.minor`, the oldest a built program is marked to run on.
 fn macos_version() -> String {
@@ -289,7 +337,7 @@ fn macos_version() -> String {
 
 /// Purpose: This function links on Linux, against the system's C library:
 /// glibc, or musl where glibc is not installed.
-fn link_elf(obj: &Path, out: &Path) -> Result<(), String> {
+fn link_elf(obj: &Path, out: &Path, rust: Option<&Link>) -> Result<(), String> {
     let libc = c_library()?;
     let mut args: Vec<String> = vec![
         "ld.lld".into(),
@@ -312,8 +360,76 @@ fn link_elf(obj: &Path, out: &Path) -> Result<(), String> {
         "--allow-shlib-undefined".into(),
         "--as-needed".into(),
     ];
+    if let Some(r) = rust {
+        args.push(r.staticlib.display().to_string());
+        args.extend(rust_system_libs(&r.native_libs, Path::new("/"), &libc)?);
+    }
     args.extend(libc.libs);
     run_lld(&args)
+}
+
+/// Purpose: This function finds the shared objects a Rust staticlib's
+/// `native-static-libs` note names, such as `libgcc_s` for Rust's unwinder.
+///
+/// Inputs:
+/// - `libs`: the note's linker arguments, such as `-lgcc_s`.
+/// - `root`: the file system's root, `/` outside tests.
+/// - `libc`: the C library found, whose directory is searched first.
+///
+/// Outputs: each library's path. One that glibc folds into `libc.so.6`, such as
+/// `-lpthread` on a new glibc, is skipped when it is not there; any other that
+/// is missing stops the link, naming it.
+fn rust_system_libs(libs: &[String], root: &Path, libc: &CLibrary) -> Result<Vec<String>, String> {
+    const IN_LIBC: [&str; 6] = ["c", "m", "pthread", "dl", "rt", "util"];
+    let mut dirs: Vec<std::path::PathBuf> = libc
+        .libs
+        .iter()
+        .filter_map(|l| Path::new(l).parent().map(Path::to_path_buf))
+        .filter(|d| d.is_absolute())
+        .collect();
+    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    for d in [
+        format!("lib/{arch}-linux-gnu"),
+        format!("usr/lib/{arch}-linux-gnu"),
+        "lib64".to_string(),
+        "usr/lib64".to_string(),
+        "lib".to_string(),
+        "usr/lib".to_string(),
+    ] {
+        dirs.push(root.join(d));
+    }
+    let mut out = Vec::new();
+    for name in libs.iter().filter_map(|a| a.strip_prefix("-l")) {
+        let plain = format!("lib{name}.so");
+        let found = dirs.iter().find_map(|d| {
+            if d.join(&plain).is_file() {
+                return Some(d.join(&plain));
+            }
+            let mut versioned: Vec<_> = std::fs::read_dir(d)
+                .ok()?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&format!("{plain}.")))
+                })
+                .collect();
+            versioned.sort();
+            versioned.into_iter().next()
+        });
+        match found {
+            Some(p) => out.push(p.display().to_string()),
+            None if IN_LIBC.contains(&name) => {}
+            None => {
+                return Err(format!(
+                    "the program's Rust packages need the system library lib{name}, which is in \
+                     none of {}",
+                    dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Purpose: This struct holds what linking against a C library takes.
@@ -482,6 +598,23 @@ mod tests {
         assert!(libs[2].0.ends_with("Metal"));
         // Only libSystem's stub lists the stub binder.
         assert!(!stub_tbd("arm64", libs[2].0, &libs[2].1).contains("dyld_stub_binder"));
+    }
+
+    #[test]
+    fn a_rust_staticlibs_system_libraries_are_found_beside_the_c_library() {
+        let root = std::env::temp_dir().join(format!("jade_link_rustlibs_{}", std::process::id()));
+        touch(&root, "lib/x86_64-linux-gnu/libc.so.6");
+        touch(&root, "lib/x86_64-linux-gnu/libgcc_s.so.1");
+        let libc = c_library_in(&root, "x86_64").unwrap();
+        let libs: Vec<String> =
+            ["-lgcc_s", "-lutil", "-lpthread", "-lc"].iter().map(|s| s.to_string()).collect();
+        let found = rust_system_libs(&libs, &root, &libc).unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].ends_with("libgcc_s.so.1"));
+        assert!(found[1].ends_with("libc.so.6"));
+        let missing = rust_system_libs(&["-lsqlite3".to_string()], &root, &libc);
+        assert!(missing.unwrap_err().contains("libsqlite3"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

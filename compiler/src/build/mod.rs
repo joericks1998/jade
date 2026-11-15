@@ -24,23 +24,15 @@ pub use crate::aot::Emit;
 /// Compile `program` to `out`.
 ///
 /// `source_path` anchors import resolution: imports resolve relative to the file
-/// being compiled, not the working directory.
-/// Returns the native packages the artifact will look for at startup, so the
-/// caller can copy exactly those beside it. Empty for an IR or MIR emit, which
-/// writes no artifact to put anything beside.
-pub fn build(
-    program: &TProgram,
-    source_path: &Path,
-    out: &Path,
-    emit: Emit,
-) -> Result<Vec<std::path::PathBuf>, String> {
+/// being compiled, not the working directory. An IR or MIR emit is written to
+/// stdout.
+pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
     let outcome = crate::aot::compile(program.clone(), Some(source_path), out, emit)?;
     if let Some(text) = outcome.ir {
         crate::stdio::write_str(&text);
         crate::stdio::flush();
-        return Ok(Vec::new());
     }
-    Ok(outcome.dependencies)
+    Ok(())
 }
 
 #[cfg(test)]

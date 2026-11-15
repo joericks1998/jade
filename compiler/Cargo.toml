@@ -31,6 +31,10 @@ inkwell = { version = "0.8", features = ["llvm18-1"] }
 # part of the library every build has, so none of its capabilities are turned on, and
 # the compiler's build pulls in no HTTP client, tokenizer or Metal bindings of dovata's.
 dovata = { path = "../dovata", default-features = false }
+# Reads the description records `#[jade::export]` puts in a Rust package's built
+# library: the staticlib is an archive of Mach-O or ELF objects, and each record sits
+# in a `jade_meta` section of one of them. Reading only; see src/rustpkg/meta.rs.
+object = { version = "0.41", default-features = false, features = ["read_core", "archive", "elf", "macho", "std"] }
 
 [build-dependencies]
 # Compiles src/backend/lld.cpp, the bridge into LLD; see build.rs.

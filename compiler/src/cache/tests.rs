@@ -220,6 +220,10 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 19 in 2.0.5. `JadeType::Handle` left the middle of its enum
+    // with the C path, so `Fn`, `AsyncFn`, `Future` and `Unknown` renumber under
+    // bincode, and a cached function type would read back as the next one.
+    //
     // Bumped to 17 in 2.0.4. No shape changed: `int` stopped folding into a
     // dereference and `toInt` started, and a class field's default now passes
     // through its type decorators. A stale TIR would still hold `?p |> int`
@@ -260,6 +264,6 @@ fn cache_format_version_is_stable() {
     // this one cannot run, and would do it without complaining.
     // 18 in 2.0.4: `Expr::PromptDeref` lost a field and `TExprKind::Pipe` is
     // new, so a cached tree from 17 would not read back as what it was.
-    assert_eq!(CACHE_FORMAT_VERSION, 18);
+    assert_eq!(CACHE_FORMAT_VERSION, 19);
     assert!(!JADE_VERSION.is_empty());
 }

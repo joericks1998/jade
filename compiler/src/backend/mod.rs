@@ -111,8 +111,6 @@ pub struct Cx<'ctx> {
     lits: RefCell<HashMap<String, PointerValue<'ctx>>>,
     /// Each class's destructor chain, as the functions to call.
     pub drops: HashMap<String, Vec<FunctionValue<'ctx>>>,
-    /// The native packages the program calls.
-    pub natives: Vec<mir::NativeLib>,
     /// The model the program runs, when it dereferences a prompt.
     pub infer: Option<crate::infer::plan::InferPlan>,
 }
@@ -137,7 +135,6 @@ impl<'ctx> Cx<'ctx> {
             support: RefCell::new(HashMap::new()),
             lits: RefCell::new(HashMap::new()),
             drops: HashMap::new(),
-            natives: prog.natives.clone(),
             infer: prog.infer.clone(),
         }
     }
@@ -537,7 +534,7 @@ pub fn compile(prog: &mir::Program, out: &Path, emit: Emit) -> Result<Option<Str
         .map_err(|e| e.to_string())?;
     let obj = out.with_extension("o");
     machine.write_to_file(&module, FileType::Object, &obj).map_err(|e| e.to_string())?;
-    let linked = link::link(&obj, out);
+    let linked = link::link(&obj, out, prog.rust.as_ref());
     std::fs::remove_file(&obj).ok();
     linked?;
     Ok(None)

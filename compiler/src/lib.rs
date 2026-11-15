@@ -38,6 +38,9 @@ pub mod infer;
 pub mod mir;
 pub mod pkg;
 pub mod project;
+/// Rust packages: the generated crate a project's Rust dependencies are built
+/// in, cargo, and the description records read out of the built library.
+pub mod rustpkg;
 pub mod stdio;
 /// The type checker: `type_infer` types each file into TIR, and `infer` gives
 /// every value of the merged program one static type.

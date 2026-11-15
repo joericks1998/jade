@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::project::{Abi, CSymbol};
+use crate::project::Abi;
 
 /// Read `<root>/jade.toml` as an editable document.
 fn document(root: &Path) -> Result<toml_edit::DocumentMut, String> {
@@ -31,6 +31,8 @@ pub enum Source<'a> {
     /// A git repository, and which commit: `("tag", "v1.0")`, `("rev", …)` or
     /// `("branch", …)`.
     Git(&'a str, (&'a str, &'a str)),
+    /// A crates.io version alone, which only a Rust package can come from.
+    Registry,
 }
 
 /// Add or replace `[dependencies.<name>]`.
@@ -44,7 +46,7 @@ pub fn add_dependency(
     source: Source<'_>,
     version: Option<&str>,
     abi: Abi,
-    symbols: Option<&std::collections::HashMap<String, CSymbol>>,
+    package: Option<&str>,
 ) -> Result<(), String> {
     let mut doc = document(root)?;
 
@@ -67,22 +69,12 @@ pub fn add_dependency(
             table.insert("git", toml_edit::value(u));
             table.insert(key, toml_edit::value(value))
         }
+        Source::Registry => None,
     };
-    if abi != Abi::Jade {
-        table.insert("abi", toml_edit::value(abi.as_str()));
+    if let Some(p) = package {
+        table.insert("package", toml_edit::value(p));
     }
-
-    if let Some(symbols) = symbols {
-        let mut syms = toml_edit::Table::new();
-        syms.set_implicit(true);
-        // Sorted so a regenerated manifest does not churn on HashMap order.
-        let mut names: Vec<&String> = symbols.keys().collect();
-        names.sort();
-        for sym in names {
-            syms.insert(sym, symbol_item(&symbols[sym]));
-        }
-        table.insert("symbols", toml_edit::Item::Table(syms));
-    }
+    table.insert("abi", toml_edit::value(abi.as_str()));
 
     deps.insert(name, toml_edit::Item::Table(table));
     save(root, &doc)
@@ -109,6 +101,7 @@ pub fn add_entry(
         (Some(p), _, _) => Source::Path(p),
         (_, Some(u), _) => Source::Url(u),
         (_, _, Some(g)) => Source::Git(g, git_ref.unwrap_or(("branch", "main"))),
+        _ if entry.abi == Some(Abi::Rust) && entry.version.is_some() => Source::Registry,
         _ => return Err(format!("dependency '{name}' has no source")),
     };
     add_dependency(
@@ -116,172 +109,9 @@ pub fn add_entry(
         name,
         source,
         entry.version.as_deref(),
-        entry.abi,
-        entry.symbols.as_ref(),
-    )?;
-    let has_extra = entry.structs.is_some()
-        || entry.headers.is_some()
-        || entry.include_dirs.is_some()
-        || entry.defines.is_some();
-    if has_extra {
-        let structs: std::collections::BTreeMap<_, _> =
-            entry.structs.clone().unwrap_or_default().into_iter().collect();
-        set_bindings(
-            root,
-            name,
-            &std::collections::BTreeMap::new(),
-            &structs,
-            entry.headers.as_deref().unwrap_or_default(),
-            entry.include_dirs.as_deref().unwrap_or_default(),
-            entry.defines.as_deref().unwrap_or_default(),
-        )?;
-    }
-    Ok(())
-}
-
-/// One `[dependencies.<pkg>.symbols.<sym>]` entry.
-///
-/// A symbol with no known prototype is written as the bare value `sym = "?"`
-/// rather than a table of empty fields. It has to be visibly unfinished: the
-/// whole point is that a person reads the file and fills it in, and `args = []`
-/// beside `ret = "?"` reads like a real binding for a function taking no
-/// arguments.
-fn symbol_item(spec: &CSymbol) -> toml_edit::Item {
-    if spec.is_unresolved() {
-        return toml_edit::value(crate::project::UNRESOLVED);
-    }
-
-    let mut t = toml_edit::Table::new();
-    let mut args = toml_edit::Array::new();
-    for a in &spec.args {
-        args.push(a.as_str());
-    }
-    t.insert("args", toml_edit::value(args));
-    t.insert("ret", toml_edit::value(spec.ret.as_str()));
-    if let Some(f) = spec.fails_when {
-        t.insert("fails_when", toml_edit::value(f.as_str()));
-    }
-    if let Some(f) = &spec.frees_with {
-        t.insert("frees_with", toml_edit::value(f.as_str()));
-    }
-    toml_edit::Item::Table(t)
-}
-
-/// Write a generated binding into `[dependencies.<name>]`.
-///
-/// **Merges rather than replaces.** `jade pkg bind --only sqlite3_column` is a
-/// normal way to bind a large header a piece at a time, and replacing the table
-/// would make the second run delete everything the first produced. Merging also
-/// leaves a hand-tuned entry alone unless this run regenerated that same symbol,
-/// which is the behavior you want from a generator you are allowed to correct.
-///
-/// The dependency must already exist. Creating one here would produce an entry
-/// with no `path` or `url`, which fails validation later and further from the
-/// cause.
-pub fn set_bindings(
-    root: &Path,
-    name: &str,
-    symbols: &std::collections::BTreeMap<String, CSymbol>,
-    structs: &std::collections::BTreeMap<String, crate::project::CStruct>,
-    headers: &[String],
-    include_dirs: &[String],
-    defines: &[String],
-) -> Result<(), String> {
-    let mut doc = document(root)?;
-
-    let dep = doc
-        .get_mut("dependencies")
-        .and_then(|d| d.as_table_mut())
-        .and_then(|d| d.get_mut(name))
-        .and_then(|d| d.as_table_mut())
-        .ok_or_else(|| {
-            format!(
-                "no [dependencies.{name}] in jade.toml. Add the library first, with\n  \
-                 jade pkg add {name} --path <the .so> --c-abi"
-            )
-        })?;
-
-    dep.insert("abi", toml_edit::value("c"));
-
-    // Merged, like the symbols below, and for the same reason: binding a second
-    // header is how a library split across several is bound at all. Replacing
-    // the list dropped the first header while keeping the symbols that came
-    // from it, so the shim declared none of them — and C lets an undeclared
-    // function be called, so it compiled clean and crashed on the first call
-    // that returned a pointer. `-Werror=implicit-function-declaration` in
-    // `pkg::compile_shim` is the second half of that fix.
-    let mut merge_list = |key: &str, values: &[String]| {
-        if values.is_empty() {
-            return;
-        }
-        let mut arr =
-            dep.get(key).and_then(|i| i.as_array()).cloned().unwrap_or_else(toml_edit::Array::new);
-        for v in values {
-            if !arr.iter().any(|e| e.as_str() == Some(v.as_str())) {
-                arr.push(v.as_str());
-            }
-        }
-        dep.insert(key, toml_edit::value(arr));
-    };
-    merge_list("headers", headers);
-    merge_list("include_dirs", include_dirs);
-    // Recorded like the include list and for the same reason: the header is
-    // read again on a fresh clone, and the shim compile includes it too. A
-    // macro given once on the command line and then forgotten leaves both of
-    // those failing on the `#error` the flag exists to get past.
-    merge_list("defines", defines);
-
-    if !structs.is_empty() {
-        let structs_tbl = dep
-            .entry("structs")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or_else(|| {
-                format!("dependency '{name}' has a `structs` key that is not a table")
-            })?;
-        structs_tbl.set_implicit(true);
-        for (sname, def) in structs {
-            let mut t = toml_edit::Table::new();
-            let mut fields = toml_edit::Array::new();
-            for (f, ty) in &def.fields {
-                let mut pair = toml_edit::Array::new();
-                pair.push(f.as_str());
-                pair.push(ty.as_str());
-                fields.push(pair);
-            }
-            t.insert("fields", toml_edit::value(fields));
-            // Only when true, so the common table stays as short as it was.
-            // Without it the generator writes no `<T>_new`, and a symbol taking
-            // `handle<T>` binds with nothing in the package able to produce one.
-            if def.held {
-                t.insert("held", toml_edit::value(true));
-            }
-            if !def.buffers.is_empty() {
-                let mut bufs = toml_edit::Array::new();
-                for b in &def.buffers {
-                    let mut it = toml_edit::InlineTable::new();
-                    it.insert("ptr", b.ptr.as_str().into());
-                    it.insert("len", b.len.as_str().into());
-                    it.insert("writable", b.writable.into());
-                    bufs.push(toml_edit::Value::InlineTable(it));
-                }
-                t.insert("buffers", toml_edit::value(bufs));
-            }
-            structs_tbl.insert(sname, toml_edit::Item::Table(t));
-        }
-    }
-
-    let syms = dep
-        .entry("symbols")
-        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| format!("dependency '{name}' has a `symbols` key that is not a table"))?;
-    syms.set_implicit(true);
-    for (sname, spec) in symbols {
-        syms.insert(sname, symbol_item(spec));
-    }
-
-    save(root, &doc)
+        entry.kind(),
+        entry.package.as_deref(),
+    )
 }
 
 /// Remove `[dependencies.<name>]`. Returns whether it was there.

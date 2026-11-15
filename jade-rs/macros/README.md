@@ -24,7 +24,7 @@ A proc-macro crate can export macros and nothing else, and the code the macro wr
 
 ## Gotchas
 
-*The generated code writes `#[unsafe(no_mangle)]` and `unsafe(link_section = ...)`*, which edition 2024 requires and Rust accepts in every edition from 1.82. That is why both crates set `rust-version = "1.82"`.
+*The generated code writes `#[unsafe(no_mangle)]` and `unsafe(link_section = ...)`*, which edition 2024 requires and Rust accepts in every edition from 1.82. So a package needs Rust 1.82 or later; the crates do not declare `rust-version`, because the workspace's resolver would then prefer dependency versions for 1.82 across every member.
 
 *Tokens from `quote!` take the package's edition*, not this crate's, so anything the expansion writes must compile under 2015 through 2024 rules. `examples/ffi/rust_values/values/` is edition 2024 and the crate's own tests are 2021, which covers both ends that matter.
 

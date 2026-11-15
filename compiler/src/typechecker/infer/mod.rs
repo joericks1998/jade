@@ -155,10 +155,6 @@ pub struct Typed {
     /// when a value of it is freed: its own first, then its ancestors', nearest
     /// first, a shared ancestor's once and last.
     pub drops: HashMap<String, Vec<InstKey>>,
-    /// The native calls whose result nothing declared and nothing in the
-    /// program settled, by instance and call node. The static backend cannot
-    /// read such a result, so it names the declaration to add.
-    pub unsettled_natives: HashSet<(InstKey, usize)>,
 }
 
 /// Purpose: This struct holds one struct type's layout as the backend needs it.
@@ -176,12 +172,9 @@ pub struct StructType {
 /// Purpose: This struct holds the whole checker's state.
 pub struct Checker<'a> {
     store: Store,
-    /// What each native function is declared to take and return, by its
+    /// What each Rust package function takes and returns, by its
     /// `__native$<pkg>$<fn>` name. See `native.rs`.
     natives: HashMap<String, native::NativeSig>,
-    /// The result slot of every native call with no declared result, by
-    /// instance and call node, to tell which ones use never settled.
-    native_results: HashMap<(InstKey, usize), Ty>,
     fns: HashMap<String, FnInfo<'a>>,
     /// Methods by (defining struct, method name).
     methods: HashMap<(String, String), FnInfo<'a>>,
@@ -236,13 +229,12 @@ pub fn check_program(program: &TProgram) -> Result<Typed, JadeError> {
     check_program_with(program, &HashMap::new())
 }
 
-/// Purpose: This function checks a program that calls native packages, with
-/// what `jade.toml` declares about their functions.
+/// Purpose: This function checks a program that calls Rust packages, with what
+/// their libraries describe.
 ///
 /// Inputs:
 /// - `program`: the merged program.
-/// - `natives`: each declared native function, by its `__native$<pkg>$<fn>`
-///   name.
+/// - `natives`: each Rust package function, by its `__native$<pkg>$<fn>` name.
 ///
 /// Outputs: the checker's answer, as `check_program` gives it.
 pub fn check_program_with(
@@ -266,7 +258,6 @@ impl<'a> Checker<'a> {
         Checker {
             store: Store::default(),
             natives: HashMap::new(),
-            native_results: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
             structs: HashMap::new(),
@@ -434,8 +425,8 @@ impl<'a> Checker<'a> {
                         Ty::Sized(SizedNum::from_name(other).unwrap_or(SizedNum::Byte))
                     }
                     other if self.structs.contains_key(other) => Ty::Struct(other.to_string()),
-                    // A type no program can spell as a decorator, such as `[char]`,
-                    // which a native record's class gives its fields.
+                    // A type no program can spell as a decorator, such as `[str]`,
+                    // which a Rust struct's class gives its fields.
                     other
                         if let Ok(t) = native::parse_type_in(
                             other,
@@ -601,16 +592,6 @@ impl<'a> Checker<'a> {
                 span: Span { line: 0, col: 0 },
             });
         }
-        // A native result left open would become nil below, which is not what
-        // the library returns; record those for the static backend to refuse.
-        let open: Vec<(InstKey, usize)> = self
-            .native_results
-            .clone()
-            .into_iter()
-            .filter(|(_, t)| self.store.has_empty_slot(t))
-            .map(|(k, _)| k)
-            .collect();
-        self.out.unsettled_natives = open.into_iter().collect();
         // Whatever no part of the program constrained is nil: an empty array
         // nothing pushes into, or a function that only ever raises.
         self.store.default_empty_slots();
