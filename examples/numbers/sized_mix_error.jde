@@ -1,0 +1,10 @@
+// Both sides of an operator have one type, as an instruction takes two
+// operands of one width. A short and an int do not mix; convert one side,
+// toInt(s) + n or s + toShort(n).
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+@short
+let s = 1
+let n = 2
+print(s + n)

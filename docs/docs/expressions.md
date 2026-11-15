@@ -242,9 +242,10 @@ fn add(a, b) { return a + b }
 let r = 5 |> add(3)           // add(5, 3) → 8
 ```
 
-A prompt dereference pipes like any other value. A type name used as a stage limits what the model generates and coerces the reply. A function stage placed after it receives the coerced value. See [Operators](operators#what-a-stage-can-be) for the full rule.
+A pipe calls its stage once per piece of the value on its left, as each piece arrives. A plain value is one piece, so `5 |> add(3)` is one call; a generator's values and a model's reply arrive in pieces. A typed dereference is one piece, so the stage after it gets the converted value. See [Operators](operators#pipe) for the full rule.
 
 ```jade
 prompt p = "What is 21 + 21? Respond with only the number."
-let n = ?p |> int |> double   // 84
+let n = toInt(?p) |> double   // 84
+?p |> write                   // the reply, as the model writes it
 ```

@@ -1,4 +1,7 @@
 // ── pipe operator |> ──────────────────────────────────────────────────────────
+//
+// A pipe calls its stages once per piece of the value on its left. Every value
+// here is one piece, so each pipe is one call; per_piece/ shows a stream.
 
 fn double(x) {
     return x * 2
@@ -12,18 +15,19 @@ fn greet(name) {
     return f"hello, {name}!"
 }
 
-// Simple pipe: value |> function (function receives value as sole argument)
+// Simple pipe: value |> function (the function receives the value as its sole
+// argument)
 let n = 5 |> double
 print(n)   // 10
 
-// Chained pipes — left-associative: 3 |> double |> double = double(double(3))
+// A chain runs left to right: 3 |> double |> double is double(double(3))
 let m = 3 |> double |> double
 print(m)   // 12
 
 // Pipe directly to print
 "piped string" |> print
 
-// Pipe with additional arguments: value is inserted as the *first* argument
+// A stage with arguments: the value goes in front of them
 let r = 5 |> add(3)
 print(r)   // 8
 

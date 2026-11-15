@@ -58,6 +58,7 @@ mod native;
 mod random;
 mod rc;
 mod sh;
+mod sized;
 mod tasks;
 mod text;
 mod time;
@@ -153,6 +154,14 @@ impl<'ctx> Cx<'ctx> {
         self.ctx.i8_type()
     }
 
+    pub fn i16t(&self) -> IntType<'ctx> {
+        self.ctx.i16_type()
+    }
+
+    pub fn f32t(&self) -> inkwell::types::FloatType<'ctx> {
+        self.ctx.f32_type()
+    }
+
     pub fn i1t(&self) -> IntType<'ctx> {
         self.ctx.bool_type()
     }
@@ -222,6 +231,7 @@ impl<'ctx> Cx<'ctx> {
             "isatty" => i32t.fn_type(&[i32t.into()], false),
             "snprintf" => i32t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], true),
             "strtod" => f64t.fn_type(&[ptr.into(), ptr.into()], false),
+            "strtof" => self.f32t().fn_type(&[ptr.into(), ptr.into()], false),
             "strtoll" => i64t.fn_type(&[ptr.into(), ptr.into(), i32t.into()], false),
             "qsort" => void.fn_type(&[ptr.into(), i64t.into(), i64t.into(), ptr.into()], false),
             "pthread_attr_init" | "pthread_attr_destroy" => i32t.fn_type(&[ptr.into()], false),

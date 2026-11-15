@@ -107,6 +107,7 @@ impl<'ctx> Cx<'ctx> {
             let s = match &t {
                 Ty::Int => f.int_text(v.into_int_value()),
                 Ty::Float => f.call_ptr(f.cx.float_tostr_fn(), &[v]),
+                Ty::Sized(s) => f.sized_text(*s, v),
                 Ty::Bool => f
                     .select(v.into_int_value(), f.cx.lit("true"), f.cx.lit("false"))
                     .into_pointer_value(),
@@ -164,7 +165,10 @@ impl<'ctx> Cx<'ctx> {
                 Ty::Struct(_) => f.cx.lit("<struct>"),
                 // Functions print the way v1 named them.
                 Ty::Func(crate::typechecker::infer::FuncRef::Builtin(n)) => match n.as_str() {
-                    "str" | "int" | "float" | "bool" | "char" => f.cx.lit(&format!("<type {n}>")),
+                    "str" | "int" | "float" | "bool" | "char" | "byte" | "short" | "ushort"
+                    | "int32" | "uint32" | "long" | "ulong" | "float32" | "double" => {
+                        f.cx.lit(&format!("<type {n}>"))
+                    }
                     "print" | "write" | "input" => f.cx.lit("<native fn>"),
                     other => f.cx.lit(&format!("<builtin {other}>")),
                 },
@@ -274,14 +278,32 @@ impl<'ctx> Cx<'ctx> {
 
     /// Purpose: This function returns `jade.tostr.float(x) -> str`.
     pub fn float_tostr_fn(&self) -> FunctionValue<'ctx> {
-        self.support("jade.tostr.float", Some(self.ptrt().into()), &[self.f64t().into()], |f| {
+        self.float_text_fn("jade.tostr.float", false)
+    }
+
+    /// Purpose: This function returns `jade.tostr.float32(x) -> str`, which
+    /// takes the float32 widened to a float and writes the fewest digits that
+    /// read back as the same float32, so `1.1` prints as `1.1`.
+    pub fn float32_tostr_fn(&self) -> FunctionValue<'ctx> {
+        self.float_text_fn("jade.tostr.float32", true)
+    }
+
+    /// Purpose: This function builds a float's text function.
+    ///
+    /// Inputs:
+    /// - `name`: the support function's name.
+    /// - `single`: whether the digits need only read back as a float32.
+    ///
+    /// Outputs: the function, taking a float.
+    fn float_text_fn(&self, name: &str, single: bool) -> FunctionValue<'ctx> {
+        self.support(name, Some(self.ptrt().into()), &[self.f64t().into()], |f| {
             let x = f.param(0).into_float_value();
             use inkwell::FloatPredicate as P;
             f.if_(f.fcmp(P::UNO, x, x), |f| f.ret(f.cx.lit("NaN")));
             f.if_(f.fcmp(P::OEQ, x, f.f64(f64::INFINITY)), |f| f.ret(f.cx.lit("inf")));
             f.if_(f.fcmp(P::OEQ, x, f.f64(f64::NEG_INFINITY)), |f| f.ret(f.cx.lit("-inf")));
 
-            let (neg, digits, k, exp) = f.float_digits(x);
+            let (neg, digits, k, exp) = f.float_digits(x, single);
 
             let sb = f.sb_new();
             f.if_(neg, |f| f.sb_push_lit(sb, "-"));
@@ -325,7 +347,7 @@ impl<'ctx> Cx<'ctx> {
             let s = f.param_ptr(0);
             let (a, b) = f.ascii_trim_span(s);
             let data = f.str_data(s);
-            let bad = |f: &F<'_, 'ctx>| f.fail_quoted("int(): cannot convert \"", s, "\" to int");
+            let bad = |f: &F<'_, 'ctx>| f.fail_quoted("cannot convert \"", s, "\" to an int");
             f.if_(f.sge(a, b), bad);
             let first = f.load_i8(f.at(data, a));
             let neg = f.eq(first, f.i8(45));
@@ -365,8 +387,7 @@ impl<'ctx> Cx<'ctx> {
         self.support("jade.tofloat.str", Some(self.f64t().into()), &[self.ptrt().into()], |f| {
             let s = f.param_ptr(0);
             let (a, b) = f.ascii_trim_span(s);
-            let bad =
-                |f: &F<'_, 'ctx>| f.fail_quoted("float(): cannot convert \"", s, "\" to float");
+            let bad = |f: &F<'_, 'ctx>| f.fail_quoted("cannot convert \"", s, "\" to a float");
             f.if_(f.sge(a, b), bad);
             let part = f
                 .call_ptr(f.cx.str_from_fn(), &[f.at(f.str_data(s), a).into(), f.sub(b, a).into()]);
@@ -390,7 +411,11 @@ impl<'ctx> Cx<'ctx> {
             let s = f.param_ptr(0);
             let len = f.str_len(s);
             let bad = |f: &F<'_, 'ctx>| {
-                f.fail_quoted("char(): expected a string of exactly one character, got \"", s, "\"")
+                f.fail_quoted(
+                    "toChar(): expected a string of exactly one character, got \"",
+                    s,
+                    "\"",
+                )
             };
             f.if_(f.eq(len, f.i64(0)), bad);
             let step = f.alloca(f.cx.i64t());
@@ -409,7 +434,7 @@ impl<'ctx> Cx<'ctx> {
             f.if_(f.or(out, surrogate), |f| {
                 let text = f.int_text(n);
                 let sb = f.sb_new();
-                f.sb_push_lit(sb, "char(): ");
+                f.sb_push_lit(sb, "toChar(): ");
                 f.sb_push_str(sb, text);
                 f.sb_push_lit(sb, " is not a Unicode scalar");
                 let m = f.sb_finish(sb);
@@ -453,6 +478,8 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     ///
     /// Inputs:
     /// - `x`: the float, not NaN or infinite.
+    /// - `single`: whether `x` is a widened float32, whose digits need only read
+    ///   back as the same float32.
     ///
     /// Outputs: whether it is negative, a stack buffer of ASCII digits, how
     /// many there are, and the decimal exponent of the first, so the value is
@@ -460,6 +487,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     pub fn float_digits(
         &self,
         x: inkwell::values::FloatValue<'ctx>,
+        single: bool,
     ) -> (IntValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>, IntValue<'ctx>) {
         use inkwell::FloatPredicate as P;
         let f = self;
@@ -472,10 +500,14 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                     f.cx.libc("snprintf"),
                     &[buf.into(), f.i64(64).into(), f.cx.cstr("%.*e").into(), p.into(), x.into()],
                 );
-                let back =
-                    f.callv(f.cx.libc("strtod"), &[buf.into(), f.null().into()]).into_float_value();
+                let back = if single {
+                    let b = f.callv(f.cx.libc("strtof"), &[buf.into(), f.null().into()]);
+                    f.b.build_float_ext(b.into_float_value(), f.cx.f64t(), "").expect("positioned")
+                } else {
+                    f.callv(f.cx.libc("strtod"), &[buf.into(), f.null().into()]).into_float_value()
+                };
                 let same = f.fcmp(P::OEQ, back, x);
-                f.and(f.not(same), f.slt(p, f.i32(17)))
+                f.and(f.not(same), f.slt(p, f.i32(if single { 9 } else { 17 })))
             },
             |f, _| f.store(prec, f.add(f.load_i32(prec), f.i32(1))),
         );
@@ -518,6 +550,43 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         let ev = f.load_i64(e);
         let exp = f.select_int(exp_neg, f.sub(f.i64(0), ev), ev);
         (neg, digits, f.load_i64(nd), exp)
+    }
+
+    /// Purpose: This function formats a `ulong` as decimal text.
+    pub fn uint_text(&self, v: IntValue<'ctx>) -> PointerValue<'ctx> {
+        let buf = self.alloca(self.cx.i8t().array_type(32));
+        let n = self.call_int(
+            self.cx.libc("snprintf"),
+            &[buf.into(), self.i64(32).into(), self.cx.cstr("%llu").into(), v.into()],
+        );
+        self.call_ptr(self.cx.str_from_fn(), &[buf.into(), self.sext(n, self.cx.i64t()).into()])
+    }
+
+    /// Purpose: This function formats a sized number as text.
+    ///
+    /// Inputs:
+    /// - `s`: the sized type.
+    /// - `v`: the value.
+    ///
+    /// Outputs: an owned string.
+    pub fn sized_text(
+        &self,
+        s: crate::mir::SizedNum,
+        v: BasicValueEnum<'ctx>,
+    ) -> PointerValue<'ctx> {
+        use crate::mir::SizedNum;
+        match s {
+            SizedNum::Float32 => {
+                let x = self
+                    .b
+                    .build_float_ext(v.into_float_value(), self.cx.f64t(), "")
+                    .expect("positioned");
+                self.call_ptr(self.cx.float32_tostr_fn(), &[x.into()])
+            }
+            SizedNum::ULong => self.uint_text(v.into_int_value()),
+            s if s.is_unsigned() => self.int_text(self.zext(v.into_int_value(), self.cx.i64t())),
+            _ => self.int_text(self.sext(v.into_int_value(), self.cx.i64t())),
+        }
     }
 
     /// Purpose: This function formats an int as decimal text.
@@ -592,7 +661,8 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     /// Purpose: This function runs an LLVM overflow-checking intrinsic.
     ///
     /// Inputs:
-    /// - `op`: `sadd`, `ssub` or `smul`.
+    /// - `op`: `sadd`, `ssub` or `smul`, or `uadd`, `usub` or `umul` for an
+    ///   unsigned type. The operands' width picks the intrinsic's.
     /// - `a`, `b`: the operands.
     ///
     /// Outputs: the wrapped result and whether it overflowed.
@@ -605,7 +675,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         let name = format!("llvm.{op}.with.overflow");
         let intr = inkwell::intrinsics::Intrinsic::find(&name).expect("overflow intrinsic exists");
         let decl =
-            intr.get_declaration(&self.cx.module, &[self.cx.i64t().into()]).expect("declaration");
+            intr.get_declaration(&self.cx.module, &[a.get_type().into()]).expect("declaration");
         let pair = self.callv(decl, &[a.into(), b.into()]).into_struct_value();
         let v = self.b.build_extract_value(pair, 0, "").expect("positioned").into_int_value();
         let o = self.b.build_extract_value(pair, 1, "").expect("positioned").into_int_value();

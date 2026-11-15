@@ -8,15 +8,17 @@ These are Jade's value types.
 
 | Type | Description |
 |------|-------------|
-| `int` | Signed integer, 63 bits wide |
-| `float` | 64-bit floating point (`f64`) |
+| `int` | Signed integer, 64 bits wide; also spelled `long` |
+| `float` | 64-bit floating point (`f64`); also spelled `double` |
+| `byte`, `short`, `ushort`, `int32`, `uint32`, `ulong` | Integers of a fixed width, signed or not; see [Sized numbers](#sized-numbers) |
+| `float32` | 32-bit floating point |
 | `bool` | Boolean `true` or `false` |
 | `char` | A single Unicode scalar; what indexing or iterating a string yields |
 | `str` | UTF-8 string with indexing, iteration, and concatenation |
 | `bytes` | A counted sequence of raw octets; binary data that is not text |
 | `array` | Mutable array with index access; may hold values of different types |
 | `dict` | String-keyed mutable hash map |
-| `stream` | A buffered sequence produced by a `yield`ing function, or by `?p` |
+| `stream` | A buffered sequence produced by a `yield`ing function, or by a pipe over one |
 | `struct` | User-defined record type with named fields |
 | `fn` | First-class function value |
 | `prompt` | Text to send to a model; `?p` dereferences one |
@@ -26,11 +28,19 @@ These are Jade's value types.
 
 An `async fn` and the `future` its call produces are covered in [Async](async).
 
-## Int is 63 bits, not 64
+## Int is 64 bits
 
-An `int` runs from `-4611686018427387904` to `4611686018427387903`. One bit of the machine word is spent tagging what kind of value it holds, which leaves 63 bits for the number. The language exposes that limit directly, so a program means the same thing whether it is interpreted or compiled.
+An `int` is a signed 64-bit integer, from `-9223372036854775808` to `9223372036854775807`. Jade 1.x spent one bit of the machine word tagging what kind of value it held, which left 63 bits; Jade 2.0 knows every value's type when it compiles, so the whole word holds the number.
 
-A literal outside that range is refused when the file is read. The lowest value is a special case. Jade treats `-` as a separate negation, so it checks the digits before applying the sign. That means you cannot type `-4611686018427387904` directly, though arithmetic can still reach it.
+A literal outside that range is refused when the file is read. The lowest value is a special case. Jade treats `-` as a separate negation, so it checks the digits before applying the sign, and allows the one magnitude, `9223372036854775808`, only when a `-` comes before it.
+
+An int literal can also be written in hex: `0x` or `0X`, then the digits 0-9 and a-f in either case. It is an int like any other, with the same range.
+
+```jade
+print(0x11)                  // 17
+print(0xff + 1)              // 256
+print(0x7fffffffffffffff)    // 9223372036854775807
+```
 
 Arithmetic that would leave the range raises an error instead of wrapping around:
 
@@ -42,6 +52,45 @@ try {
     print("overflow caught")
 }
 ```
+
+## Sized numbers
+
+Beside `int` and `float`, Jade has number types of a fixed width, for C libraries, file formats and kernels that use them.
+
+| Type | Width | Range |
+|------|-------|-------|
+| `byte` | 8 bits, unsigned | 0 to 255 |
+| `short` | 16 bits | -32768 to 32767 |
+| `ushort` | 16 bits, unsigned | 0 to 65535 |
+| `int32` | 32 bits | -2147483648 to 2147483647 |
+| `uint32` | 32 bits, unsigned | 0 to 4294967295 |
+| `int`, also `long` | 64 bits | the int's range |
+| `ulong` | 64 bits, unsigned | 0 to 18446744073709551615 |
+| `float32` | 32-bit float | single precision |
+| `float`, also `double` | 64-bit float | double precision |
+
+`long` and `double` are other names for `int` and `float`, not new types.
+
+Arithmetic follows the rules of assembly code:
+
+- *Both sides of an operator have one type, and so does the result.* A `short` plus an `int` is refused by the build, with the fix in the message: `toInt(s) + n`, or `s + toShort(n)`.
+- *A literal takes the type it meets.* With `b` a byte, `b + 1` adds the byte 1, and `@byte let b = 300` is refused, since 300 does not fit. A variable never changes type: `@uint32 let y = n` with `n` an int needs `toUint32(n)`.
+- *Overflow raises.* A byte holding 250 plus 10 raises `byte overflow`, and so does a byte holding 3 minus 5. Division by zero raises.
+- *Unsigned types divide, compare and shift right as unsigned.*
+- *Converting raises when the value does not fit.* `toByte(300)` raises `300 does not fit a byte, which holds 0 to 255`; `toByte(n & 0xff)` keeps the low bits. Converting to a wider type never fails.
+
+```jade
+@byte
+let b = 200
+print(b + 55)          // 255
+print(toInt(b) + 1000) // 1200
+
+@float32
+let f = 1.1
+print(f * 3)           // 3.3000002, in single precision
+```
+
+`int` and `float` keep one exception: they still mix, so `1 + 0.5` is 1.5. The sized types do not.
 
 ## Type Coercion Rules
 
@@ -64,6 +113,38 @@ Arithmetic promotion converts an `int` to a `float` when the other operand is a 
 Every row marked "type error" is caught by `jade check` before the program runs, not while it runs.
 :::
 
+## Type functions and converters
+
+Each built-in type has two functions. The *type function*, named for the type, checks that a value already has that type and returns it unchanged. The *converter* makes a value of the type from another one.
+
+| Type | Type function | Converter |
+|------|---------------|-----------|
+| `int` | `int(x)` | `toInt(x)` |
+| `float` | `float(x)` | `toFloat(x)` |
+| `str` | `str(x)` | `toString(x)` |
+| `bool` | `bool(x)` | `toBool(x)` |
+| `char` | `char(x)` | `toChar(x)` |
+
+```jade
+print(int(5))          // 5
+print(float(5))        // 5.0: an int is also a float
+print(toInt("42"))     // 42
+print(toString(7))     // 7
+let n = int("42")      // refused by the build: int() needs an int, got str; convert one with toInt()
+```
+
+A type function's check happens when the program is built, since every value's type is known then. A JSON value is the exception. Its kind is known only when the program runs, so `int(j)` raises then if `j` is not an int.
+
+A type name as a decorator on a `let` is the same call. `@int let n = v` means `let n = int(v)`, so it checks the type, and a converter decorates the same way:
+
+```jade
+@float
+let ratio = 1          // 1.0
+
+@toInt
+let n = "42"           // 42
+```
+
 ### The one exception: `char` and `str`
 
 A `char` compares equal to the one-character string that spells it. It also orders against strings and concatenates with them in either direction. That is a deliberate hole in the strict-equality rule above, and the reason is worth knowing so you do not read the rest of the rule as merely a suggestion.
@@ -81,14 +162,14 @@ for c in s { print(c) }  // four lines: "é" is one character, not two
 
 A `char` is a single Unicode scalar, not a byte. It is an *immediate* value, meaning it fits inside the tagged value word alongside `int`, `bool`, and `nil`. Scanning a string therefore allocates nothing. The old one-character-string behavior allocated once per character.
 
-There is no char literal. A char comes from indexing a string, iterating one, `char("x")`, `char(<number>)`, or `?p |> char`.
+There is no char literal. A char comes from indexing a string, iterating one, `toChar("x")`, `toChar(<number>)`, or `toChar(?p)`.
 
-`int(c)` gives a character's Unicode scalar. `char(n)` builds a character from a number, and refuses anything that is not a valid scalar rather than substituting a replacement character.
+`toInt(c)` gives a character's Unicode scalar. `toChar(n)` builds a character from a number, and refuses anything that is not a valid scalar rather than substituting a replacement character.
 
-The pair exists for reading fixed-size C fields across the FFI. A `char[32]` arrives as thirty-two characters with its NUL padding intact. Nothing trims the padding, because trimming would mean guessing where the text stops. Instead, a program finds the end itself by testing `int(c) == 0`.
+The pair exists for reading fixed-size C fields across the FFI. A `char[32]` arrives as thirty-two characters with its NUL padding intact. Nothing trims the padding, because trimming would mean guessing where the text stops. Instead, a program finds the end itself by testing `toInt(c) == 0`.
 
 ```jade
-let c = char("x")
+let c = toChar("x")
 let first = "hello"[0]
 ```
 
@@ -144,7 +225,7 @@ Bytes carry a trust marker the same way strings do. So `sh.exec` refuses `fs.rea
 
 ## Stream
 
-A function whose body contains a `yield` returns a *stream* rather than a single value. The body runs all the way through, filling a buffer, and the caller receives that buffer.
+A function whose body contains a `yield` returns a *stream* rather than a single value. Called, the body runs all the way through, filling a buffer, and the caller receives that buffer. Piped, `doubles(4) |> print`, each value goes to the stage at the moment it is yielded instead; see [Operators](operators#pipe).
 
 ```jade
 fn doubles(n) {
@@ -164,7 +245,7 @@ for x in s { print(x) }   // the same values again
 
 A stream is a buffer, not a one-shot channel. It keeps everything it produced, so reading it twice gives the same values twice. There is no "already consumed" state to keep track of. `len` and indexing work for the same reason.
 
-A prompt dereference is a stream too. `?p` produces one lazily, so `print(?p)` shows tokens as they arrive. You can still read the same value again afterwards.
+A prompt's reply arrives in pieces too. `?p` waits for the whole reply and gives a `str`, while `?p |> write` shows each piece as the model writes it, and `?p |> f` gives back a stream of what `f` returned.
 
 A bare `return` stops a generator early. Writing `return x` is a compile error, because a function that yields already produces a stream. Returning a value as well would ask it to be two things at once.
 
@@ -179,7 +260,7 @@ prompt p = "Name one prime number under 10."
 print(?p)
 ```
 
-`?p` on its own produces a stream of the reply. A `|>` stage after it limits what the model may generate and coerces the result, so `?p |> int` gives you an `int`. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#what-a-stage-can-be) for what a stage may be.
+`?p` on its own gives the whole reply as a `str`. A converter around it limits what the model may generate and converts the result, so `toInt(?p)` gives you an `int`. A pipe after it, `?p |> write`, runs once per piece of the reply as the model writes it. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#pipe) for how pipes work.
 
 ## Handle
 

@@ -423,13 +423,13 @@ Guessing either way is worse than asking. Reading `g_strdup` as borrowed leaks i
 
 A C struct often holds a fixed-size row rather than a pointer, such as `char mnemonic[32]`, `uint8_t bytes[24]`, or `int reserved[4]`. Those come back as a Jade array, and the element type decides what is inside. Plain `char` gives characters, and everything else gives numbers.
 
-Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, NUL padding included, because trimming would mean guessing where the text stops. Test `int(c) == 0` to find the end yourself:
+Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, NUL padding included, because trimming would mean guessing where the text stops. Test `toInt(c) == 0` to find the end yourself:
 
 ```jade
 fn text(row) {
     let s = ""
     for ch in row {
-        if int(ch) == 0 {
+        if toInt(ch) == 0 {
             break
         }
         s = s + ch

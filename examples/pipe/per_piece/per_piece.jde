@@ -1,0 +1,75 @@
+// A pipe calls its stages once per piece, as each piece arrives.
+//
+// `f(x)` waits for all of `x`; `x |> f` calls `f` on each piece of `x`. A call
+// to a generator gives each value at the moment it is yielded, so the prints
+// below interleave: a value goes through every stage before the generator
+// makes the next one. See design/v2-pipes.md.
+
+fn numbers() {
+    print("making 1")
+    yield 1
+    print("making 2")
+    yield 2
+}
+
+fn double(x) {
+    return x * 2
+}
+
+fn add(x, y) {
+    return x + y
+}
+
+// Live: each value goes through `print` as it is yielded.
+numbers() |> print
+
+// A call waits: the generator runs to the end first, then prints once.
+print(numbers())
+
+// A chain is one pipe: each value is doubled and printed before the next.
+numbers() |> double |> print
+
+// Over a stream, a pipe gives back a stream of what its last stage gave.
+let doubled = numbers() |> double
+print(doubled)
+
+// A stream that has already arrived gives its values one after another.
+let held = numbers()
+print(held |> add(10))
+
+// Anything that is not a stream is one piece, an array included.
+print(5 |> double)
+[1, 2, 3] |> print
+
+// A stage's other arguments are worked out once, before the first piece.
+let calls = 0
+fn next_offset() {
+    calls = calls + 1
+    return calls * 100
+}
+numbers() |> add(next_offset()) |> print
+print(calls)
+
+// A raise in a stage stops the generator where it is. The generator's own
+// `try` does not catch it; the raise arrives where the pipe is written.
+fn guarded() {
+    try {
+        yield 1
+        yield 2
+    } catch e {
+        print("the generator caught it")
+    }
+}
+
+fn refuse_two(x) {
+    if x == 2 {
+        raise "no twos"
+    }
+    return x
+}
+
+try {
+    guarded() |> refuse_two |> print
+} catch e {
+    print(f"the caller caught: {e}")
+}

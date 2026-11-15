@@ -1,0 +1,8 @@
+// A hex literal uses the digits 0-9 and a-f.
+//
+// `0x1g` is refused where it is written rather than read as 0x1 followed by a
+// name `g`.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+print(0x1g)

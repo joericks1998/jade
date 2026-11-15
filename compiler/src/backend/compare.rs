@@ -100,7 +100,10 @@ impl<'a, 'ctx> F<'a, 'ctx> {
             Ty::Int | Ty::Bool | Ty::Nil => self.eq(a.into_int_value(), b.into_int_value()),
             // A char's taint bit is not part of its value.
             Ty::Char => self.eq(self.char_cp(a.into_int_value()), self.char_cp(b.into_int_value())),
-            Ty::Float => self.fcmp(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value()),
+            Ty::Float | Ty::Sized(crate::mir::SizedNum::Float32) => {
+                self.fcmp(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value())
+            }
+            Ty::Sized(_) => self.eq(a.into_int_value(), b.into_int_value()),
             // Bytes share the string layout, so they compare the same way.
             Ty::Str | Ty::Bytes => self.call_int(self.cx.str_eq_fn(), &[a, b]),
             Ty::Struct(_) => {
@@ -149,7 +152,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     ) -> IntValue<'ctx> {
         match t {
             Ty::Str => self.call_int(self.cx.str_cmp_fn(), &[a, b]),
-            Ty::Float => {
+            Ty::Float | Ty::Sized(crate::mir::SizedNum::Float32) => {
                 let (x, y) = (a.into_float_value(), b.into_float_value());
                 let lt = self.fcmp(FloatPredicate::OLT, x, y);
                 let gt = self.fcmp(FloatPredicate::OGT, x, y);
@@ -161,8 +164,14 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 if *t == Ty::Char {
                     (x, y) = (self.char_cp(x), self.char_cp(y));
                 }
-                // Ints compare signed; bools and chars have no sign to keep.
-                let (pl, pg) = if *t == Ty::Int {
+                // Ints and the signed sized types compare signed; bools, chars
+                // and the unsigned types have no sign to keep.
+                let signed = match t {
+                    Ty::Int => true,
+                    Ty::Sized(s) => !s.is_unsigned(),
+                    _ => false,
+                };
+                let (pl, pg) = if signed {
                     (IntPredicate::SLT, IntPredicate::SGT)
                 } else {
                     (IntPredicate::ULT, IntPredicate::UGT)

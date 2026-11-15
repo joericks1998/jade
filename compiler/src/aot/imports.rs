@@ -1463,6 +1463,21 @@ impl Renamer {
             }
             TExprKind::Await { expr } => self.rename_expr(expr),
             TExprKind::PromptLiteral { body } => self.rename_expr(body),
+            // The piece and the hoisted arguments are names the pipe binds, so
+            // they shadow any top-level name inside its stages.
+            TExprKind::Pipe { source, hoisted, piece, body } => {
+                self.rename_expr(source);
+                for (_, v) in hoisted.iter_mut() {
+                    self.rename_expr(v);
+                }
+                self.push_scope();
+                self.bind_local(piece);
+                for (name, _) in hoisted.iter() {
+                    self.bind_local(name);
+                }
+                self.rename_expr(body);
+                self.pop_scope();
+            }
             TExprKind::Integer(_)
             | TExprKind::Float(_)
             | TExprKind::Bool(_)
@@ -1566,12 +1581,7 @@ impl Renamer {
                 }
             }
             Expr::PromptLiteral { body, .. } => self.rename_ast_expr(body),
-            Expr::PromptDeref { expr, constraint, .. } => {
-                self.rename_ast_expr(expr);
-                if let Some(c) = constraint {
-                    self.rename_ast_expr(c);
-                }
-            }
+            Expr::PromptDeref { expr, .. } => self.rename_ast_expr(expr),
             Expr::Dict { entries, .. } => {
                 for (k, v) in entries.iter_mut() {
                     self.rename_ast_expr(k);

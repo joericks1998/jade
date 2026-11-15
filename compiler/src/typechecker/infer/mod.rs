@@ -45,9 +45,10 @@ use crate::frontend::ast::StructFieldDef;
 use crate::frontend::error::{JadeError, Span};
 use crate::typechecker::tir::{TExpr, TExprKind, TProgram, TStmt};
 
+pub(crate) use builtins::canonical;
 pub use members::check_members;
 use ty::Store;
-pub use ty::{FnTy, FuncRef, Ty, display_name as display_type_name};
+pub use ty::{FnTy, FuncRef, SizedNum, Ty, display_name as display_type_name, with_article};
 
 /// The most instances one function may have. A function that calls itself with
 /// a different type every time, such as `f(x)` calling `f([x])`, would make
@@ -209,6 +210,12 @@ pub struct Checker<'a> {
     top: &'a [TStmt],
     pass: usize,
     final_pass: bool,
+    /// Slots a number literal met while they were still empty, each with the
+    /// type the literal has when nothing else decides: `int`, or `float` for a
+    /// literal with a decimal point. A literal takes the type of a sized slot,
+    /// so it waits for the rest of the program to fill the slot first. Rebuilt
+    /// each pass; see `Checker::accept`.
+    pending_literals: Vec<(Ty, Ty)>,
     /// Whether a pass left an `==` between an unknown side and a string or
     /// char, in case the code that settles the side has not been checked yet.
     deferred_eq: bool,
@@ -276,6 +283,7 @@ impl<'a> Checker<'a> {
             top,
             pass: 0,
             final_pass: false,
+            pending_literals: Vec::new(),
             deferred_eq: false,
             force_eq: false,
             error: None,
@@ -417,11 +425,14 @@ impl<'a> Checker<'a> {
             let c = ty::display_name(&class).to_string();
             for d in decs.iter().filter(|d| *d != "public") {
                 let t = match d.as_str() {
-                    "int" => Ty::Int,
-                    "float" => Ty::Float,
+                    "int" | "long" => Ty::Int,
+                    "float" | "double" => Ty::Float,
                     "str" => Ty::Str,
                     "bool" => Ty::Bool,
                     "char" => Ty::Char,
+                    other if SizedNum::from_name(other).is_some() => {
+                        Ty::Sized(SizedNum::from_name(other).unwrap_or(SizedNum::Byte))
+                    }
                     other if self.structs.contains_key(other) => Ty::Struct(other.to_string()),
                     // A type no program can spell as a decorator, such as `[char]`,
                     // which a native record's class gives its fields.
@@ -553,6 +564,7 @@ impl<'a> Checker<'a> {
         for _ in 0..MAX_PASSES {
             let before = self.store.version;
             self.deferred_eq = false;
+            self.pending_literals.clear();
             self.one_pass();
             if let Some(e) = self.error.take() {
                 return Err(e);
@@ -562,6 +574,19 @@ impl<'a> Checker<'a> {
                 // more pass makes both sides one type.
                 if self.deferred_eq && !self.force_eq {
                     self.force_eq = true;
+                    continue;
+                }
+                // A literal waited on a slot nothing else filled; it takes
+                // its own type there, and the passes go on from that.
+                let waiting = std::mem::take(&mut self.pending_literals);
+                let mut filled = false;
+                for (slot, t) in waiting {
+                    if matches!(self.store.shallow(&slot), Ty::Var(_)) {
+                        let _ = self.store.join(&slot, &t);
+                        filled = true;
+                    }
+                }
+                if filled {
                     continue;
                 }
                 settled = true;

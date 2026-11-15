@@ -220,6 +220,11 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 17 in 2.0.4. No shape changed: `int` stopped folding into a
+    // dereference and `toInt` started, and a class field's default now passes
+    // through its type decorators. A stale TIR would still hold `?p |> int`
+    // folded in, which `jade check` would then let through.
+    //
     // Bumped to 16 in 2.0.1. `x is Class` added `Expr::Is` and `TExprKind::Is`
     // at the front of their enums, so every other variant renumbers under
     // bincode. A stale cache read back `for n in nums` with an empty name.
@@ -253,6 +258,8 @@ fn cache_format_version_is_stable() {
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 16);
+    // 18 in 2.0.4: `Expr::PromptDeref` lost a field and `TExprKind::Pipe` is
+    // new, so a cached tree from 17 would not read back as what it was.
+    assert_eq!(CACHE_FORMAT_VERSION, 18);
     assert!(!JADE_VERSION.is_empty());
 }

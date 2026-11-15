@@ -34,5 +34,6 @@ print("a" < "b")
 print(s[0] + "at")
 print("the " + s[0])
 
-// char() converts a one-character string.
-print(char("x"))
+// toChar() converts a one-character string; char() only checks that a value
+// already is a char.
+print(toChar("x"))

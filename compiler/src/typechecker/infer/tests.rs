@@ -211,7 +211,7 @@ fn a_function_passed_as_a_value_takes_its_types_from_the_call() {
 #[test]
 fn map_and_filter_are_typed() {
     let t = ok(
-        "fn double(x) { x * 2 }\nfn big(x) { x > 1 }\nlet xs = [1, 2, 3]\nlet ys = xs.map(double)\nlet zs = xs.filter(big)\nlet ss = xs.map(str)\n",
+        "fn double(x) { x * 2 }\nfn big(x) { x > 1 }\nlet xs = [1, 2, 3]\nlet ys = xs.map(double)\nlet zs = xs.filter(big)\nlet ss = xs.map(toString)\n",
     );
     assert_eq!(global(&t, "ys"), Ty::Array(Box::new(Ty::Int)));
     assert_eq!(global(&t, "zs"), Ty::Array(Box::new(Ty::Int)));
@@ -269,6 +269,67 @@ fn json_is_its_own_type() {
         ok("use std::json\nlet v = json.parse(\"{}\")\nlet a = v[\"Action\"]\nlet s = str(a)\n");
     assert_eq!(global(&t, "v"), Ty::Json);
     assert_eq!(global(&t, "s"), Ty::Str);
+}
+
+#[test]
+fn type_functions_check_and_converters_convert() {
+    let t = ok("let a = int(5)\nlet b = float(5)\nlet c = toInt(\"42\")\nlet d = toString(7)\n\
+                @float\nlet e = 2\n@toInt\nlet f = \"9\"\n");
+    assert_eq!(global(&t, "a"), Ty::Int);
+    assert_eq!(global(&t, "b"), Ty::Float);
+    assert_eq!(global(&t, "c"), Ty::Int);
+    assert_eq!(global(&t, "d"), Ty::Str);
+    assert_eq!(global(&t, "e"), Ty::Float);
+    assert_eq!(global(&t, "f"), Ty::Int);
+    rejects("let n = int(\"42\")\n", "int() needs an int, got str; convert one with toInt()");
+    rejects("@int\nlet n = 4.5\n", "int() needs an int, got float");
+    rejects("let s = str(7)\n", "convert one with toString()");
+    rejects("let b = bool(1)\n", "convert one with toBool()");
+    rejects("let c = char(\"j\")\n", "convert one with toChar()");
+    rejects("let x = float(\"1.5\")\n", "float() needs a float or an int, got str");
+    rejects(
+        "class Rate {\n    @public @int let count = \"3\"\n}\nprint(Rate {}.count)\n",
+        "int() needs an int, got str",
+    );
+}
+
+#[test]
+fn sized_numbers_follow_the_assembly_rules() {
+    use super::SizedNum;
+    let t = ok("@byte\nlet b = 200\nlet c = b + 1\n@short\nlet s = -5\nlet n = toInt(s)\n\
+                @float32\nlet f = 1.5\n@long\nlet l = 3\n@double\nlet d = 2\nlet xs = [b, 1]\n\
+                let big = b > 7\n");
+    assert_eq!(global(&t, "b"), Ty::Sized(SizedNum::Byte));
+    assert_eq!(global(&t, "c"), Ty::Sized(SizedNum::Byte));
+    assert_eq!(global(&t, "s"), Ty::Sized(SizedNum::Short));
+    assert_eq!(global(&t, "n"), Ty::Int);
+    assert_eq!(global(&t, "f"), Ty::Sized(SizedNum::Float32));
+    assert_eq!(global(&t, "l"), Ty::Int);
+    assert_eq!(global(&t, "d"), Ty::Float);
+    assert_eq!(global(&t, "xs"), Ty::Array(Box::new(Ty::Sized(SizedNum::Byte))));
+    assert_eq!(global(&t, "big"), Ty::Bool);
+    // A literal that meets a byte later, through a return, takes its type.
+    ok(
+        "fn pick(c, x) {\n    if c {\n        return 0\n    }\n    return x\n}\nprint(pick(true, byte(3)))\n",
+    );
+    rejects(
+        "@short\nlet s = 1\nlet n = 2\nprint(s + n)\n",
+        "these are a short and an int; convert one side with toInt() or toShort()",
+    );
+    rejects("@byte\nlet c = 300\n", "300 does not fit a byte, which holds 0 to 255");
+    rejects("@byte\nlet c = -1\n", "-1 does not fit a byte");
+    rejects("@int32\nlet c = 1.5\n", "an int32 holds whole numbers");
+    rejects(
+        "let n = 5\n@uint32\nlet y = n\n",
+        "uint32() needs a uint32, got int; convert one with toUint32()",
+    );
+    rejects("@byte\nlet b = 3\nprint(-b)\n", "cannot negate a byte, which is unsigned");
+    rejects("@float32\nlet f = 1.5\nprint(f & f)\n", "'&' works on integers");
+    rejects("@byte\nlet b = 3\nprint(1 << b)\n", "a shift amount is an int, and this is a byte");
+    rejects(
+        "@float32\nlet f = 1.5\nlet x = f + 2.5\nlet y = x + toFloat(1)\n",
+        "float32 and a float",
+    );
 }
 
 #[test]

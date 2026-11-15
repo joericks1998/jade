@@ -488,3 +488,18 @@ fn a_task_storing_a_scalar_parameter_is_allowed() {
     )
     .expect("an int parameter is not shared");
 }
+
+/// A pipe over a generator runs its stages inside a copy of the generator, so
+/// a stage that writes a global is found through the copy, and the message
+/// quotes the pipe as written rather than the generator alone.
+#[test]
+fn a_pipe_whose_stage_writes_a_global_is_rejected_in_a_task() {
+    let msg = rejection(concat!(
+        "fn two() {\n    yield 1\n}\n",
+        "let total = 0\n",
+        "fn bump(x) {\n    total = total + x\n    return total\n}\n",
+        "async fn work() {\n    two() |> bump\n    return 1\n}\n",
+        "print(await work())\n",
+    ));
+    assert!(msg.contains("`two |> bump`, which writes a global"), "{msg}");
+}

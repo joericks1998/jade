@@ -157,6 +157,21 @@ pub enum TExprKind {
     PromptLiteral {
         body: Box<TExpr>,
     },
+    /// `source |> f |> g(a)`, a whole chain: `body` runs once per piece of
+    /// `source` as each piece arrives, with `piece` naming the piece in hand.
+    ///
+    /// `body` is the stages applied to the piece, `g(f(piece), a)`. A stage
+    /// argument that is not a literal or a name is worked out once, before the
+    /// first piece: it is in `hoisted`, bound to the name `body` uses. A source
+    /// whose type is a stream gives its values as pieces, a call to a generator
+    /// at the moment each is yielded; any other source is one piece. See
+    /// `design/v2-pipes.md`.
+    Pipe {
+        source: Box<TExpr>,
+        hoisted: Vec<(String, TExpr)>,
+        piece: String,
+        body: Box<TExpr>,
+    },
 }
 
 // ── TIR statements ────────────────────────────────────────────────────────────

@@ -153,9 +153,51 @@ impl<'ctx> Cx<'ctx> {
                 });
                 f.json_kind_fail(j, "cannot loop over json %s");
             }),
+            JsonFn::AsInt => self.support(&name, Some(i.into()), &[p.into()], |f| {
+                let j = f.param_ptr(0);
+                f.json_expect(
+                    j,
+                    KIND_INT,
+                    "int() needs an int, got json %s; convert one with toInt()",
+                );
+                f.ret(f.load_i64(f.at_c(j, PAYLOAD)));
+            }),
+            JsonFn::AsFloat => self.support(&name, Some(self.f64t().into()), &[p.into()], |f| {
+                let j = f.param_ptr(0);
+                f.if_(f.not(f.is_null(j)), |f| {
+                    let kind = f.load_i64(f.at_c(j, KIND));
+                    let w = f.load_i64(f.at_c(j, PAYLOAD));
+                    f.if_(f.eq(kind, f.i64(KIND_INT)), |f| f.ret(f.itof(w)));
+                    f.if_(f.eq(kind, f.i64(KIND_FLOAT)), |f| f.ret(f.word_float(w)));
+                });
+                f.json_kind_fail(
+                    j,
+                    "float() needs a float or an int, got json %s; convert one with toFloat()",
+                );
+            }),
+            JsonFn::AsBool => self.support(&name, Some(self.i1t().into()), &[p.into()], |f| {
+                let j = f.param_ptr(0);
+                f.json_expect(
+                    j,
+                    KIND_BOOL,
+                    "bool() needs a bool, got json %s; convert one with toBool()",
+                );
+                f.ret(f.ne(f.load_i64(f.at_c(j, PAYLOAD)), f.i64(0)));
+            }),
+            JsonFn::AsStr => self.support(&name, Some(p.into()), &[p.into()], |f| {
+                let j = f.param_ptr(0);
+                f.json_expect(
+                    j,
+                    KIND_STR,
+                    "str() needs a str, got json %s; convert one with toString()",
+                );
+                let s = f.word_ptr(f.load_i64(f.at_c(j, PAYLOAD)));
+                f.retain(&Ty::Str, s.into());
+                f.ret(s);
+            }),
             JsonFn::ToInt => self.support(&name, Some(i.into()), &[p.into()], |f| {
                 let j = f.param_ptr(0);
-                f.fail_if(f.is_null(j), "int() cannot convert json null");
+                f.fail_if(f.is_null(j), "toInt() cannot convert json null");
                 let kind = f.load_i64(f.at_c(j, KIND));
                 let w = f.load_i64(f.at_c(j, PAYLOAD));
                 f.if_(f.or(f.eq(kind, f.i64(KIND_INT)), f.eq(kind, f.i64(KIND_BOOL))), |f| {
@@ -167,11 +209,11 @@ impl<'ctx> Cx<'ctx> {
                 f.if_(f.eq(kind, f.i64(KIND_STR)), |f| {
                     f.ret(f.call_int(f.cx.toint_str_fn(), &[f.word_ptr(w).into()]))
                 });
-                f.json_kind_fail(j, "int() cannot convert json %s");
+                f.json_kind_fail(j, "toInt() cannot convert json %s");
             }),
             JsonFn::ToFloat => self.support(&name, Some(self.f64t().into()), &[p.into()], |f| {
                 let j = f.param_ptr(0);
-                f.fail_if(f.is_null(j), "float() cannot convert json null");
+                f.fail_if(f.is_null(j), "toFloat() cannot convert json null");
                 let kind = f.load_i64(f.at_c(j, KIND));
                 let w = f.load_i64(f.at_c(j, PAYLOAD));
                 f.if_(f.eq(kind, f.i64(KIND_INT)), |f| f.ret(f.itof(w)));
@@ -179,11 +221,11 @@ impl<'ctx> Cx<'ctx> {
                 f.if_(f.eq(kind, f.i64(KIND_STR)), |f| {
                     f.ret(f.callv(f.cx.tofloat_str_fn(), &[f.word_ptr(w).into()]))
                 });
-                f.json_kind_fail(j, "float() cannot convert json %s");
+                f.json_kind_fail(j, "toFloat() cannot convert json %s");
             }),
             JsonFn::ToBool => self.support(&name, Some(self.i1t().into()), &[p.into()], |f| {
                 let j = f.param_ptr(0);
-                f.fail_if(f.is_null(j), "bool() cannot convert json null");
+                f.fail_if(f.is_null(j), "toBool() cannot convert json null");
                 let kind = f.load_i64(f.at_c(j, KIND));
                 let w = f.load_i64(f.at_c(j, PAYLOAD));
                 f.if_(f.or(f.eq(kind, f.i64(KIND_INT)), f.eq(kind, f.i64(KIND_BOOL))), |f| {
@@ -192,7 +234,7 @@ impl<'ctx> Cx<'ctx> {
                 f.if_(f.eq(kind, f.i64(KIND_STR)), |f| {
                     f.ret(f.call_int(f.cx.tobool_str_fn(), &[f.word_ptr(w).into()]))
                 });
-                f.json_kind_fail(j, "bool() cannot convert json %s");
+                f.json_kind_fail(j, "toBool() cannot convert json %s");
             }),
             JsonFn::Stringify | JsonFn::StringifyPretty => {
                 unreachable!("stringify is generated per type by json_stringify_fn")
@@ -743,6 +785,31 @@ impl<'ctx> Cx<'ctx> {
                     f.release(&Ty::Str, s.into());
                 }
                 Ty::Float => f.json_write_float(sb, v.into_float_value()),
+                // A sized number is written as its digits, which `print` uses
+                // too; a float32 that is not finite is written as JSON null.
+                Ty::Sized(crate::mir::SizedNum::Float32) => {
+                    let x =
+                        f.b.build_float_ext(v.into_float_value(), f.cx.f64t(), "")
+                            .expect("positioned");
+                    let finite = f.and(
+                        f.fcmp(inkwell::FloatPredicate::OLT, x, f.f64(f64::INFINITY)),
+                        f.fcmp(inkwell::FloatPredicate::OGT, x, f.f64(f64::NEG_INFINITY)),
+                    );
+                    f.if_else(
+                        finite,
+                        |f| {
+                            let text = f.sized_text(crate::mir::SizedNum::Float32, v);
+                            f.sb_push_str(sb, text);
+                            f.release(&Ty::Str, text.into());
+                        },
+                        |f| f.json_write_float(sb, x),
+                    );
+                }
+                Ty::Sized(s) => {
+                    let text = f.sized_text(*s, v);
+                    f.sb_push_str(sb, text);
+                    f.release(&Ty::Str, text.into());
+                }
                 Ty::Bool => {
                     let s = f.select(v.into_int_value(), f.cx.lit("true"), f.cx.lit("false"));
                     f.sb_push_str(sb, s.into_pointer_value());
@@ -1150,7 +1217,7 @@ impl<'ctx> Cx<'ctx> {
                 f.f64(f64::INFINITY),
             );
             f.if_(f.not(finite), |f| f.ret(f.cx.lit("null")));
-            let (neg, digits, len, exp) = f.float_digits(x);
+            let (neg, digits, len, exp) = f.float_digits(x, false);
             let sb = f.sb_new();
             f.if_(neg, |f| f.sb_push_lit(sb, "-"));
             // `kk` is where the point falls after the first `kk` digits.

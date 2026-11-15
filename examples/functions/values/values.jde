@@ -36,7 +36,7 @@ let count = len
 print(count([1, 2, 3]))
 // Lengths, so the mapped strings are visibly strings: an array of them renders
 // its values unquoted, and `[1, 22]` would look the same either way.
-print([1, 22, 333].map(str).map(len))
+print([1, 22, 333].map(toString).map(len))
 
 // Each kind of callable names itself the way the interpreter does.
 print(len)

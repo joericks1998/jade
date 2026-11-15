@@ -21,7 +21,7 @@ use glib
 let iters = 100000
 let from_env = env.get("JADE_FFI_LOOP_ITERS")
 if from_env != nil {
-    iters = from_env |> int
+    iters = from_env |> toInt
 }
 
 // Compared on every iteration rather than counted, because the failure this

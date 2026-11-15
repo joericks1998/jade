@@ -101,7 +101,7 @@ fn a_child_struct_runs_its_own_method_through_a_parent() {
 fn a_program_declares_nothing_but_c_library_functions() {
     let src = "use std::time\nasync fn nap(n) {\n    time.sleep(0.01)\n    return n\n}\n\
                let d = {\"k\": \"v\"}\nlet a = [1.5, 2.5]\na.sort()\nprint(f\"{d} {a} {\"x\".upper()}\")\n\
-               print(int(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
+               print(toInt(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
     let ctx = Context::create();
     let module = build_module(&ctx, &mir_of(src)).expect("builds");
     let allowed = [
@@ -243,14 +243,14 @@ fn an_uncaught_class_reports_its_message() {
 #[test]
 fn map_and_filter_pass_extra_arguments() {
     let src = "fn scale(x, by) { x * by }\nfn above(x, floor) { x > floor }\n\
-               print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(str))\n";
+               print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(toString))\n";
     let (out, _, _) = run(src);
     assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[1, 22]\n");
 }
 
 #[test]
 fn tasks_join_in_order_and_settle_their_errors() {
-    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + str(n)\n    }\n    return n / 2\n}\n\
+    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + toString(n)\n    }\n    return n / 2\n}\n\
                print(join(half(4), half(8)))\n\
                for r in join(half(2), half(3), settle = true) {\n    print(r.ok)\n}\n\
                try {\n    join(half(1), half(2))\n} catch e {\n    print(e.message)\n}\n\
@@ -268,6 +268,37 @@ fn a_commands_output_is_refused_as_a_command_however_it_is_rebuilt() {
     let (out, _, code) = run(src);
     assert_eq!(out, "refused\nrefused\nrefused\nrefused\nrefused\ntrusted\n");
     assert_eq!(code, 0);
+}
+
+#[test]
+fn type_functions_check_a_json_value_when_the_program_runs() {
+    let src = "use std::json\nlet j = json.parse(\"{\\\"n\\\": 3, \\\"s\\\": \\\"x\\\"}\")\n\
+               print(int(j[\"n\"]) + 1)\nprint(float(j[\"n\"]))\nprint(str(j[\"s\"]) + \"!\")\n\
+               print(toInt(toString(j[\"n\"])))\n\
+               try {\n    print(int(j[\"s\"]))\n} catch e {\n    print(e.message)\n}\n";
+    let (out, _, _) = run(src);
+    assert_eq!(
+        out,
+        "4\n3.0\nx!\n3\nint() needs an int, got json string; convert one with toInt()\n"
+    );
+}
+
+#[test]
+fn sized_numbers_compute_at_their_width_and_raise_past_it() {
+    let src = "@byte\nlet b = 250\nprint(b + 5)\ntry {\n    print(b + 6)\n} catch e {\n    print(e.message)\n}\n\
+               @short\nlet s = -300\nprint(s / 7)\nprint(s % 7)\n\
+               @uint32\nlet u = 4000000000\nprint(u / toUint32(3))\nprint(u > toUint32(1))\n\
+               @ulong\nlet top = toUlong(9223372036854775807) * toUlong(2)\nprint(top)\nprint(top >> 60)\n\
+               @float32\nlet f = 0.1\nprint(f)\nprint(f + f + f)\n\
+               print(toByte(255) & toByte(15))\nprint(toInt(s) * 1000000)\n\
+               try {\n    print(toByte(256))\n} catch e {\n    print(e.message)\n}\n";
+    let (out, _, code) = run(src);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "255\nbyte overflow\n-42\n-6\n1333333333\ntrue\n18446744073709551614\n15\n\
+         0.1\n0.3\n15\n-300000000\n256 does not fit a byte, which holds 0 to 255\n"
+    );
 }
 
 #[test]
@@ -289,4 +320,30 @@ fn paths_follow_rusts_components() {
                print(path.stem(\".hidden\"))\nprint(path.join(\"a\", \"/b\"))\n";
     let (out, _, _) = run(src);
     assert_eq!(out, "b\n/\n.gz\n.hidden\n/b\n");
+}
+
+/// A pipe over a call to a generator runs each value through its stages as it
+/// is yielded, before the generator makes the next. A stage's other arguments
+/// are worked out once, a raise in a stage passes the generator's own `try`,
+/// and a generator that pipes itself compiles and terminates.
+#[test]
+fn a_pipe_calls_its_stages_as_each_value_is_yielded() {
+    let (out, err, rc) = run(concat!(
+        "fn two() {\n    print(\"a\")\n    yield 1\n    print(\"b\")\n    yield 2\n}\n",
+        "fn add(x, y) { return x + y }\n",
+        "let n = 0\nfn once() {\n    n = n + 1\n    return n * 10\n}\n",
+        "two() |> add(once()) |> print\n",
+        "print(n)\n",
+        "print(two() |> add(1))\n",
+        "let held = two()\n",
+        "print(held |> add(5))\n",
+        "fn guarded() {\n    try {\n        yield 1\n        yield 2\n    } catch e {\n        print(\"inner\")\n    }\n}\n",
+        "fn no_two(x) {\n    if x == 2 {\n        raise \"two\"\n    }\n    return x\n}\n",
+        "try {\n    guarded() |> no_two |> print\n} catch e {\n    print(f\"outer {e}\")\n}\n",
+        "fn down(k) {\n    if k > 0 {\n        down(k - 1) |> print\n    }\n    yield k\n}\n",
+        "print(down(2))\n",
+    ));
+    assert_eq!(err, "");
+    assert_eq!(rc, 0);
+    assert_eq!(out, "a\n11\nb\n12\n1\na\nb\n[2, 3]\na\nb\n[6, 7]\n1\nouter two\n0\n1\n[2]\n");
 }

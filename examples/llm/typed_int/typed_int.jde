@@ -1,5 +1,8 @@
-// Typed dereference: LLM output coerced to int with retry on failure.
+// Typed dereference: the converter around the whole reply asks the model for
+// an int. `int(?p)` would only check the reply's type, and refuse it, since a
+// reply is a str; `?p |> toInt` would run toInt on each piece of the reply,
+// and is refused for that reason.
 
 prompt p = "What is 3 + 4? Respond with only the number."
-let n = ?p |> int
+let n = toInt(?p)
 print(n + 1)

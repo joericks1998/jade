@@ -176,7 +176,8 @@ impl<'a, 'l> Fx<'a, 'l> {
                     "ready" => (InferFn::Ready, Ty::Bool),
                     "map" => (InferFn::Map, Ty::Nil),
                     "setup" => (InferFn::Setup, Ty::Nil),
-                    "generate" => (InferFn::Generate, Ty::Array(Box::new(Ty::Int))),
+                    "next" => (InferFn::Next, Ty::Int),
+                    "conversation" => (InferFn::Conversation, Ty::Int),
                     other => {
                         return Err(internal(
                             format!("an unknown __infer function '{other}'"),

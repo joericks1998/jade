@@ -51,19 +51,54 @@ pub(super) struct Lowerer<'a> {
     pub(super) struct_ids: HashMap<String, u32>,
     pub(super) structs: Vec<StructDef>,
     pub(super) packages: HashSet<String>,
-    /// Adapters made so far, which let a named function stand behind a joined
-    /// function type's pointer.
-    adapters: std::cell::RefCell<Vec<Adapter>>,
-    /// How many instances there are, so an adapter's id follows them.
+    /// Functions made while lowering, after the instances: adapters, which let
+    /// a named function stand behind a joined function type's pointer, and
+    /// each pipe's stages and generator copy.
+    extra: std::cell::RefCell<Vec<Extra>>,
+    /// How many instances there are, so a made function's id follows them.
     n_instances: usize,
+    /// Each pipe over a call to a generator, by the instance it is in and its
+    /// address: the function holding its stages and the generator's copy that
+    /// calls them. Made once, so a generator that pipes itself terminates.
+    pub(super) pipes: std::cell::RefCell<HashMap<(InstKey, usize), (FuncId, FuncId)>>,
+    /// Every expression the checker typed as a stream, by instance and
+    /// address. MIR's types read a stream as an array, and a pipe needs to
+    /// know which it has.
+    pub(super) streams: HashSet<(InstKey, usize)>,
 }
 
-/// Purpose: This struct holds one adapter: a function with a joined function
-/// type's signature that calls a named function's instance.
-struct Adapter {
-    name: String,
-    ty: crate::typechecker::infer::FnTy,
+/// Purpose: This struct holds one function made while lowering.
+struct Extra {
+    /// For an adapter, the named function and the joined type it stands
+    /// behind, so a second request finds it.
+    adapter: Option<(String, crate::typechecker::infer::FnTy)>,
     func: Func,
+}
+
+/// Purpose: This struct describes a generator's copy made for a pipe, in
+/// which each `yield` calls the pipe's stages on the value.
+pub(super) struct Sink {
+    /// The copy's name.
+    pub name: String,
+    /// The function holding the stages, called with the piece and then the
+    /// captured values.
+    pub stages: FuncId,
+    /// The piece's type, the stages function's first parameter.
+    pub piece: Ty,
+    /// The captured values' types, passed after the generator's own
+    /// parameters.
+    pub captured: Vec<Ty>,
+    /// What the stages give back, collected into the copy's result.
+    pub out: Ty,
+}
+
+/// Purpose: This struct holds, while a generator's copy is lowered, what each
+/// `yield` hands its value to.
+#[derive(Clone)]
+pub(super) struct FxSink {
+    pub stages: FuncId,
+    pub piece: Ty,
+    pub captured: Vec<Local>,
 }
 
 /// Purpose: This function lowers a whole checked program into MIR.
@@ -109,10 +144,10 @@ pub fn lower_program_with(
     for (k, _, _) in &keys {
         funcs.push(l.lower_instance(k)?);
     }
-    // Adapters for functions stored in joined function types, asked for while
-    // the bodies above were lowered; their ids follow the instances'.
-    for a in l.adapters.borrow().iter() {
-        funcs.push(a.func.clone());
+    // Functions asked for while the bodies above were lowered: adapters, and
+    // each pipe's stages and generator copy. Their ids follow the instances'.
+    for x in l.extra.borrow().iter() {
+        funcs.push(x.func.clone());
     }
     let mut globals: Vec<(GlobalId, Global)> = l
         .globals
@@ -145,7 +180,7 @@ pub fn lower_program_with(
 /// - `k`: the instance.
 ///
 /// Outputs: a label such as `add(int, int)` or `Point.norm(Point)`.
-fn inst_label(k: &InstKey) -> String {
+pub(super) fn inst_label(k: &InstKey) -> String {
     let base = match &k.func {
         FnKey::Main => "main".to_string(),
         FnKey::Named(n) => n.clone(),
@@ -184,7 +219,7 @@ pub fn norm(t: &Ty) -> Ty {
 /// - `x`: any node.
 ///
 /// Outputs: its address.
-fn addr<T>(x: &T) -> usize {
+pub(super) fn addr<T>(x: &T) -> usize {
     x as *const T as usize
 }
 
@@ -235,6 +270,12 @@ impl<'a> Lowerer<'a> {
         for ((k, a), t) in &typed.slots {
             slots.entry(k.clone()).or_default().insert(*a, norm(t));
         }
+        let streams = typed
+            .types
+            .iter()
+            .filter(|(_, t)| matches!(t, Ty::Stream(_)))
+            .map(|(k, _)| k.clone())
+            .collect();
 
         let mut names: Vec<&String> = typed.structs.keys().collect();
         names.sort();
@@ -273,8 +314,10 @@ impl<'a> Lowerer<'a> {
             globals,
             struct_ids,
             structs,
-            adapters: std::cell::RefCell::new(Vec::new()),
+            extra: std::cell::RefCell::new(Vec::new()),
             n_instances: typed.instances.len(),
+            pipes: std::cell::RefCell::new(HashMap::new()),
+            streams,
             packages: crate::builtins::all_packages()
                 .iter()
                 .map(|p| p.global_name.to_string())
@@ -335,7 +378,11 @@ impl<'a> Lowerer<'a> {
         ft: &crate::typechecker::infer::FnTy,
         span: Span,
     ) -> Result<FuncId> {
-        if let Some(i) = self.adapters.borrow().iter().position(|a| a.name == name && a.ty == *ft) {
+        let made =
+            self.extra.borrow().iter().position(|x| {
+                x.adapter.as_ref().is_some_and(|(n, t)| n.as_str() == name && t == ft)
+            });
+        if let Some(i) = made {
             return Ok(FuncId((self.n_instances + i) as u32));
         }
         let def = self
@@ -412,9 +459,43 @@ impl<'a> Lowerer<'a> {
             ret: want,
             blocks,
         };
-        let mut all = self.adapters.borrow_mut();
-        all.push(Adapter { name: name.to_string(), ty: ft.clone(), func });
+        let mut all = self.extra.borrow_mut();
+        all.push(Extra { adapter: Some((name.to_string(), ft.clone())), func });
         Ok(FuncId((self.n_instances + all.len() - 1) as u32))
+    }
+
+    /// Purpose: This function reserves an id for a function made while
+    /// lowering, before its body is lowered, so the body can call it.
+    ///
+    /// Inputs:
+    /// - `name`: the function's name.
+    ///
+    /// Outputs: its id. `fill` gives it its body.
+    pub(super) fn reserve(&self, name: String) -> FuncId {
+        let mut all = self.extra.borrow_mut();
+        all.push(Extra {
+            adapter: None,
+            func: Func {
+                name,
+                params: 0,
+                locals: Vec::new(),
+                ret: Ty::Nil,
+                blocks: vec![Block::new(Term::Unreachable)],
+            },
+        });
+        FuncId((self.n_instances + all.len() - 1) as u32)
+    }
+
+    /// Purpose: This function gives a reserved function its body.
+    ///
+    /// Inputs:
+    /// - `id`: what `reserve` gave.
+    /// - `func`: the function.
+    ///
+    /// Outputs: none.
+    pub(super) fn fill(&self, id: FuncId, func: Func) {
+        let i = id.0 as usize - self.n_instances;
+        self.extra.borrow_mut()[i].func = func;
     }
 
     /// Purpose: This function lists the globals in the order the program first
@@ -518,15 +599,29 @@ impl<'a> Lowerer<'a> {
     ///
     /// Outputs: the function.
     fn lower_instance(&self, k: &InstKey) -> Result<Func> {
-        let (params, ret) = self.sigs[k].clone();
-        let empty = HashMap::new();
-        let empty_t = HashMap::new();
-        let mut fx = Fx {
+        self.lower_instance_with(k, None)
+    }
+
+    /// Purpose: This function makes the state for lowering one function body
+    /// with an instance's answers.
+    ///
+    /// Inputs:
+    /// - `k`: the instance whose types, targets and slots the body is read
+    ///   with.
+    /// - `ret`: the function's return type.
+    ///
+    /// Outputs: the state, with one empty block and one empty scope.
+    pub(super) fn new_fx<'l>(&'l self, k: &InstKey, ret: Ty) -> Fx<'a, 'l> {
+        static EMPTY: std::sync::OnceLock<HashMap<usize, Ty>> = std::sync::OnceLock::new();
+        static EMPTY_T: std::sync::OnceLock<HashMap<usize, Target>> = std::sync::OnceLock::new();
+        let empty = EMPTY.get_or_init(HashMap::new);
+        let empty_t = EMPTY_T.get_or_init(HashMap::new);
+        Fx {
             l: self,
             key: k.clone(),
-            types: self.exprs.get(k).unwrap_or(&empty),
-            targets: self.targets.get(k).unwrap_or(&empty_t),
-            slots: self.slots.get(k).unwrap_or(&empty),
+            types: self.exprs.get(k).unwrap_or(empty),
+            targets: self.targets.get(k).unwrap_or(empty_t),
+            slots: self.slots.get(k).unwrap_or(empty),
             is_main: k.func == FnKey::Main,
             ret: if k.func == FnKey::Main { Ty::Nil } else { ret },
             locals: Vec::new(),
@@ -540,8 +635,23 @@ impl<'a> Lowerer<'a> {
             handlers: Vec::new(),
             unwind: None,
             stream: None,
+            sink: None,
             span: Span { line: 0, col: 0 },
-        };
+        }
+    }
+
+    /// Purpose: This function lowers one instance's body, or a generator's
+    /// copy made for a pipe.
+    ///
+    /// Inputs:
+    /// - `k`: the instance.
+    /// - `sink`: for a pipe's copy of a generator, the stages each `yield`
+    ///   calls; `None` for the instance itself.
+    ///
+    /// Outputs: the function.
+    pub(super) fn lower_instance_with(&self, k: &InstKey, sink: Option<Sink>) -> Result<Func> {
+        let (params, ret) = self.sigs[k].clone();
+        let mut fx = self.new_fx(k, ret);
         let (name, body) = match &k.func {
             FnKey::Main => ("main".to_string(), self.top),
             other => {
@@ -566,7 +676,18 @@ impl<'a> Lowerer<'a> {
                 (inst_label(k), def.body)
             }
         };
+        // A pipe's copy takes the values its stages capture after the
+        // generator's own parameters. They have no names, so they shadow
+        // nothing in the generator's body.
+        let captured: Vec<Local> = match &sink {
+            Some(sk) => sk.captured.iter().map(|t| fx.new_local(t.clone(), None)).collect(),
+            None => Vec::new(),
+        };
         let nparams = fx.locals.len() as u32;
+        let name = match &sink {
+            Some(sk) => sk.name.clone(),
+            None => name,
+        };
         if k.func != FnKey::Main && super::ops::body_yields(body) {
             let Ty::Array(el) = fx.ret.clone() else {
                 return Err(internal(
@@ -574,9 +695,24 @@ impl<'a> Lowerer<'a> {
                     Span { line: 0, col: 0 },
                 ));
             };
+            // The instance collects what it yields; a pipe's copy collects
+            // what its stages give back for each value it yields.
+            let el = match &sink {
+                Some(sk) => {
+                    fx.ret = Ty::Array(Box::new(sk.out.clone()));
+                    fx.sink = Some(FxSink { stages: sk.stages, piece: sk.piece.clone(), captured });
+                    sk.out.clone()
+                }
+                None => *el,
+            };
             let s = fx.new_local(fx.ret.clone(), None);
-            fx.emit(Stmt::Assign(Place::Local(s), Rvalue::Array((*el).clone(), Vec::new())));
-            fx.stream = Some((s, *el));
+            fx.emit(Stmt::Assign(Place::Local(s), Rvalue::Array(el.clone(), Vec::new())));
+            fx.stream = Some((s, el));
+        } else if sink.is_some() {
+            return Err(internal(
+                "a pipe copy of a function that does not yield",
+                Span { line: 0, col: 0 },
+            ));
         }
         fx.lower_body(body)?;
         Ok(Func { name, params: nparams, locals: fx.locals, ret: fx.ret, blocks: fx.blocks })
@@ -618,36 +754,39 @@ fn stmt_span(s: &TStmt) -> Option<Span> {
 /// Purpose: This struct holds the state of lowering one function.
 pub(super) struct Fx<'a, 'l> {
     pub(super) l: &'l Lowerer<'a>,
-    types: &'l HashMap<usize, Ty>,
+    pub(super) types: &'l HashMap<usize, Ty>,
     pub(super) targets: &'l HashMap<usize, Target>,
     /// The instance being lowered.
     pub(super) key: InstKey,
-    slots: &'l HashMap<usize, Ty>,
-    is_main: bool,
-    ret: Ty,
-    locals: Vec<LocalDecl>,
-    blocks: Vec<Block>,
+    pub(super) slots: &'l HashMap<usize, Ty>,
+    pub(super) is_main: bool,
+    pub(super) ret: Ty,
+    pub(super) locals: Vec<LocalDecl>,
+    pub(super) blocks: Vec<Block>,
     /// Whether each block has its terminator.
-    done: Vec<bool>,
-    cur: BlockId,
+    pub(super) done: Vec<bool>,
+    pub(super) cur: BlockId,
     /// Variables in scope, innermost last.
-    scopes: Vec<HashMap<String, Local>>,
+    pub(super) scopes: Vec<HashMap<String, Local>>,
     /// Each enclosing loop's continue and break targets, and how many scopes
     /// were open outside it, innermost last.
-    loops: Vec<(BlockId, BlockId, usize)>,
+    pub(super) loops: Vec<(BlockId, BlockId, usize)>,
     /// Heap temporaries of the statement being lowered, dropped when it ends.
-    temps: Vec<Local>,
+    pub(super) temps: Vec<Local>,
     /// Temporaries whose reference has not been handed over yet.
-    fresh: HashSet<Local>,
+    pub(super) fresh: HashSet<Local>,
     /// Each enclosing `try`'s handler block, innermost last.
-    handlers: Vec<BlockId>,
+    pub(super) handlers: Vec<BlockId>,
     /// The block that leaves the function with an error raised, once made.
-    unwind: Option<BlockId>,
+    pub(super) unwind: Option<BlockId>,
     /// For a generator, the array each `yield` appends to, and its element type.
-    stream: Option<(Local, Ty)>,
+    pub(super) stream: Option<(Local, Ty)>,
+    /// For a generator's copy made for a pipe, the stages each `yield` calls
+    /// before what they give back is appended to `stream`.
+    pub(super) sink: Option<FxSink>,
     /// The source position of what is being lowered, recorded with each
     /// statement emitted.
-    span: Span,
+    pub(super) span: Span,
 }
 
 impl<'a, 'l> Fx<'a, 'l> {
@@ -831,7 +970,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `mark`: the length of the temporary list when the statement began.
     ///
     /// Outputs: none.
-    fn drop_temps(&mut self, mark: usize) {
+    pub(super) fn drop_temps(&mut self, mark: usize) {
         let ts: Vec<Local> = self.temps.drain(mark..).collect();
         for t in ts {
             self.fresh.remove(&t);
@@ -875,7 +1014,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where, for errors.
     ///
     /// Outputs: its place and type.
-    fn declare(&mut self, name: &str, node: usize, span: Span) -> Result<(Place, Ty)> {
+    pub(super) fn declare(&mut self, name: &str, node: usize, span: Span) -> Result<(Place, Ty)> {
         let ty = self
             .slots
             .get(&node)
@@ -906,6 +1045,22 @@ impl<'a, 'l> Fx<'a, 'l> {
     ) -> Result<Operand> {
         if from == to {
             return Ok(op);
+        }
+        // A number literal takes the sized type it meets; the checker made
+        // sure it fits.
+        if let Ty::Sized(s) = to {
+            match (&op, s.is_float()) {
+                (Operand::Const(Const::Int(i)), false) => {
+                    return Ok(Operand::Const(Const::Sized(*s, *i)));
+                }
+                (Operand::Const(Const::Int(i)), true) => {
+                    return Ok(Operand::Const(Const::Float32(*i as f32)));
+                }
+                (Operand::Const(Const::Float(x)), true) => {
+                    return Ok(Operand::Const(Const::Float32(*x as f32)));
+                }
+                _ => {}
+            }
         }
         match (from, to) {
             // JSON null and a missing error are null pointers too.
@@ -1064,7 +1219,14 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where.
     ///
     /// Outputs: `Ok(())` or an error.
-    fn store(&mut self, place: Place, pty: &Ty, v: Operand, vty: &Ty, span: Span) -> Result<()> {
+    pub(super) fn store(
+        &mut self,
+        place: Place,
+        pty: &Ty,
+        v: Operand,
+        vty: &Ty,
+        span: Span,
+    ) -> Result<()> {
         let v = self.coerce(v, vty, pty, span)?;
         let v = self.consume(v);
         self.emit(Stmt::Assign(place, Rvalue::Use(v)));
@@ -1244,6 +1406,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                     .stream
                     .clone()
                     .ok_or_else(|| internal("yield outside a generator", *span))?;
+                if let Some(sink) = self.sink.clone() {
+                    return self.yield_to_stages(value, &sink, s, &el, *span);
+                }
                 let (v, t) = self.expr(value)?;
                 let v = self.coerce(v, &t, &el, *span)?;
                 let v = self.consume(v);
@@ -1542,12 +1707,21 @@ impl<'a, 'l> Fx<'a, 'l> {
             TExprKind::BinOp { op, left, right } => self.binop(op, left, right, &et, span)?,
             TExprKind::UnaryOp { op, operand } => {
                 let (v, _) = self.expr(operand)?;
+                // A negated literal is a constant, so it can take the type it
+                // meets, as `@short let s = -5` needs.
+                match (op, &v) {
+                    (UnaryOpKind::Neg, Operand::Const(Const::Int(i))) if *i != i64::MIN => {
+                        return Ok((Operand::Const(Const::Int(-*i)), et));
+                    }
+                    (UnaryOpKind::Neg, Operand::Const(Const::Float(x))) => {
+                        return Ok((Operand::Const(Const::Float(-*x)), et));
+                    }
+                    _ => {}
+                }
                 let u = match op {
                     UnaryOpKind::Not => UnOp::Not,
-                    UnaryOpKind::BitNot => UnOp::BitNot,
-                    UnaryOpKind::Neg => {
-                        UnOp::Neg(if et == Ty::Float { NumTy::Float } else { NumTy::Int })
-                    }
+                    UnaryOpKind::BitNot => UnOp::BitNot(NumTy::of(&et)),
+                    UnaryOpKind::Neg => UnOp::Neg(NumTy::of(&et)),
                 };
                 self.assign_temp(et.clone(), Rvalue::Un(u, v))
             }
@@ -1662,6 +1836,9 @@ impl<'a, 'l> Fx<'a, 'l> {
             }
             TExprKind::PromptDeref { .. } => {
                 return Err(internal("a prompt dereference the rewrite left", span));
+            }
+            TExprKind::Pipe { source, hoisted, piece, body } => {
+                return self.pipe(e, &et, source, hoisted, piece, body);
             }
         };
         Ok((op, et))
@@ -1849,6 +2026,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                     let r = self.as_float(r, &rt);
                     self.assign_temp(Ty::Float, Rvalue::Bin(BinOp::Arith(a, NumTy::Float), l, r))
                 }
+                // Both sides have the one sized type; a literal takes it here.
+                Ty::Sized(s) => {
+                    let l = self.coerce(l, &lt, et, span)?;
+                    let r = self.coerce(r, &rt, et, span)?;
+                    self.assign_temp(
+                        et.clone(),
+                        Rvalue::Bin(BinOp::Arith(a, NumTy::Sized(*s)), l, r),
+                    )
+                }
                 _ => self.assign_temp(Ty::Int, Rvalue::Bin(BinOp::Arith(a, NumTy::Int), l, r)),
             });
         }
@@ -1865,7 +2051,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let r = self.as_float(r, &rt);
                 return Ok(self.assign_temp(Ty::Bool, Rvalue::Bin(BinOp::Cmp(c, Ty::Float), l, r)));
             }
-            let ct = self.common(&lt, &rt);
+            let ct = match (&lt, &rt) {
+                (Ty::Sized(_), _) => lt.clone(),
+                (_, Ty::Sized(_)) => rt.clone(),
+                _ => self.common(&lt, &rt),
+            };
             let l = self.coerce(l, &lt, &ct, span)?;
             let r = self.coerce(r, &rt, &ct, span)?;
             return Ok(self.assign_temp(Ty::Bool, Rvalue::Bin(BinOp::Cmp(c, ct), l, r)));
@@ -1879,7 +2069,17 @@ impl<'a, 'l> Fx<'a, 'l> {
             _ => None,
         };
         if let Some(b) = bit {
-            return Ok(self.assign_temp(Ty::Int, Rvalue::Bin(BinOp::Bit(b), l, r)));
+            // A shift's amount stays an int; the other operators take both
+            // sides at the result's type, so a literal takes a sized one.
+            let l = self.coerce(l, &lt, et, span)?;
+            let r = if matches!(b, BitOp::Shl | BitOp::Shr) {
+                r
+            } else {
+                self.coerce(r, &rt, et, span)?
+            };
+            return Ok(
+                self.assign_temp(et.clone(), Rvalue::Bin(BinOp::Bit(b, NumTy::of(et)), l, r))
+            );
         }
         // `in` and `not in`.
         let found = match &rt {
@@ -2058,34 +2258,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     .l
                     .def_of(&k.func)
                     .ok_or_else(|| internal("a call to a function with no definition", span))?;
-                let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
-                let mut next = 0;
-                // A method called on an object takes the object as its first
-                // argument. `Parent::m(self, …)` already has it among the args.
-                if let (FnKey::Method(..), TExprKind::FieldAccess { object, .. }) =
-                    (&k.func, &callee.kind)
-                {
-                    let (o, t) = self.expr(object)?;
-                    vals[0] = Some((o, t, object.span));
-                    next = 1;
-                }
-                for a in args {
-                    let (v, t) = self.expr(a)?;
-                    if next >= vals.len() {
-                        return Err(internal("too many arguments", span));
-                    }
-                    vals[next] = Some((v, t, a.span));
-                    next += 1;
-                }
-                for (name, v) in kwargs {
-                    let i = def
-                        .params
-                        .iter()
-                        .position(|(p, _)| p == name)
-                        .ok_or_else(|| internal("an unknown keyword argument", span))?;
-                    let (o, t) = self.expr(v)?;
-                    vals[i] = Some((o, t, v.span));
-                }
+                let vals = self.instance_vals(&k, def, callee, args, kwargs, span)?;
                 let r = self.call_instance(&k, def, vals, span)?;
                 Ok((r, et.clone()))
             }
@@ -2185,8 +2358,82 @@ impl<'a, 'l> Fx<'a, 'l> {
         vals: Vec<Option<(Operand, Ty, Span)>>,
         span: Span,
     ) -> Result<Operand> {
-        let (id, params, ret) = self.l.sig(k, span)?;
-        let spawn = def.is_async;
+        let (id, _, ret) = self.l.sig(k, span)?;
+        let argv = self.instance_args(k, def, vals, span)?;
+        if def.is_async {
+            return Ok(self.assign_temp(ret, Rvalue::Spawn(id, argv)));
+        }
+        Ok(self.assign_temp(ret, Rvalue::Call(id, argv)))
+    }
+
+    /// Purpose: This function works out a call's arguments, in the order the
+    /// called function's parameters take them.
+    ///
+    /// Inputs:
+    /// - `k`: the instance called.
+    /// - `def`: its definition.
+    /// - `callee`, `args`, `kwargs`: the call's parts.
+    /// - `span`: where.
+    ///
+    /// Outputs: one value per parameter, `None` where the default applies.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn instance_vals(
+        &mut self,
+        k: &InstKey,
+        def: FnDef<'a>,
+        callee: &'a TExpr,
+        args: &'a [TExpr],
+        kwargs: &'a [(String, TExpr)],
+        span: Span,
+    ) -> Result<Vec<Option<(Operand, Ty, Span)>>> {
+        let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
+        let mut next = 0;
+        // A method called on an object takes the object as its first
+        // argument. `Parent::m(self, …)` already has it among the args.
+        if let (FnKey::Method(..), TExprKind::FieldAccess { object, .. }) = (&k.func, &callee.kind)
+        {
+            let (o, t) = self.expr(object)?;
+            vals[0] = Some((o, t, object.span));
+            next = 1;
+        }
+        for a in args {
+            let (v, t) = self.expr(a)?;
+            if next >= vals.len() {
+                return Err(internal("too many arguments", span));
+            }
+            vals[next] = Some((v, t, a.span));
+            next += 1;
+        }
+        for (name, v) in kwargs {
+            let i = def
+                .params
+                .iter()
+                .position(|(p, _)| p == name)
+                .ok_or_else(|| internal("an unknown keyword argument", span))?;
+            let (o, t) = self.expr(v)?;
+            vals[i] = Some((o, t, v.span));
+        }
+        Ok(vals)
+    }
+
+    /// Purpose: This function converts a call's values to the called
+    /// instance's parameter types, filling defaults where none was given.
+    ///
+    /// Inputs:
+    /// - `k`: the instance called.
+    /// - `def`: its definition.
+    /// - `vals`: what `instance_vals` gave.
+    /// - `span`: where.
+    ///
+    /// Outputs: the arguments.
+    pub(super) fn instance_args(
+        &mut self,
+        k: &InstKey,
+        def: FnDef<'a>,
+        vals: Vec<Option<(Operand, Ty, Span)>>,
+        span: Span,
+    ) -> Result<Vec<Operand>> {
+        let (_, params, _) = self.l.sig(k, span)?;
         let mut argv = Vec::with_capacity(params.len());
         for (i, (v, pt)) in vals.into_iter().zip(&params).enumerate() {
             let (o, t, sp) = match v {
@@ -2202,10 +2449,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             };
             argv.push(self.coerce(o, &t, pt, sp)?);
         }
-        if spawn {
-            return Ok(self.assign_temp(ret, Rvalue::Spawn(id, argv)));
-        }
-        Ok(self.assign_temp(ret, Rvalue::Call(id, argv)))
+        Ok(argv)
     }
 
     /// Purpose: This function lowers a parameter's default value at a call.

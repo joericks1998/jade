@@ -18,14 +18,14 @@ async fn fetch(n) {
 }
 
 async fn broken(n) {
-    raise Failed { message: "no route to host " + str(n) }
+    raise Failed { message: "no route to host " + toString(n) }
 }
 
 let results = join(fetch(1), broken(2), fetch(3), broken(4), settle = true)
 
 for r in results {
     if r["ok"] {
-        print("got " + str(r["value"]))
+        print("got " + toString(r["value"]))
     } else {
         let err = r["error"]
         if err != nil {

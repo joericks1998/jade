@@ -1,21 +1,25 @@
 //! Turning each prompt dereference into a call into the inference prelude.
 //!
-//! `?p` is syntax the checker types, as `str`, or as `T` for `?p |> T`, and
+//! `?p` is syntax the checker types, as `str`, or as `T` for `toT(?p)`, and
 //! nothing after the checker knows. Before the merged program is checked, this
 //! pass adds `prelude.jde` to it, in a namespace of its own as any imported
 //! module is, and replaces each dereference with a call into it:
 //!
 //! ```text
 //! ?p          →  reply$N(__infer.text(p))
-//! ?p |> int   →  reply_int$N(__infer.text(p))
+//! toInt(?p)   →  reply_int$N(__infer.text(p))
+//! ?p |> f     →  reply_pieces$N(__infer.text(p)) |> f
 //! ```
 //!
 //! The checker then checks the prelude's functions at the types they are called
 //! with, MIR lowers them like any others, and only the handful of operations
 //! the prelude asks of `__infer` reach the backend as something new.
 //!
-//! A dereference into a class, `?p |> City`, or through a grammar is left as it
-//! is, and MIR names it as not compiled yet.
+//! In a pipe, `reply_pieces` is a generator, so the pipe calls its stages on
+//! each piece of the reply as the model writes it.
+//!
+//! A dereference into a class, `City(?p)`, or through a grammar, `g(?p)`, is
+//! left as it is, and MIR names it as not compiled yet.
 
 use crate::frontend::error::Span;
 use crate::typechecker::tir::{JadeType, TCatchArm, TExpr, TExprKind, TFStrPart, TStmt};
@@ -68,7 +72,7 @@ pub fn dereferences(stmts: &[TStmt]) -> bool {
 /// Purpose: This function names the prelude function a dereference becomes.
 ///
 /// Inputs:
-/// - `output_type`: the `|> T` it names, if any.
+/// - `output_type`: the type a call around it names, `int` for `toInt(?p)`.
 ///
 /// Outputs: the function's name before mangling, or `None` for a type the
 /// prelude does not decode.
@@ -108,20 +112,7 @@ fn expr(e: &mut TExpr, found: &mut bool) {
             }
             let Some(f) = target(output_type.as_deref()) else { return };
             let span = e.span;
-            let text = node(
-                TExprKind::Call {
-                    callee: Box::new(node(
-                        TExprKind::FieldAccess {
-                            object: Box::new(node(TExprKind::Identifier("__infer".into()), span)),
-                            field: "text".into(),
-                        },
-                        span,
-                    )),
-                    args: vec![(**inner).clone()],
-                    kwargs: Vec::new(),
-                },
-                span,
-            );
+            let text = text_of(inner, span);
             e.kind = TExprKind::Call {
                 callee: Box::new(node(TExprKind::Identifier(format!("{f}${PRELUDE_ID}")), span)),
                 args: vec![text],
@@ -175,12 +166,61 @@ fn expr(e: &mut TExpr, found: &mut bool) {
             }
         }
         TExprKind::Await { expr: x } | TExprKind::PromptLiteral { body: x } => expr(x, found),
+        // `?p |> f`: the source becomes the prelude's generator of the reply's
+        // pieces, so the pipe calls `f` on each as the model writes it.
+        TExprKind::Pipe { source, hoisted, body, .. } => {
+            match &mut source.kind {
+                TExprKind::PromptDeref { expr: inner, output_type: None, grammar_expr: None } => {
+                    expr(inner, found);
+                    *found = true;
+                    let span = source.span;
+                    source.kind = TExprKind::Call {
+                        callee: Box::new(node(
+                            TExprKind::Identifier(format!("reply_pieces${PRELUDE_ID}")),
+                            span,
+                        )),
+                        args: vec![text_of(inner, span)],
+                        kwargs: Vec::new(),
+                    };
+                    source.ty = JadeType::Stream(Box::new(JadeType::Str));
+                }
+                _ => expr(source, found),
+            }
+            for (_, v) in hoisted {
+                expr(v, found);
+            }
+            expr(body, found);
+        }
         TExprKind::Integer(_)
         | TExprKind::Float(_)
         | TExprKind::Bool(_)
         | TExprKind::Str(_)
         | TExprKind::Identifier(_) => {}
     }
+}
+
+/// Purpose: This function builds `__infer.text(p)`, a prompt's text.
+///
+/// Inputs:
+/// - `prompt`: the dereferenced expression.
+/// - `span`: where.
+///
+/// Outputs: the call.
+fn text_of(prompt: &TExpr, span: Span) -> TExpr {
+    node(
+        TExprKind::Call {
+            callee: Box::new(node(
+                TExprKind::FieldAccess {
+                    object: Box::new(node(TExprKind::Identifier("__infer".into()), span)),
+                    field: "text".into(),
+                },
+                span,
+            )),
+            args: vec![prompt.clone()],
+            kwargs: Vec::new(),
+        },
+        span,
+    )
 }
 
 /// Purpose: This function rewrites every expression in a block.

@@ -1,2 +1,2 @@
-# `?p |> bool` needs true or false.
+# `?p |> toBool` needs true or false.
 true

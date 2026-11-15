@@ -19,6 +19,36 @@ mod lexer {
         assert_eq!(kinds("42"), vec![TokenKind::Integer(42), TokenKind::Semicolon, TokenKind::Eof]);
     }
 
+    #[test]
+    fn a_hex_literal_is_an_int() {
+        assert_eq!(
+            kinds("0x11"),
+            vec![TokenKind::Integer(17), TokenKind::Semicolon, TokenKind::Eof]
+        );
+        assert_eq!(kinds("0XfF")[0], TokenKind::Integer(255));
+        assert_eq!(kinds("0x7fffffffffffffff")[0], TokenKind::Integer(i64::MAX));
+        // 2^63 lexes as the marker the parser folds into i64::MIN when negated.
+        assert_eq!(kinds("0x8000000000000000")[0], TokenKind::Integer(NEGATED_INT_MIN));
+        assert!(matches!(tokenize("0x10000000000000000"), Err(JadeError::LiteralOverflow { .. })));
+    }
+
+    #[test]
+    fn a_hex_literal_needs_hex_digits() {
+        for (src, want) in [
+            ("0x", "needs a digit after 0x"),
+            ("0x ", "needs a digit after 0x"),
+            ("0x1g", "'g' is not a hex digit"),
+            ("0x_1", "'_' is not a hex digit"),
+        ] {
+            match tokenize(src) {
+                Err(e @ JadeError::BadHexLiteral { .. }) => {
+                    assert!(e.to_string().contains(want), "{src}: {e}")
+                }
+                other => panic!("{src}: expected BadHexLiteral, got {other:?}"),
+            }
+        }
+    }
+
     // The literal is a float to tokenize, not an approximation of pi.
     #[allow(clippy::approx_constant)]
     #[test]
@@ -1285,29 +1315,25 @@ mod parser {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-        else {
+        let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
             panic!("expected Let with PromptDeref")
         };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(constraint.is_none());
     }
 
-    /// The type stage is a pipe over the dereference, not a field on it. What it
-    /// *means* is unchanged — inference still folds it back in as an
-    /// `output_type` — but that decision now happens where the names are known.
+    /// A stage after a dereference is a pipe over it, like any other pipe;
+    /// whether the stage makes sense per piece is the type checker's question.
     #[test]
-    fn test_parse_prompt_deref_typed_int() {
-        let p = parse_src("let x = ?p |> int");
+    fn test_parse_prompt_deref_piped() {
+        let p = parse_src("let x = ?p |> clean");
         let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
             panic!("expected Let with Pipe")
         };
-        let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+        let Expr::PromptDeref { expr, .. } = value.as_ref() else {
             panic!("expected the piped value to be a PromptDeref")
         };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(constraint.is_none(), "the parser no longer sets a constraint");
-        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
+        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "clean"));
     }
 
     #[test]
@@ -1344,8 +1370,7 @@ mod parser {
     fn test_parse_postfix_deref() {
         for src in ["let x = obj.(?system)", "let x = obj~>system"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else {
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
                 panic!("expected Let with PromptDeref for {src}")
             };
             let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
@@ -1353,7 +1378,6 @@ mod parser {
             };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "system");
-            assert!(constraint.is_none());
         }
     }
 
@@ -1390,8 +1414,7 @@ mod parser {
         // the line) — the sugar is a spelling, not a semantic distinction.
         for src in ["let x = obj.(?p)", "let x = obj~>p"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else {
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
                 panic!("expected PromptDeref for {src}")
             };
             let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
@@ -1399,7 +1422,6 @@ mod parser {
             };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "p");
-            assert!(constraint.is_none());
         }
     }
 
@@ -1413,11 +1435,10 @@ mod parser {
             let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
                 panic!("expected Let with Pipe for {src}")
             };
-            let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+            let Expr::PromptDeref { expr, .. } = value.as_ref() else {
                 panic!("expected a PromptDeref for {src}")
             };
             assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-            assert!(constraint.is_none(), "the parser no longer sets a constraint");
             assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
         }
     }
@@ -1459,16 +1480,14 @@ mod parser {
         }
     }
 
-    /// `|>` has exactly one parse path now, so a stage after a dereference is an
-    /// ordinary `Expr::Pipe` and not a `PromptDeref.constraint`. This is what
-    /// makes chaining possible: the old deref arm read its stage with
-    /// `parse_or`, specifically so a second `|>` could not follow.
+    /// `|>` has exactly one parse path, so a stage after a dereference is an
+    /// ordinary `Expr::Pipe`, and a second `|>` can follow it.
     #[test]
-    fn a_deref_stage_parses_as_a_pipe_not_a_constraint() {
+    fn a_deref_stage_parses_as_a_pipe() {
         let p = parse_src("let x = ?p |> int");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
         let Expr::Pipe { value: piped, .. } = value else { panic!("expected Pipe, got {value:?}") };
-        assert!(matches!(piped.as_ref(), Expr::PromptDeref { constraint: None, .. }));
+        assert!(matches!(piped.as_ref(), Expr::PromptDeref { .. }));
     }
 
     #[test]
@@ -1739,6 +1758,29 @@ mod parser {
         assert!(matches!(e, JadeError::ExtendRemoved { .. }), "got: {e}");
         let e = parse_src_err("@log(\"City\")\nclass City {\n  name,\n}");
         assert!(e.to_string().contains("a class takes no decorators"), "got: {e}");
+    }
+
+    /// No decorator works on a class: a function, a type, a class name or a
+    /// namespaced one, on the same line or the line before, at the top level or
+    /// in a function. `@public` is refused with its own message.
+    #[test]
+    fn no_decorator_works_on_a_class() {
+        for src in [
+            "@log class A {\n    x\n}",
+            "@log\nclass A {\n    x\n}",
+            "@int\nclass A {\n    x\n}",
+            "@byte\nclass A {\n    x\n}",
+            "@B\nclass A {\n    x\n}",
+            "@json::parse\nclass A {\n    x\n}",
+            "@log @log\nclass A(B) {\n    x\n}",
+            "@log\n\n// a comment\nclass A {\n    x\n}",
+            "fn f() {\n    @log\n    class A {\n        x\n    }\n}",
+        ] {
+            let e = parse_src_err(src);
+            assert!(e.to_string().contains("a class takes no decorators"), "{src}: {e}");
+        }
+        let e = parse_src_err("@public\nclass A {\n    x\n}");
+        assert!(e.to_string().contains("@public marks a class member"), "got: {e}");
     }
 
     /// A decorator on a `let` still works; only the class target is refused.

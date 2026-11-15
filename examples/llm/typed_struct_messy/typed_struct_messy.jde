@@ -15,7 +15,7 @@ class City {
 }
 
 prompt p = "Describe a city as JSON."
-let c = ?p |> City
+let c = City(?p)
 
 print(c.name)
 print(c.population)

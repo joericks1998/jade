@@ -299,16 +299,14 @@ pub enum Expr {
     /// expression is allowed, e.g. `let p = prompt "text"` inside a function.
     PromptLiteral { body: Box<Expr>, span: Span },
 
-    /// `?expr` — dereference a prompt, calling the LLM backend.
-    /// `?expr |> TypeName`   — typed deref: coerces output to the named type with retry.
-    /// `?expr |> grammar_expr` — grammar-constrained deref: expr must hold a Grammar value.
-    /// `expr` must evaluate to `Value::Prompt`.  Prefix `?` covers bare prompts
+    /// `?expr`: dereference a prompt, which runs the model. Called with a
+    /// whole dereference as its one argument, a converter, a class or a
+    /// grammar asks the model for that shape: `toInt(?p)`, `City(?p)`, `g(?p)`.
+    /// Piped, `?p |> f` calls `f` once per piece of the reply as it arrives.
+    /// `expr` must evaluate to a prompt. Prefix `?` covers bare prompts
     /// (`?name`); a prompt in a field uses `obj.(?field)` or `obj~>field`.
     PromptDeref {
         expr: Box<Expr>,
-        /// The expression after `|>`, if any.  Resolved at type-inference time into either
-        /// an output-type name (Str literal path) or a Grammar constraint expression.
-        constraint: Option<Box<Expr>>,
         /// Which surface syntax produced this node.  Purely cosmetic — both forms
         /// mean the same thing and compile identically; this only exists so that
         /// anything rendering the AST back to source can reproduce what was written.
@@ -322,24 +320,15 @@ pub enum Expr {
     /// `await expr`
     Await { expr: Box<Expr>, span: Span },
 
-    /// `value |> stage` — one pipe stage.
+    /// `value |> stage`: one pipe stage. `a |> f |> g` nests as
+    /// `Pipe(Pipe(a, f), g)`.
     ///
-    /// The parser builds this for every `|>` and decides nothing about what the
-    /// stage means; `typechecker::type_infer::infer_pipe` classifies it. A stage is
-    /// one of three things:
-    ///
-    /// - a **type name**, which on a prompt dereference constrains sampling with
-    ///   a generated grammar and coerces the reply (`?p |> int`), and on any
-    ///   other value is the ordinary type constructor (`x |> int` is `int(x)`);
-    /// - a **Grammar value**, which constrains sampling (`?p |> gram`);
-    /// - anything **callable**, which is applied with the piped value inserted
-    ///   as the first argument (`5 |> double`, `5 |> add(3)`).
-    ///
-    /// Keeping the stage un-desugared is what lets a single `|>` mean all three.
-    /// Until v1.2.0 the parser rewrote `value |> f` straight into `Expr::Call`
-    /// and a *separate* parse path stored the stage on `PromptDeref.constraint`,
-    /// so which rule applied was decided by surrounding syntax before anything
-    /// knew what the names referred to. See `PromptDeref`.
+    /// A pipe calls its stages once per piece of its source as each piece
+    /// arrives: each value a generator yields, each piece of a model's reply,
+    /// or the whole value when it is anything else. The parser decides nothing
+    /// about that; `typechecker::type_infer::infer_pipe` flattens a chain into
+    /// one `TExprKind::Pipe`. A stage is a function, or a call naming the other
+    /// arguments, `5 |> add(3)`. See `design/v2-pipes.md`.
     Pipe { value: Box<Expr>, stage: Box<Expr>, span: Span },
 }
 

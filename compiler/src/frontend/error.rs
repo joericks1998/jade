@@ -97,6 +97,10 @@ pub enum JadeError {
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
 
+    /// Lexer encountered a hex literal with no digits, or a letter that is not a
+    /// hex digit, such as `0x` or `0x1g`. `reason` says which and names the fix.
+    BadHexLiteral { reason: String, span: Span },
+
     /// Source nests expressions, blocks or f-string slots deeper than the
     /// parser will descend. Recursive descent costs native stack per level, and
     /// running out of it aborts the process rather than raising — so the depth
@@ -207,8 +211,13 @@ pub enum JadeError {
     /// Typed dereference `?p |> Type` exhausted its retry budget without producing a valid value.
     PromptOverflow { name: String, attempts: usize, span: Span },
 
-    /// The right side of `|>` is neither callable, a type name, nor a Grammar.
+    /// The right side of `|>` is not a function.
     InvalidPipeStage { got: String, span: Span },
+
+    /// `?p |> toInt`, `?p |> City` or `?p |> g`: a stage that only makes sense
+    /// on the whole reply, piped where it would run on each piece. `fix` is the
+    /// spelling that applies it to the whole reply, such as `toInt(?p)`.
+    WholeReplyStage { stage: String, fix: String, span: Span },
 
     /// Prefix `?` was applied to a field access (`?obj.field`).  Prefix `?` is for
     /// bare prompts only; dereferencing a prompt held in a field uses a postfix form.
@@ -359,6 +368,9 @@ impl std::fmt::Display for JadeError {
             }
             JadeError::TypeError { message, span } => {
                 write!(f, "[{}:{}] type error: {}", span.line, span.col, message)
+            }
+            JadeError::BadHexLiteral { reason, span } => {
+                write!(f, "[{}:{}] syntax error: {}", span.line, span.col, reason)
             }
             JadeError::LiteralOverflow { span } => {
                 write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col)
@@ -524,8 +536,14 @@ impl std::fmt::Display for JadeError {
             ),
             JadeError::InvalidPipeStage { got, span } => write!(
                 f,
-                "[{}:{}] '|>' needs a function, a type name, or a Grammar on its right; got {}",
+                "[{}:{}] '|>' needs a function on its right, to call once per piece; got {}",
                 span.line, span.col, got
+            ),
+            JadeError::WholeReplyStage { stage, fix, span } => write!(
+                f,
+                "[{}:{}] '?p |> {}' would call {} on each piece of the reply as the model \
+                 writes it; to apply it to the whole reply, write {}",
+                span.line, span.col, stage, stage, fix
             ),
             JadeError::PrefixDerefOnField { field, span } => write!(
                 f,

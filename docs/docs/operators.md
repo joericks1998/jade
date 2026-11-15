@@ -81,60 +81,64 @@ print("x" not in {"name": 1})    // true
 
 | Operator | Name | Description |
 |----------|------|-------------|
-| `\|>` | Pipe | Pass the left-hand value as the first argument to the right-hand function |
+| `\|>` | Pipe | Call the right-hand function once per piece of the left-hand value, as each piece arrives |
 
-The pipe operator passes a value through a chain of function calls, from left to right. `x |> f` means the same as `f(x)`. When the right side is already a call with arguments, the piped value goes in as the *first* argument, so `5 |> add(3)` means `add(5, 3)`.
+A pipe listens to a value as it arrives. `x |> f` calls `f` once for each piece of `x`. A call such as `f(x)` waits for all of `x` and calls `f` once.
+
+Most values are one piece, so for them a pipe is one call: `5 |> double` is `double(5)`. When the right side is already a call with arguments, the piece goes in as the *first* argument, so `5 |> add(3)` means `add(5, 3)`.
 
 ```jade
 fn double(x) { return x * 2 }
 fn add(a, b) { return a + b }
 
-// Simple pipe
-let n = 5 |> double          // 10
-
-// Chained pipes, left-associative
-let m = 3 |> double |> double  // 12
-
-// Pipe with extra arguments; the value goes in first
-let r = 5 |> add(3)          // add(5, 3) = 8
-
-// Pipe to print
+let n = 5 |> double            // 10
+let m = 3 |> double |> double  // 12, left to right
+let r = 5 |> add(3)            // add(5, 3) = 8
 "hello" |> print
-
-// Pipe with arithmetic on the left
-let x = (2 + 3) |> double   // 10
+let x = (2 + 3) |> double      // 10
 ```
+
+### What a piece is
+
+| Source | Its pieces |
+|--------|------------|
+| A call to a function that `yield`s | Each value, at the moment it is yielded |
+| A stream already held, such as a variable | Each value, one after another |
+| A prompt dereference, `?p` | The reply's text, a piece at a time, as the model writes it |
+| Anything else, arrays included | The whole value, once |
+
+A chain is one pipe: each piece goes through every stage before the next piece is made.
+
+```jade
+fn numbers() {
+    print("making 1")
+    yield 1
+    print("making 2")
+    yield 2
+}
+
+numbers() |> double |> print   // making 1, 2, making 2, 4
+print(numbers())               // making 1, making 2, [1, 2]
+?p |> write                    // the reply, as the model writes it
+```
+
+A pipe keeps its source's shape. Over one piece it gives back what the last stage gave, and over a stream it gives back a stream of those results. Written as a statement, a pipe over a stream runs to the end.
+
+A stage's other arguments are worked out once, before the first piece. A raise in a stage stops the pipe, and the generator with it. The generator's own `try` does not catch the raise, because a stage is the caller's code.
 
 ### What a stage can be
 
-A stage is whatever sits to the right of a `|>`. There are three kinds. Which one applies depends on what the name refers to, not on where the `|>` appears:
+A stage is a function, or a call that names the other arguments. Anything else, such as `5 |> 3`, is an `InvalidPipeStage` error that names what it found.
 
-| Stage | Meaning |
-|-------|---------|
-| A function | Applied to the value, which becomes its first argument |
-| A type name | On a prompt dereference, it constrains generation with a grammar and coerces the reply. Anywhere else it is the ordinary type constructor, so `x \|> int` means `int(x)` |
-| A `Grammar` value | Constrains sampling on a prompt dereference |
-
-Two rules settle a name that could mean more than one thing. They only matter on a prompt dereference:
-
-- A builtin type keyword is always a type, never a function. `int`, `float`, `bool`, `char`, and `str` are also callable constructors. Without this rule, `?p |> int` would stop constraining the model and merely try to convert whatever came back.
-- A `struct` you declared is always a type. A struct registers a constructor under its own name, so judged on callability alone, every struct looks like a function. Without this rule, `?p |> City` would have become `City(?p)`.
-
-Everything else prefers a function.
+To shape a whole reply, call the converter, class or grammar around the dereference instead of piping it: `toInt(?p)`, `City(?p)`, `g(?p)`. Piping one straight after `?p`, as in `?p |> toInt`, would run it on each piece of the reply, so the build refuses it and names the call to write. See [LLM Integration](llm.md#typed-dereference).
 
 ```jade
 prompt p = "What is 21 + 21? Respond with only the number."
 
-let n = ?p |> int |> double   // constrain, coerce, then apply
-let g = Grammar.new('"yes" | "no"')
-let a = ?p |> g               // constrain sampling with a grammar
+let n = toInt(?p) |> double     // ask for an int, then double it
 ```
 
-:::note
-Until v1.2.0, this was really two operators sharing one spelling. A `|>` after a prompt dereference went through a different parse rule, which accepted exactly one constraint and could not chain, and a typed dereference was banned inside `print(...)`. Both restrictions are gone. A stage that is none of the three kinds above now produces an `InvalidPipeStage` type error naming what it found, rather than a parse error talking about tokens.
-:::
-
-Pipes are left-associative and bind more loosely than every other operator. So the whole expression to the left of `|>` is evaluated first, and the result is what gets passed to the function on the right.
+Pipes are left-associative and bind more loosely than every other operator. So the whole expression to the left of `|>` is worked out first.
 
 ## Precedence
 

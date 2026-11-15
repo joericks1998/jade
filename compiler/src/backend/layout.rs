@@ -80,6 +80,13 @@ impl<'ctx> Cx<'ctx> {
         match t {
             Ty::Int => self.i64t().into(),
             Ty::Float => self.f64t().into(),
+            Ty::Sized(s) => match (s.bits(), s.is_float()) {
+                (_, true) => self.f32t().into(),
+                (8, _) => self.i8t().into(),
+                (16, _) => self.i16t().into(),
+                (32, _) => self.i32t().into(),
+                _ => self.i64t().into(),
+            },
             Ty::Bool => self.i1t().into(),
             Ty::Char => self.i32t().into(),
             Ty::Nil => self.i8t().into(),

@@ -9,7 +9,7 @@
 //! one of these dicts reads the struct the same way.
 
 use super::check::Frame;
-use super::ty::{FuncRef, Ty};
+use super::ty::{FuncRef, SizedNum, Ty, with_article};
 use super::{Checker, StructInfo, Target};
 use crate::frontend::error::Span;
 use crate::typechecker::tir::TExpr;
@@ -108,23 +108,64 @@ pub(super) fn settled_struct(c: &mut Checker, inner: &Ty) -> String {
 ///
 /// Outputs: true for a builtin.
 pub(super) fn is_builtin_value(name: &str) -> bool {
-    matches!(
-        name,
-        "len"
-            | "str"
-            | "int"
-            | "float"
-            | "bool"
-            | "char"
-            | "print"
-            | "write"
-            | "input"
-            | "max_tasks"
-            | "set_max_tasks"
-            | "max_tokens"
-            | "set_max_tokens"
-            | "cancelled"
-    )
+    SizedNum::from_name(name).is_some()
+        || SizedNum::from_converter(name).is_some()
+        || matches!(name, "long" | "double" | "toLong" | "toDouble")
+        || matches!(
+            name,
+            "len"
+                | "str"
+                | "int"
+                | "float"
+                | "bool"
+                | "char"
+                | "toInt"
+                | "toFloat"
+                | "toString"
+                | "toBool"
+                | "toChar"
+                | "print"
+                | "write"
+                | "input"
+                | "max_tasks"
+                | "set_max_tasks"
+                | "max_tokens"
+                | "set_max_tokens"
+                | "cancelled"
+        )
+}
+
+/// Purpose: This function gives the name a builtin goes by: `long` and
+/// `double` are `int` and `float`, and so are their converters.
+///
+/// Inputs:
+/// - `name`: the name called.
+///
+/// Outputs: the builtin's own name.
+pub(crate) fn canonical(name: &str) -> &str {
+    match name {
+        "long" => "int",
+        "double" => "float",
+        "toLong" => "toInt",
+        "toDouble" => "toFloat",
+        other => other,
+    }
+}
+
+/// Purpose: This function gives the type a type function checks for.
+///
+/// Inputs:
+/// - `name`: `int`, `float`, `str`, `bool` or `char`.
+///
+/// Outputs: that type.
+fn type_fn_ty(name: &str) -> Ty {
+    match name {
+        "int" => Ty::Int,
+        "float" => Ty::Float,
+        "str" => Ty::Str,
+        "bool" => Ty::Bool,
+        _ => Ty::Char,
+    }
 }
 
 /// Purpose: This function says whether a type is a number.
@@ -146,6 +187,7 @@ fn is_num(t: &Ty) -> bool {
 ///
 /// Outputs: the result type, or an error message.
 fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
+    let name = canonical(name);
     let arity = |n: usize| -> Result<(), String> {
         if tys.len() == n {
             Ok(())
@@ -194,35 +236,101 @@ fn builtin_result(name: &str, tys: &[Ty]) -> Result<Ty, String> {
                 t => Err(format!("len() has no answer for {t}")),
             }
         }
-        "str" => arity(1).map(|_| Ty::Str),
-        "int" => {
+        // The type functions check that a value already has their type and
+        // return it unchanged; an int is also a float. A json value's kind is
+        // known only when the program runs, so it is checked then.
+        "int" | "float" | "str" | "bool" | "char" => {
+            arity(1)?;
+            let want = type_fn_ty(name);
+            let fits = match &tys[0] {
+                t if *t == want => true,
+                Ty::Var(_) => true,
+                Ty::Int => want == Ty::Float,
+                Ty::Json => want != Ty::Char,
+                _ => false,
+            };
+            if fits {
+                return Ok(want);
+            }
+            let (article, conv) = match name {
+                "int" => ("an int", "toInt"),
+                "float" => ("a float or an int", "toFloat"),
+                "str" => ("a str", "toString"),
+                "bool" => ("a bool", "toBool"),
+                _ => ("a char", "toChar"),
+            };
+            Err(format!("{name}() needs {article}, got {}; convert one with {conv}()", tys[0]))
+        }
+        // A sized type function checks the same way; a literal that fits is
+        // let through in `Checker::builtin_call`, before this.
+        n if SizedNum::from_name(n).is_some() => {
+            arity(1)?;
+            let s = SizedNum::from_name(n).unwrap_or(SizedNum::Byte);
+            match &tys[0] {
+                Ty::Sized(t) if *t == s => Ok(Ty::Sized(s)),
+                Ty::Var(_) => Ok(Ty::Sized(s)),
+                t => Err(format!(
+                    "{n}() needs {}, got {t}; convert one with {}()",
+                    with_article(n),
+                    s.converter()
+                )),
+            }
+        }
+        // The converters make a value of their type from another, and raise
+        // when it does not fit.
+        "toString" => arity(1).map(|_| Ty::Str),
+        "toInt" => {
             arity(1)?;
             match &tys[0] {
-                Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Char | Ty::Json | Ty::Var(_) => {
-                    Ok(Ty::Int)
+                Ty::Int
+                | Ty::Float
+                | Ty::Sized(_)
+                | Ty::Str
+                | Ty::Bool
+                | Ty::Char
+                | Ty::Json
+                | Ty::Var(_) => Ok(Ty::Int),
+                t => Err(format!("toInt() cannot convert {t}")),
+            }
+        }
+        "toFloat" => {
+            arity(1)?;
+            match &tys[0] {
+                Ty::Int | Ty::Float | Ty::Sized(_) | Ty::Str | Ty::Json | Ty::Var(_) => {
+                    Ok(Ty::Float)
                 }
-                t => Err(format!("int() cannot convert {t}")),
+                t => Err(format!("toFloat() cannot convert {t}")),
             }
         }
-        "float" => {
-            arity(1)?;
-            match &tys[0] {
-                Ty::Int | Ty::Float | Ty::Str | Ty::Json | Ty::Var(_) => Ok(Ty::Float),
-                t => Err(format!("float() cannot convert {t}")),
-            }
-        }
-        "bool" => {
+        "toBool" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Bool | Ty::Int | Ty::Str | Ty::Json | Ty::Var(_) => Ok(Ty::Bool),
-                t => Err(format!("bool() cannot convert {t}")),
+                Ty::Sized(s) if !s.is_float() => Ok(Ty::Bool),
+                t => Err(format!("toBool() cannot convert {t}")),
             }
         }
-        "char" => {
+        "toChar" => {
             arity(1)?;
             match &tys[0] {
                 Ty::Int | Ty::Str | Ty::Char | Ty::Var(_) => Ok(Ty::Char),
-                t => Err(format!("char() cannot convert {t}")),
+                Ty::Sized(s) if !s.is_float() => Ok(Ty::Char),
+                t => Err(format!("toChar() cannot convert {t}")),
+            }
+        }
+        n if SizedNum::from_converter(n).is_some() => {
+            arity(1)?;
+            let s = SizedNum::from_converter(n).unwrap_or(SizedNum::Byte);
+            match &tys[0] {
+                Ty::Int
+                | Ty::Float
+                | Ty::Sized(_)
+                | Ty::Str
+                | Ty::Bool
+                | Ty::Char
+                | Ty::Json
+                | Ty::Var(_) => Ok(Ty::Sized(s)),
+                t => Err(format!("{n}() cannot convert {t}")),
             }
         }
         "max_tasks" | "max_tokens" => arity(0).map(|_| Ty::Int),
@@ -336,7 +444,16 @@ impl<'a> Checker<'a> {
         f: &mut Frame,
         node: usize,
     ) -> Ty {
-        let _ = (args, f, node);
+        let _ = (f, node);
+        // A literal takes the type of the sized type function it meets, when it
+        // fits: `byte(5)` is the byte 5.
+        if let Some(s) = SizedNum::from_name(name)
+            && let [arg] = args
+            && let Some(lit) = super::check::num_literal(arg)
+        {
+            self.literal_fits(lit, s, span);
+            return Ty::Sized(s);
+        }
         let resolved: Vec<Ty> = tys.iter().map(|t| self.store.resolve(t)).collect();
         match builtin_result(name, &resolved) {
             Ok(t) => t,
@@ -767,9 +884,8 @@ impl<'a> Checker<'a> {
                     "taint" => (vec![Ty::Str], Ty::Str),
                     "ready" => (Vec::new(), Ty::Bool),
                     "setup" | "map" => (Vec::new(), Ty::Nil),
-                    "generate" => {
-                        (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int], Ty::Array(Box::new(Ty::Int)))
-                    }
+                    "next" => (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int, Ty::Int], Ty::Int),
+                    "conversation" => (Vec::new(), Ty::Int),
                     // A prompt's text, from a prompt or a string.
                     "text" => {
                         if !count(1..=1) {

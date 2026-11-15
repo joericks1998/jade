@@ -1,0 +1,9 @@
+byte overflow
+byte overflow
+short overflow
+division by zero
+300 does not fit a byte, which holds 0 to 255
+-2.5 does not fit a uint32, which holds 0 to 4294967295
+3000000000.0 does not fit an int32, which holds -2147483648 to 2147483647
+invalid shift amount 8 for a byte
+cannot convert "abc" to an int

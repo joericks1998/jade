@@ -1,0 +1,12 @@
+// `?p |> toInt` would call toInt on each piece of the reply as the model
+// writes it, a token's text at a time, which is almost never what was meant.
+//
+// A converter that shapes the whole reply goes around it: `toInt(?p)` asks
+// the model for an int. The old spelling is refused with that fix, and so are
+// `?p |> int`, `?p |> City` for a class, and `?p |> g` for a grammar.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+prompt p = "What is 3 + 4? Respond with only the number."
+let n = ?p |> toInt
+print(n)

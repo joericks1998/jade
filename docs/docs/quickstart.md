@@ -133,13 +133,15 @@ Hello from myapp!
 
 ## Calling a model
 
-This step is the reason Jade exists. A `prompt` is a value. The `?` operator sends it to your provider. The `|> int` stage makes the result an `int`, or raises if it cannot:
+This step is the reason Jade exists. A `prompt` is a value. The `?` operator sends it to the model. `toInt` around it asks the model for an `int`, and raises if it cannot give one:
 
 ```jade
 prompt p = "How many moons does Mars have? Reply with just the number."
 
-let n = ?p |> int
+let n = toInt(?p)
 print(n + 1)
 ```
+
+To show a reply as the model writes it, pipe it: `?p |> write` calls `write` on each piece as it arrives.
 
 This program needs an inference provider registered first, so run `jade register` before you try it. See [LLM Integration](llm) for the whole picture.

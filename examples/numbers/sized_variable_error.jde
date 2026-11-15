@@ -1,0 +1,9 @@
+// A variable never changes type. `n` is an int, so uint32() refuses it, as
+// int() refuses a str; the converter is toUint32(n).
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let n = 5
+@uint32
+let y = n
+print(y)
