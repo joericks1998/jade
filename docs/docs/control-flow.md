@@ -401,7 +401,7 @@ print(n)   // 8
 
 ### Leaving through a catch
 
-A loop can also end because something raised. That is the natural shape for a C library which signals end-of-input with an error code, since [`fails_when`](packages#the-binding-vocabulary) turns the code into an exception.
+A loop can also end because something raised. That is the natural shape for a Rust package that signals end-of-input with an `Err`, since an `Err` [raises in the program](packages#errors-and-panics).
 
 ```jade
 while true {

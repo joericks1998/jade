@@ -19,7 +19,7 @@ Every directory under `src/` has its own `README.md`. Read them in the order the
 Three more that come up often:
 
 - [`src/builtins/`](src/builtins/README.md) if you are adding something to `std`.
-- [`src/pkg/`](src/pkg/README.md) if you are working on packages or C bindings.
+- [`src/pkg/`](src/pkg/README.md) if you are working on packages, and [`src/rustpkg/`](src/rustpkg/README.md) if you are working on Rust packages, which are how a program reaches native code.
 - [`src/cli/`](src/cli/README.md) if you are adding or changing a `jade` subcommand.
 
 [`CLAUDE.md`](../CLAUDE.md) at the repo root has the full map of every directory with a one-line description of each.
@@ -39,12 +39,7 @@ brew install llvm@18                                              # macOS
 sudo apt-get install llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev   # Debian and Ubuntu
 ```
 
-`cargo build` and `cargo test` need nothing else. The FFI gate, `src/scripts/ffi-gate.sh`, binds against real glib, so running that one script also needs glib, pkg-config, and clang:
-
-```sh
-brew install glib pkg-config                                # macOS
-sudo apt-get install libglib2.0-dev pkg-config clang        # Debian and Ubuntu
-```
+`cargo build` and `cargo test` need nothing else. The examples and the FFI gate, `src/scripts/ffi-gate.sh`, build Rust packages with cargo, which fetches their crates the first time; the gate's package links the system zlib, which on Linux means the zlib development package and pkg-config.
 
 The `llvm-sys` crate finds LLVM through the `LLVM_SYS_180_PREFIX` environment variable. `.cargo/config.toml` sets it to the Apple Silicon Homebrew path as a default. Cargo will not overwrite a variable you have already exported, so on any other host set it yourself:
 

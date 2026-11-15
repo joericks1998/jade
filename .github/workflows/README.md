@@ -30,7 +30,9 @@ A merge that changes no version tags nothing and releases nothing. A merge that 
 
 Because the compiler carries dovata's library, a change to the files the dovata process writes in its run directory, its records and their `FORMAT`, is a change to both: bump both versions, so a released `jade` reads what a released `dovata` writes.
 
-Every cargo command in dovata's workflows names dovata's packages with `-p`, never `--workspace`, because the workspace holds the compiler too, and the compiler needs LLVM 18 to build. The compiler's commands need no `-p`: the workspace's `default-members` is `compiler`, so a bare `cargo build` at the root builds `jade` alone. The one exception is `cargo fmt -p jade --check`, since `cargo fmt --all` would reach dovata, which is not formatted with rustfmt.
+Every cargo command in dovata's workflows names dovata's packages with `-p`, never `--workspace`, because the workspace holds the compiler too, and the compiler needs LLVM 18 to build. The compiler's commands need no `-p`: the workspace's `default-members` is `compiler`, so a bare `cargo build` at the root builds `jade` alone. The one exception is `cargo fmt -p jade -p jade-rs -p jade-rs-macros --check`, since `cargo fmt --all` would reach dovata, which is not formatted with rustfmt.
+
+`ci.yml` also tests and lints `jade-rs/`, the crate a Rust package depends on to be called from Jade, and its proc macro, naming both with `-p` since they are not default members. They need no LLVM, and they are never built in the same cargo command as the compiler, whose library is also named `jade`. They have no release of their own yet: a package outside this repo depends on `jade-rs` by git, at a compiler tag. The FFI gate builds a Rust package that links the system zlib, so the workflow installs `zlib1g-dev` for it.
 
 ## The latest release is the compiler's
 

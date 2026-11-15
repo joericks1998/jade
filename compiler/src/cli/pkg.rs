@@ -347,12 +347,19 @@ pub fn run_install(locked: bool) {
     }
     let rust = crate::rustpkg::dependencies(&manifest).len();
     let rust_note = |n: usize| {
-        if rust > 0 {
-            println!(
-                "{n} source package(s) installed; {rust} Rust package(s) build with the program"
-            )
-        } else {
-            println!("installed {n} dependencies")
+        let plural =
+            |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+        match (n, rust) {
+            (_, 0) => println!("installed {}", plural(n, "dependency", "dependencies")),
+            (0, _) => println!(
+                "nothing to install: {} with the program, by cargo",
+                plural(rust, "Rust package builds", "Rust packages build")
+            ),
+            _ => println!(
+                "installed {}; {} with the program, by cargo",
+                plural(n, "source package", "source packages"),
+                plural(rust, "Rust package builds", "Rust packages build")
+            ),
         }
     };
 

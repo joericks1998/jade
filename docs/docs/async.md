@@ -179,17 +179,6 @@ async fn build(n) {
 print(await build(3))   // [3, 6]
 ```
 
-:::note
-A `handle<T>` from a native package cannot cross into a task either. A handle is a pointer into a C library, and Jade cannot tell whether that library is thread-safe. Passing one to an `async fn` is a compile error:
-
-```
-cannot pass handle<File> into a task
-  a handle is a pointer into a C library, and Jade cannot see what the library
-  does with it or know whether it is thread-safe
-  help: open the handle inside the task and close it before returning
-```
-:::
-
 :::warning
 *REPL limitation.* `async` and `await` do not carry across `jade repl` entries. An `async fn` defined at one prompt cannot be awaited at the next, and the await fails with `'await' applied to a non-Future value`. Use `jade run` or `jade build` instead.
 :::
@@ -299,7 +288,6 @@ Printing a future is allowed. It shows as `<future>`, because it has no meaningf
 |-------|------|-------|
 | `type mismatch: expected future, got …` | Compile time | `await` applied to a value the compiler already knows is not a future, including `await ?p` |
 | `SharedMutation` | Compile time | An `async fn` mutates state it did not create. See [No shared mutation](#no-shared-mutation). |
-| `HandleAcrossTask` | Compile time | A `handle<T>` from a native package was passed into an `async fn` |
 | `NotAFuture` | Runtime | `await` applied to a non-future whose type the compiler could not see ahead of time |
 | `DoubleAwait` | Runtime | The same future was awaited or joined more than once. The first await consumes it |
 | `AsyncPanic` | Runtime | A spawned async task panicked internally; the panic message and source span are captured and reported |

@@ -133,10 +133,14 @@ pub fn write_if_changed(path: &Path, text: &str) -> Result<(), String> {
     if std::fs::read_to_string(path).is_ok_and(|t| t == text) {
         return Ok(());
     }
+    // Named for the process and a count, since two threads of one process, such
+    // as two tests, may write the same crate at once.
+    static WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {} ({e})", dir.display()))?;
     let tmp = dir.join(format!(
-        ".{}.{}",
+        ".{}.{}.{n}",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         std::process::id()
     ));
@@ -184,6 +188,16 @@ pub struct Built {
 pub fn build(p: &Places) -> Result<Built, String> {
     let cargo = cargo_program()?;
     let manifest = p.crate_dir.join("Cargo.toml");
+    // A first build fetches and compiles every crate, which takes a while; a
+    // later one asks cargo and is done in a moment, so only the first says so.
+    let built_before =
+        p.target_dir.join("release").join(format!("lib{}.a", p.crate_name)).is_file();
+    if !built_before {
+        eprintln!(
+            "note: building this project's Rust packages with cargo; the first build fetches \
+             and compiles their crates"
+        );
+    }
     let out = Command::new(&cargo)
         .current_dir(&p.crate_dir)
         .args(["rustc", "--release", "--lib", "--message-format=json-render-diagnostics"])

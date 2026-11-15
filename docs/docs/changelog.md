@@ -6,7 +6,16 @@ sidebar_label: Changelog
 
 ## v2.0.5
 
-*Native packages are Rust crates.* `design/v2-rust-packages.md` has the design.
+*Native packages are Rust crates.* A dependency with `abi = "rust"` is a crate built by cargo and linked into the program, and Jade's own C foreign function interface is gone. `design/v2-rust-packages.md` has the design and the reasons for it.
+
+- *`#[jade::export]` makes a Rust function or struct callable from Jade.* A package depends on the new `jade-rs` crate, and the attribute writes an `extern "C"` wrapper for each function and a C mirror for each struct. Numbers of every width, `bool`, `char`, text, bytes, arrays, optionals and structs cross; an exported struct is a class with public fields, `pkg.Point`. An `Err` raises its text, and a panic raises `pkg.f panicked: <message>` without unwinding into the program.
+- *The compiler reads each signature out of the built library.* Each export adds a description to the crate's library, built by rustc from the types it compiled, so the checker knows what every function takes and returns, refuses a wrong argument or a name the package does not export, and suggests the closest one. A number literal takes a sized parameter's type. `jade check` builds the Rust to read it; after the first build that takes a moment.
+- *One staticlib per project.* The compiler writes a crate depending on every Rust package of the project in `~/.jade/rust/`, builds it with cargo from `PATH`, and LLD links it into the program. The binary needs nothing beside it: no `libs/` is copied next to it any more. On macOS a program with a Rust package links against Apple's SDK, which cargo needs anyway.
+- *A C library is reached through a Rust crate that wraps it,* such as its `-sys` crate. `examples/ffi/rust_zlib/` wraps zlib through `libz-sys` that way.
+- *`jade pkg add <name> --path <dir>` adds a Rust package* when the directory holds a `Cargo.toml`, builds it, and reports what it exports. `--rust` marks a `--git` or crates.io `--version` source, and `--package` names a crate whose name a program cannot write, such as one with a `-`.
+- *Removed:* `abi = "c"` and `abi = "jade"`, prebuilt libraries fetched by `url`, the `[lib]` and `[dependencies]` symbol and struct tables, a `.dylib` or `.so` in `[lib]`, `jade pkg bind`, `jade pkg add --header`, `--c-abi`, `--include`, `--define` and `--only`, loading libraries with `dlopen`, and the `handle<T>` type. A manifest naming a removed `abi` is refused on that line with the replacement named, and `abi` must now be written for every dependency.
+- *The FFI gate builds a Rust package* wrapping `regex` and the system zlib, and calls it 600,000 times to show that what Rust returns is freed. It replaces the gate that bound glib's header.
+- *A struct literal missing a field of a class from another file* is refused with `missing required field`, where it reached the backend as an internal error.
 
 ## v2.0.4
 

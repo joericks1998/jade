@@ -113,7 +113,7 @@ impl<'ctx> Cx<'ctx> {
             let mut slots = Vec::with_capacity(n);
             for (i, t) in c.params.iter().enumerate() {
                 let slot = f.alloca(f.cx.c_ty(t));
-                f.call(f.cx.to_c_fn(t), &[f.param(i as u32), slot.into()]);
+                f.call(f.cx.c_write_fn(t), &[f.param(i as u32), slot.into()]);
                 slots.push(slot);
             }
             let out = f.alloca(f.cx.c_ty(&c.ret));
@@ -126,7 +126,7 @@ impl<'ctx> Cx<'ctx> {
             let status = f.call_int(call, &args);
             for (t, slot) in c.params.iter().zip(&slots) {
                 if needs_release(t) {
-                    f.call(f.cx.release_c_fn(t), &[(*slot).into()]);
+                    f.call(f.cx.c_release_fn(t), &[(*slot).into()]);
                 }
             }
             f.if_(f.ne(status, f.i32(0)), |f| {
@@ -136,7 +136,7 @@ impl<'ctx> Cx<'ctx> {
                 f.call(free, &[f.null().into(), err.into()]);
                 f.fail_str(m);
             });
-            let r = f.callv(f.cx.from_c_fn(&c.ret), &[out.into()]);
+            let r = f.callv(f.cx.c_read_fn(&c.ret), &[out.into()]);
             f.call(free, &[out.into(), f.null().into()]);
             f.ret(r);
         })
@@ -145,7 +145,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.rust.to.<T>(v, slot)`, which writes
     /// the C form of a Jade value into `slot`, lending its text and allocating
     /// what an array needs.
-    fn to_c_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
+    fn c_write_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
         let name = format!("jade.rust.to.{}", super::rc::key(t));
         let t = t.clone();
         let params = [self.llty(&t), self.ptrt().into()];
@@ -169,7 +169,7 @@ impl<'ctx> Cx<'ctx> {
                     let buf = f.call_ptr(f.cx.libc("malloc"), &[bytes.into()]);
                     f.for_range(f.i64(0), n, |f, i, _| {
                         let x = f.load(jt, f.elem(jt, src, i));
-                        f.call(f.cx.to_c_fn(el), &[x.into(), f.elem(ct, buf, i).into()]);
+                        f.call(f.cx.c_write_fn(el), &[x, f.elem(ct, buf, i).into()]);
                     });
                     f.store(slot, buf);
                     f.store(f.at_c(slot, 8), n);
@@ -181,7 +181,7 @@ impl<'ctx> Cx<'ctx> {
                     f.if_(f.not(f.is_nil(&t, v)), |f| {
                         f.store(f.field(st, slot, 0), f.i8(1));
                         let x = f.unwrap(&t, v);
-                        f.call(f.cx.to_c_fn(inner), &[x.into(), f.field(st, slot, 1).into()]);
+                        f.call(f.cx.c_write_fn(inner), &[x, f.field(st, slot, 1).into()]);
                     });
                 }
                 Ty::Struct(class) => {
@@ -190,7 +190,7 @@ impl<'ctx> Cx<'ctx> {
                     for (i, ft) in f.cx.struct_fields(class).iter().enumerate() {
                         let x = f.load(f.cx.llty(ft), f.field(obj, o, i as u32 + 2));
                         let at = f.field(cst, slot, i as u32);
-                        f.call(f.cx.to_c_fn(ft), &[x.into(), at.into()]);
+                        f.call(f.cx.c_write_fn(ft), &[x, at.into()]);
                     }
                 }
                 _ => f.store(slot, v),
@@ -200,9 +200,9 @@ impl<'ctx> Cx<'ctx> {
     }
 
     /// Purpose: This function returns `jade.rust.release.<T>(slot)`, which frees
-    /// what [`Cx::to_c_fn`] allocated: an array's element buffer, after what its
+    /// what [`Cx::c_write_fn`] allocated: an array's element buffer, after what its
     /// elements hold. Text is lent and left alone.
-    fn release_c_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
+    fn c_release_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
         let name = format!("jade.rust.release.{}", super::rc::key(t));
         let t = t.clone();
         self.support(&name, None, &[self.ptrt().into()], |f| {
@@ -213,7 +213,7 @@ impl<'ctx> Cx<'ctx> {
                     if needs_release(el) {
                         let ct = f.cx.c_ty(el);
                         f.for_range(f.i64(0), f.load_i64(f.at_c(slot, 8)), |f, i, _| {
-                            f.call(f.cx.release_c_fn(el), &[f.elem(ct, buf, i).into()]);
+                            f.call(f.cx.c_release_fn(el), &[f.elem(ct, buf, i).into()]);
                         });
                     }
                     f.call(f.cx.libc("free"), &[buf.into()]);
@@ -222,7 +222,7 @@ impl<'ctx> Cx<'ctx> {
                     let st = f.cx.c_ty(&t).into_struct_type();
                     let some = f.ne(f.load_i8(f.field(st, slot, 0)), f.i8(0));
                     f.if_(some, |f| {
-                        f.call(f.cx.release_c_fn(inner), &[f.field(st, slot, 1).into()]);
+                        f.call(f.cx.c_release_fn(inner), &[f.field(st, slot, 1).into()]);
                     });
                 }
                 Ty::Struct(class) => {
@@ -230,7 +230,7 @@ impl<'ctx> Cx<'ctx> {
                     for (i, ft) in f.cx.struct_fields(class).iter().enumerate() {
                         if needs_release(ft) {
                             let at = f.field(cst, slot, i as u32);
-                            f.call(f.cx.release_c_fn(ft), &[at.into()]);
+                            f.call(f.cx.c_release_fn(ft), &[at.into()]);
                         }
                     }
                 }
@@ -243,7 +243,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.rust.from.<T>(slot) -> T`, which
     /// copies a C form Rust handed over into a new Jade value. Text and chars are
     /// tainted.
-    fn from_c_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
+    fn c_read_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
         let name = format!("jade.rust.from.{}", super::rc::key(t));
         let t = t.clone();
         self.support(&name, Some(self.llty(&t)), &[self.ptrt().into()], |f| {
@@ -263,7 +263,7 @@ impl<'ctx> Cx<'ctx> {
                     let ct = f.cx.c_ty(el);
                     let arr = f.array_new(el, n);
                     f.for_range(f.i64(0), n, |f, i, _| {
-                        let x = f.callv(f.cx.from_c_fn(el), &[f.elem(ct, ptr, i).into()]);
+                        let x = f.callv(f.cx.c_read_fn(el), &[f.elem(ct, ptr, i).into()]);
                         f.array_push_owned(el, arr, x);
                     });
                     arr.into()
@@ -272,7 +272,7 @@ impl<'ctx> Cx<'ctx> {
                     let st = f.cx.c_ty(&t).into_struct_type();
                     let none = f.eq(f.load_i8(f.field(st, slot, 0)), f.i8(0));
                     f.if_(none, |f| f.ret(super::layout::zero(f.cx.llty(&t))));
-                    let x = f.callv(f.cx.from_c_fn(inner), &[f.field(st, slot, 1).into()]);
+                    let x = f.callv(f.cx.c_read_fn(inner), &[f.field(st, slot, 1).into()]);
                     f.wrap(&t, x)
                 }
                 Ty::Struct(class) => {
@@ -282,7 +282,7 @@ impl<'ctx> Cx<'ctx> {
                     f.store(f.at_c(o, TYPE_ID), f.i64(f.cx.struct_id(class) as i64));
                     for (i, ft) in f.cx.struct_fields(class).iter().enumerate() {
                         let at = f.field(cst, slot, i as u32);
-                        let x = f.callv(f.cx.from_c_fn(ft), &[at.into()]);
+                        let x = f.callv(f.cx.c_read_fn(ft), &[at.into()]);
                         f.store(f.field(obj, o, i as u32 + 2), x);
                     }
                     o.into()

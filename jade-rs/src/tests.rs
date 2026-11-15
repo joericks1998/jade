@@ -26,7 +26,9 @@ pub fn shout(s: &str) -> Result<String, String> {
     }
 }
 
+// The lifetime is named on purpose: the wrapper must not carry it.
 #[crate::export]
+#[allow(clippy::needless_lifetimes)]
 pub fn first<'a>(s: &'a str) -> &'a str {
     s.split(' ').next().unwrap_or("")
 }

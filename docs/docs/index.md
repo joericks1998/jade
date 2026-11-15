@@ -49,7 +49,7 @@ JADE_INSTALL_DIR=~/.local/bin curl -fsSL https://jadelang.org/install.sh | sh
 
 ### Windows
 
-Jade does not support Windows. Native packages are loaded with `dlopen`, and the support code `jade` builds into every program is written against POSIX. There is no native Windows build.
+Jade does not support Windows. The support code `jade` builds into every program is written against POSIX, and programs are linked for macOS and Linux alone. There is no native Windows build.
 
 Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and follow the Linux instructions above.
 

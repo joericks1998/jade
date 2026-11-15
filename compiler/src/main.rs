@@ -193,7 +193,7 @@ enum PkgCommands {
         #[arg(long)]
         rust: bool,
         /// The Rust package's own name, when it is not the dependency's
-        #[arg(long, value_name = "NAME", requires = "rust")]
+        #[arg(long, value_name = "NAME")]
         package: Option<String>,
     },
     /// Remove a dependency from jade.toml, jade.lock, and libs/
