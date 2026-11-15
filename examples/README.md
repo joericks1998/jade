@@ -23,13 +23,17 @@ v2 turned a set of runtime type errors into compile errors, since every value's 
 
 2.0.7 removed `std::json` and its `Json` value (`design/v2-simplify.md`, part 2), so `json/` is gone. `dicts/to_dict/` shows `toDict(text)` and `toString(d)`: a dict's value type comes from how the program uses it and is `str` otherwise. `json/parse` became `dicts/malformed/`, and `dicts/json_removed_error` and `dicts/to_dict_type_error` pin the two refusals. A string inside an array or a dict now prints quoted, as JSON writes it, so the recorded output of `collections/edge_cases`, `collections/join_and_lines`, `collections/method_type_guard`, `collections/two_spellings`, `ffi/rust_values` and `strings/write` changed in that one way. [`dicts/README.md`](dicts/README.md) lists the dict fixtures.
 
+2.0.8 moved `std::path`, `std::time` and `std::math` from the backend into Jade source (`compiler/src/lib/`). Every fixture that uses them prints what it printed before, and three new ones were checked against the backend versions: `path/components/` for path edge cases, `time/calendar_edges/` for leap years, dates before 1970 and the ends of the int range, and `numbers/math_edges/` for NaN, the infinities and the sign of zero. `path/segment_type_error` pins how a type error inside library code reads, and `imports/std_hooks_error` that a program cannot name the hook package `__sys`.
+
+The same release moved `std::env`, `std::fs`, `std::sh`, `std::random`, `std::http` and `std::uhttp` into Jade too. Seven new fixtures were recorded from the backend versions before the move and pin what they printed: `fs/edges/` for every `std::fs` failure's message and its trust rules, `fs/stdio/` for the standard streams, `env/vars/` for variables, arguments and which are trusted, `sh/capture/` for what `exec` trims and every failure's text, `random/seeded/` for a seeded program's draws, and `http/local/` and `uhttp/local/` for the request path and `uhttp.stream`, run against a stand-in for curl the fixture writes, so they need no network and `golden.sh` runs them. `fs/stdio/` and `env/vars/` run themselves as a child, through the shell, to choose their own input, arguments and environment.
+
 A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and by v1.1.34 it had rotted badly enough to reindent the inside of multi-line strings, changing what a program printed. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
 
 ## What is in here
 
 There is one directory per language area, and one subdirectory inside it per case:
 
-`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `bytes/` · `classes/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `ffi/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `time/` · `trust/` · `uhttp/`
+`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `bytes/` · `classes/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `env/` · `exceptions/` · `ffi/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `path/` · `pipe/` · `random/` · `sh/` · `streams/` · `strings/` · `time/` · `trust/` · `uhttp/`
 
 `ffi/` holds the Rust package fixtures added in 2.0.5, each a project of its own, since only a project has dependencies: `rust_values/` calls one Rust function for each kind of value that crosses, `rust_zlib/` reaches zlib, a C library, through `libz-sys`, and the rest pin the errors a user meets. [`ffi/README.md`](ffi/README.md) lists them. Building them runs cargo.
 
@@ -75,7 +79,7 @@ Its importing file sits under `app/`, so the target directory is out of relative
 
 *The `jade check` gate type-checks fixtures and never runs them.* That is what lets them depend on a network or an API key at run time. The tradeoff is that a fixture can type-check happily while printing something its own comments contradict. When the *behavior* matters, record it in the fixture's `.expected` file, which `compiler/src/scripts/golden.sh` holds the built binary to. Until v1.4.8 the helpers for a Rust test of behavior were `run_src` and `run_src_with_mock` in `compiler/src/vm/tests.rs`, and they went with the VM.
 
-`compiler/src/scripts/golden.sh` keeps a skip list for examples it does not run: the ones that need the network, the `_error` fixtures, and the 14 that dereference a prompt. Check it before assuming an example is covered.
+`compiler/src/scripts/golden.sh` keeps a skip list for examples it does not run: the three that need the network or a Docker socket, `http/basic`, `uhttp/basic` and `uhttp/stream`, the `_error` fixtures, and the 14 that dereference a prompt. Check it before assuming an example is covered.
 
 ## Running them
 

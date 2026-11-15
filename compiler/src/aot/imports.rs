@@ -57,11 +57,13 @@ fn mangle(name: &str, id: u32) -> String {
     format!("{name}${id}")
 }
 
-/// stdlib packages are handled by a separate codegen dispatch path — they never
-/// participate in source-file flattening, and their `ns.foo` accesses stay
-/// qualified for the stdlib path to resolve.
+/// stdlib packages the backend writes are handled by a separate codegen
+/// dispatch path — they never participate in source-file flattening, and their
+/// `ns.foo` accesses stay qualified for the stdlib path to resolve. The hook
+/// package `__sys` is one of them, for library code. A std package written in
+/// Jade is not: [`load_library`] inlines it like an imported file.
 fn is_stdlib(path: &str) -> bool {
-    crate::builtins::find_package(path).is_some()
+    crate::builtins::find_package(path).is_some() || path == "std/__sys"
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -110,6 +112,32 @@ pub fn resolve_and_namespace(
     let mut out = reg.out;
     out.extend(main_stmts);
     Ok(ResolvedImports { stmts: out, rust, native_sigs: reg.native_sigs })
+}
+
+/// Purpose: This function namespaces a program that has no file, such as a
+/// test's, so a std package written in Jade that it uses is loaded into it.
+///
+/// Inputs:
+/// - `stmts`: the program, after the per-file pass.
+///
+/// Outputs: the program with each library module it uses before it, or why
+/// a `use` does not resolve. A `use` of anything but a std package resolves
+/// against the working directory.
+pub fn namespace_program(stmts: Vec<Stmt>) -> Result<Vec<Stmt>, ResolveError> {
+    let mut reg = Registry::new();
+    let body = process_file(&mut reg, stmts, Path::new("."), None, HashSet::new(), HashSet::new())?;
+    let mut out = reg.out;
+    out.extend(body);
+    Ok(out)
+}
+
+/// Purpose: This function says whether a program's own statements use a std
+/// package written in Jade, which a program with no file still needs loaded.
+pub fn uses_library(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Use { path, .. } | Stmt::FromUse { path, .. } => crate::stdlib::find(path).is_some(),
+        _ => false,
+    })
 }
 
 /// Purpose: This function namespaces a module given as source text rather
@@ -216,6 +244,12 @@ struct Registry {
     /// The names each Rust package exports, functions and structs, keyed by
     /// pkgid, which is the form the renamer needs to check `alias.name`.
     native_symbols: HashMap<u32, HashSet<String>>,
+    /// The std packages written in Jade already inlined, by namespace id.
+    libraries_loaded: HashSet<u32>,
+    /// Every top-level value name of each library module loaded, by its id,
+    /// private ones included: another library module that uses it may call
+    /// them, as `uhttp.jde` calls `http._fetch`.
+    library_values: HashMap<u32, HashSet<String>>,
 }
 
 /// One decorator on a definition: its name, and its arguments, as one entry
@@ -240,6 +274,8 @@ impl Registry {
             native_types: HashMap::new(),
             native_sigs: HashMap::new(),
             native_symbols: HashMap::new(),
+            libraries_loaded: HashSet::new(),
+            library_values: HashMap::new(),
         }
     }
 
@@ -372,6 +408,32 @@ fn load_dep(reg: &mut Registry, dep_canon: &Path) -> Result<(), ResolveError> {
     Ok(())
 }
 
+/// Purpose: This function inlines a std package written in Jade, once per
+/// program: parse it, namespace it under its reserved id, and append it to
+/// `reg.out`. A library module may `use` another, which lands first.
+///
+/// Inputs:
+/// - `reg`: the registry.
+/// - `lib`: the package.
+///
+/// Outputs: `Ok(())`, or why the module does not compile, which is a
+/// compiler bug.
+fn load_library(
+    reg: &mut Registry,
+    lib: &'static crate::stdlib::Library,
+) -> Result<(), ResolveError> {
+    let id = lib.id();
+    if !reg.libraries_loaded.insert(id) {
+        return Ok(());
+    }
+    let stmts = lib.statements().map_err(ResolveError::Program)?;
+    let (values, types) = collect_globals(&stmts);
+    reg.library_values.insert(id, values.clone());
+    let mangled = process_file(reg, stmts, Path::new("."), Some(id), values, types)?;
+    reg.out.extend(mangled);
+    Ok(())
+}
+
 /// Resolve the imports of a single file and mangle its body. Returns the mangled,
 /// import-free statements (the caller decides where to splice them).
 fn process_file(
@@ -397,6 +459,21 @@ fn process_file(
     for s in stmts {
         match s {
             Stmt::Use { path, as_name, .. } => {
+                // A std package written in Jade: inline it, and let its name
+                // reach the functions a program may call. Its classes stay its
+                // own, so a program's class of the same name never meets one.
+                if let Some(lib) = crate::stdlib::find(&path) {
+                    load_library(reg, lib)?;
+                    // A program reaches the public functions; another library
+                    // module reaches the private ones too.
+                    let from_library = self_id.is_some_and(|id| crate::stdlib::by_id(id).is_some());
+                    let names = match reg.library_values.get(&lib.id()) {
+                        Some(all) if from_library => all.clone(),
+                        _ => lib.public_fns().iter().cloned().collect(),
+                    };
+                    aliases.insert(lib.name.to_string(), (lib.id(), names, HashSet::new()));
+                    continue;
+                }
                 // stdlib: drop the `use`; the `ns.foo` access stays qualified for
                 // stdlib dispatch.
                 if is_stdlib(&path) {
@@ -435,6 +512,24 @@ fn process_file(
                 }
             }
             Stmt::FromUse { path, names, path_is_string, span } => {
+                if let Some(lib) = crate::stdlib::find(&path) {
+                    load_library(reg, lib)?;
+                    for n in &names {
+                        if !lib.has_fn(n) {
+                            return Err(ResolveError::Program(
+                                JadeError::UnknownPackageFn {
+                                    package: format!("std::{}", lib.name),
+                                    name: n.clone(),
+                                    available: lib.public_fns().to_vec(),
+                                    span,
+                                }
+                                .to_string(),
+                            ));
+                        }
+                        from_value.insert(n.clone(), mangle(n, lib.id()));
+                    }
+                    continue;
+                }
                 // stdlib from-imports are preserved verbatim for the stdlib
                 // dispatch path (parity with the prior pass).
                 if is_stdlib(&path) {
@@ -1155,6 +1250,7 @@ impl Renamer {
     // ── Expressions ───────────────────────────────────────────────────────────
 
     fn rename_expr(&mut self, e: &mut Expr) {
+        let span = e.span;
         // `alias.foo` → `foo$<id>` (.jde) or `__native$<pkgid>$foo` (native),
         // before walking children so the bare alias isn't independently rewritten.
         // Cloned rather than borrowed: the native arm reports an undeclared
@@ -1213,6 +1309,7 @@ impl Renamer {
                 for (_, v) in kwargs.iter_mut() {
                     self.rename_expr(v);
                 }
+                fold_long_call(callee, args, kwargs, span);
             }
             ExprKind::BinOp { left, right, .. } => {
                 self.rename_expr(left);
@@ -1295,6 +1392,33 @@ impl Renamer {
             ExprKind::Integer(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => {}
         }
     }
+}
+
+/// Purpose: This function nests a call to a library function that folds,
+/// such as `path.join`, into calls of two arguments each, left first:
+/// `join(a, b, c)` becomes `join(join(a, b), c)`, as v1's variadic join
+/// computed it.
+///
+/// Inputs:
+/// - `callee`, `args`, `kwargs`: the call's parts, already renamed.
+/// - `span`: where the call is, which each nested call takes.
+///
+/// Outputs: none; the call is rewritten in place.
+fn fold_long_call(callee: &Expr, args: &mut Vec<Expr>, kwargs: &[(String, Expr)], span: Span) {
+    let folds = matches!(&callee.kind, ExprKind::Identifier(n) if crate::stdlib::folds(n));
+    if !folds || args.len() <= 2 || !kwargs.is_empty() {
+        return;
+    }
+    let mut rest = args.split_off(2);
+    let Some(last) = rest.pop() else { return };
+    let mut inner = std::mem::take(args);
+    for next in rest {
+        let call =
+            ExprKind::Call { callee: Box::new(callee.clone()), args: inner, kwargs: Vec::new() };
+        inner = vec![Expr::new(call, span), next];
+    }
+    let call = ExprKind::Call { callee: Box::new(callee.clone()), args: inner, kwargs: Vec::new() };
+    *args = vec![Expr::new(call, span), last];
 }
 
 #[cfg(test)]

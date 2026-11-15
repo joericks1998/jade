@@ -1,0 +1,33 @@
+[] [] [.] [nil] [] false
+[/] [] [.] [nil] [] true
+[//] [] [.] [nil] [] true
+[a//b/] [b] [a] [nil] [b] false
+[./x] [x] [.] [nil] [x] false
+[x/.] [x] [.] [nil] [x] false
+[.] [] [.] [nil] [] false
+[..] [] [.] [nil] [] false
+[a/..] [] [a] [nil] [] false
+[/a/b/] [b] [/a] [nil] [b] true
+[a/b/c.tar.gz] [c.tar.gz] [a/b] [.gz] [c.tar] false
+[.hidden] [.hidden] [.] [nil] [.hidden] false
+[a.b/] [a.b] [.] [.b] [a] false
+[café/naïve.txt] [naïve.txt] [café] [.txt] [naïve] false
+a/b
+a/b
+b
+a/
+/b
+a/b/c
+/c/d
+/a/b/c/
+/
+
+true
+tainted
+tainted
+tainted
+tainted
+tainted
+trusted
+true
+true

@@ -1,0 +1,171 @@
+// std::http's request path, run against a stand-in for curl, so it needs no
+// network. 2.0.8 moved std::http from the backend into Jade source
+// (compiler/src/lib/http.jde): building curl's command line and splitting off
+// the status curl appends are Jade, and starting curl and reading what it
+// writes are hooks. Every line here is what the backend's version printed.
+//
+// The stand-in writes each argument it was given on a line of its own, keeps
+// what came on its standard input, and answers as the mode file says. It goes
+// first on PATH, where the program looks for curl.
+
+use std::bytes
+use std::env
+use std::fs
+use std::http
+use std::sh
+
+let root = "/tmp/jade_http_local"
+let fake = [
+    "#!/bin/sh",
+    "dir=/tmp/jade_http_local",
+    ": > $dir/args",
+    "fmt=",
+    "prev=",
+    "for a in \"$@\"; do",
+    "    printf '%s\\n' \"$a\" >> $dir/args",
+    "    if [ \"$prev\" = -w ]; then fmt=\"$a\"; fi",
+    "    prev=\"$a\"",
+    "done",
+    "case \" $* \" in *\" @- \"*) cat > $dir/stdin ;; esac",
+    "mode=$(cat $dir/mode)",
+    "status=200",
+    "case \"$mode\" in",
+    "    text) printf 'hello' ;;",
+    "    empty) ;;",
+    "    missing) printf 'not here'; status=404 ;;",
+    "    nul) printf 'ab\\000cd' ;;",
+    "    bad) printf 'a\\377b' ;;",
+    "    mark) printf 'body\\nJADE_STATUS:999'; status=201 ;;",
+    "    echo) cat $dir/stdin ;;",
+    "    nostatus) printf 'plain'; exit 0 ;;",
+    "    exit*) exit \"${mode#exit}\" ;;",
+    "esac",
+    "if [ -n \"$fmt\" ]; then printf '%s%s' \"${fmt%%%*}\" \"$status\"; fi",
+    ""
+].join("\n")
+
+sh.run("rm -rf /tmp/jade_http_local")
+fs.mkdir(root + "/bin")
+fs.mkdir(root + "/empty")
+fs.write(root + "/bin/curl", fake)
+sh.run("chmod +x /tmp/jade_http_local/bin/curl")
+env.set("PATH", root + "/bin:/usr/bin:/bin")
+
+fn mode(m) {
+    fs.write("/tmp/jade_http_local/mode", m)
+}
+
+fn args() {
+    print(fs.read("/tmp/jade_http_local/args").lines())
+}
+
+// ── Each method's command line ───────────────────────────────────────────────
+
+mode("text")
+let r = http.get("http://example.test/a")
+print(f"{r.status} {r.body}")
+args()
+
+// Headers go in the order the program wrote them.
+r = http.get("http://example.test/h", {"X-Second": "2", "X-First": "1"})
+args()
+
+// A body goes to curl's standard input.
+mode("echo")
+r = http.post("http://example.test/p", "payload text", {"Content-Type": "text/plain"})
+print(f"{r.status} {r.body}")
+args()
+r = http.put("http://example.test/u", "update")
+print(f"{r.status} {r.body}")
+args()
+
+mode("text")
+r = http.delete("http://example.test/d")
+print(r["status"])
+args()
+
+mode("empty")
+r = http.head("http://example.test/h")
+print(f"{r.status} [{r.body}]")
+args()
+
+// ── Bodies ───────────────────────────────────────────────────────────────────
+
+// A text body stops at its first NUL; a bytes body keeps every octet.
+mode("nul")
+print(http.get("http://example.test/n").body)
+let b = http.get_bytes("http://example.test/n")
+print(b.status)
+print(len(b.body))
+print(b.body[2])
+args()
+
+mode("echo")
+let sent = http.post_bytes("http://example.test/pb", bytes.from_ints([120, 0, 121]), {"A": "b"})
+print(f"{sent.status} {sent.body}")
+print(len(fs.read_bytes("/tmp/jade_http_local/stdin")))
+args()
+
+// Bytes that are not UTF-8 have each bad sequence replaced in a text body.
+mode("bad")
+print(http.get("http://example.test/b").body)
+
+// The status is the last one in what curl wrote, so a body cannot fake it.
+mode("mark")
+r = http.get("http://example.test/m")
+print(r.status)
+print(r.body)
+
+// No status at all reads as 0, with all of it the body.
+mode("nostatus")
+r = http.get("http://example.test/s")
+print(f"{r.status} {r.body}")
+
+// A 4xx is an ordinary answer, not an error.
+mode("missing")
+r = http.get("http://example.test/x")
+print(f"{r.status} {r.body}")
+
+// ── Transport failures ───────────────────────────────────────────────────────
+
+for code in ["exit6", "exit7", "exit28", "exit35", "exit22"] {
+    mode(code)
+    try {
+        http.get("http://example.test/f")
+    } catch e {
+        print(e.message)
+    }
+}
+mode("exit7")
+try {
+    http.post("http://example.test/f", "body")
+} catch e {
+    print(e.message)
+}
+
+env.set("PATH", root + "/empty")
+try {
+    http.get("http://example.test/none")
+} catch e {
+    print(e.message)
+}
+env.set("PATH", root + "/bin:/usr/bin:/bin")
+
+// ── Trust ────────────────────────────────────────────────────────────────────
+
+// A response body came off the network, whichever spelling produced it.
+mode("text")
+try {
+    sh.exec(http.get("http://example.test/t").body)
+    print("NOT REFUSED")
+} catch e {
+    print("a text body is refused")
+}
+try {
+    sh.exec(http.get_bytes("http://example.test/t").body.decode())
+    print("NOT REFUSED")
+} catch e {
+    print("a bytes body is refused")
+}
+
+sh.run("rm -rf /tmp/jade_http_local")

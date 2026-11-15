@@ -1,0 +1,193 @@
+// std::time: the two clocks, sleeping, and UTC calendar conversion.
+//
+// The wall clock (`now`, `now_ms`) is what a timestamp is; the monotonic
+// clock never moves backwards, so it is what a duration is measured with.
+// Reading either, sleeping, starting a task that sleeps, and asking the C
+// library about the local time zone are hooks. The calendar arithmetic is
+// Howard Hinnant's `days_from_civil` and `civil_from_days` on the proleptic
+// Gregorian calendar, exactly as v1 computed it.
+
+use std::__sys
+
+// What `parts` returns: a timestamp's UTC calendar fields. Weekday counts
+// from Sunday as 0, and yearday from January 1st as 1.
+class TimeParts {
+    @public year
+    @public month
+    @public day
+    @public hour
+    @public minute
+    @public second
+    @public weekday
+    @public yearday
+}
+
+// Purpose: This function reads the wall clock in whole seconds since 1970.
+fn now() {
+    return __sys.now()
+}
+
+// Purpose: This function reads the wall clock in whole milliseconds.
+fn now_ms() {
+    return __sys.now_ms()
+}
+
+// Purpose: This function reads the monotonic clock in seconds, which mean
+// something only as the gap between two readings.
+fn monotonic() {
+    return __sys.monotonic()
+}
+
+// Purpose: This function pauses the running task. A delay that is not
+// positive returns at once.
+fn sleep(secs) {
+    __sys.sleep(float(secs))
+}
+
+// Purpose: This function starts a task that finishes with nil after a delay.
+fn after(secs) {
+    return __sys.after(float(secs))
+}
+
+// Purpose: This function formats now in a time zone, `nil` for the system's,
+// as `date '+%a %b %e %H:%M:%S %Z %Y'` prints it. The zone's name comes from
+// the C library, so the text is tainted, as v1's was.
+//
+// The offset and the name are two hooks, each taking the time-zone lock, since
+// a hook returns one typed value and these are an int and a tainted str. With
+// a named zone both set `TZ` to it, so they agree. With nil, a task that
+// changes `TZ` through `env.set` between the two could make them disagree;
+// `env.set` takes no lock, so it races with the C library reading `TZ` anyway.
+fn local(tz) {
+    let ts = __sys.now()
+    let p = parts(ts + __sys.local_offset(tz, ts))
+    let zone = __sys.local_zone(tz, ts)
+    let day = toString(p.day).pad_start(2, " ")
+    let clock = f"{_two(p.hour)}:{_two(p.minute)}:{_two(p.second)}"
+    return f"{_weekday_name(p.weekday)} {_month_name(p.month)} {day} {clock} {zone} {p.year}"
+}
+
+// Purpose: This function formats a timestamp as ISO 8601 in UTC, such as
+// `2026-08-16T14:03:22Z`.
+fn utc(ts) {
+    let p = parts(ts)
+    let date = f"{_year(p.year)}-{_two(p.month)}-{_two(p.day)}"
+    return f"{date}T{_two(p.hour)}:{_two(p.minute)}:{_two(p.second)}Z"
+}
+
+// Purpose: This function breaks a timestamp into its UTC calendar fields.
+fn parts(ts) {
+    let days = int(ts) / 86400
+    let secs = int(ts) % 86400
+    if secs < 0 {
+        days = days - 1
+        secs = secs + 86400
+    }
+    let p = _civil_from_days(days)
+    p.hour = secs / 3600
+    p.minute = secs / 60 % 60
+    p.second = secs % 60
+    // 1970-01-01 was a Thursday, weekday 4.
+    p.weekday = (days + 4) % 7
+    if p.weekday < 0 {
+        p.weekday = p.weekday + 7
+    }
+    p.yearday = days - _days_from_civil(p.year, 1, 1) + 1
+    return p
+}
+
+// Purpose: This function turns calendar fields into a timestamp, the inverse
+// of `parts`. Every field carries: month 13 is next January, and day 0 is the
+// last day of the month before. The sum saturates at the ends of the int
+// range. Fields so far out of range that the calendar sums overflow wrap, as
+// v1's did, so any fields give an answer and none raises.
+fn stamp(year, month, day, hour = 0, minute = 0, second = 0) {
+    let m = __sys.wrap_sub(int(month), 1)
+    let carry = m / 12
+    m = m % 12
+    if m < 0 {
+        carry = carry - 1
+        m = m + 12
+    }
+    let days = _days_from_civil(__sys.add_sat(int(year), carry), m + 1, int(day))
+    let t = __sys.mul_sat(days, 86400)
+    t = __sys.add_sat(t, __sys.mul_sat(int(hour), 3600))
+    t = __sys.add_sat(t, __sys.mul_sat(int(minute), 60))
+    return __sys.add_sat(t, int(second))
+}
+
+// Purpose: This function counts the days from 1970-01-01 to a date whose
+// month is 1 through 12. A day past the month's end carries into the next.
+// The steps a far-out year or day can overflow wrap, as v1's did; within the
+// calendar's range nothing does.
+fn _days_from_civil(y, m, d) {
+    if m <= 2 {
+        y = __sys.wrap_sub(y, 1)
+    }
+    let era = y / 400
+    if y < 0 {
+        era = __sys.wrap_sub(y, 399) / 400
+    }
+    let yoe = __sys.wrap_sub(y, __sys.wrap_mul(era, 400))
+    let mp = (m + 9) % 12
+    let doy = __sys.wrap_add((153 * mp + 2) / 5, __sys.wrap_sub(d, 1))
+    let doe = __sys.wrap_add(yoe * 365 + yoe / 4 - yoe / 100, doy)
+    return __sys.wrap_sub(__sys.wrap_add(__sys.wrap_mul(era, 146097), doe), 719468)
+}
+
+// Purpose: This function turns days since 1970-01-01 into a year, a month
+// and a day, as the calendar fields of midnight that day.
+fn _civil_from_days(days) {
+    let z = days + 719468
+    let era = z / 146097
+    if z < 0 {
+        era = (z - 146096) / 146097
+    }
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = mp + 3
+    if mp >= 10 {
+        m = mp - 9
+    }
+    let y = yoe + era * 400
+    if m <= 2 {
+        y = y + 1
+    }
+    return TimeParts {
+        year: y,
+        month: m,
+        day: d,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        weekday: 0,
+        yearday: 0
+    }
+}
+
+// Purpose: This function writes a number 0 to 99 as two digits.
+fn _two(n) {
+    return toString(n).pad_start(2, "0")
+}
+
+// Purpose: This function writes a year as at least four characters, a minus
+// sign included, as C's `%04lld` does: `0042`, `-001`.
+fn _year(y) {
+    if y < 0 {
+        return "-" + toString(0 - y).pad_start(3, "0")
+    }
+    return toString(y).pad_start(4, "0")
+}
+
+// Purpose: This function names a weekday, Sunday as 0, as the C locale does.
+fn _weekday_name(w) {
+    return "SunMonTueWedThuFriSat".slice(w * 3, w * 3 + 3)
+}
+
+// Purpose: This function names a month, January as 1, as the C locale does.
+fn _month_name(m) {
+    return "JanFebMarAprMayJunJulAugSepOctNovDec".slice(m * 3 - 3, m * 3)
+}

@@ -42,6 +42,11 @@ pub mod project;
 /// in, cargo, and the description records read out of the built library.
 pub mod rustpkg;
 pub mod stdio;
+/// The std library written in Jade: each package's `.jde` source, embedded,
+/// and the registry the import pass loads them from. Its directory is
+/// `src/lib/`, which a module named `lib` beside `lib.rs` cannot use.
+#[path = "lib/mod.rs"]
+pub mod stdlib;
 /// The type checker: `resolve` rewrites each file's tree on its own, and
 /// `infer` gives every value of the merged program one static type.
 pub mod typechecker;
@@ -52,14 +57,5 @@ pub mod array;
 pub mod bytes;
 pub mod core;
 pub mod dict;
-pub mod env;
-pub mod fs;
 pub mod future;
-pub mod http;
-pub mod math;
-pub mod path;
-pub mod random;
-pub mod sh;
 pub mod string;
-pub mod time;
-pub mod uhttp;

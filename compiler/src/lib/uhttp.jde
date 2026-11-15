@@ -1,0 +1,132 @@
+// std::uhttp: std::http over a Unix domain socket.
+//
+// The same functions and the same responses as std::http, for local daemons
+// that speak HTTP without a port: Docker, systemd, a sound server. The target
+// is a pseudo-URL naming a socket and a request path together,
+// `unix://<socket>:<path>`, which curl reaches with `--unix-socket`. The
+// request path is std::http's, in `http.jde`, whose `_` functions a library
+// module may call.
+//
+// `stream` keeps curl running and calls the program's handler once a line
+// until the stream ends or the handler returns false, which stops curl. Its
+// lines are split here; starting curl, reading what it writes and stopping it
+// are hooks, and the hook that reads marks each line tainted.
+
+use std::__sys
+use std::bytes
+use std::http
+
+// Purpose: This function sends a GET request over a Unix socket.
+fn get(url, headers = nil) {
+    return http._text(http._fetch("GET", str(url), nil, headers, true))
+}
+
+// Purpose: This function sends a POST request over a Unix socket.
+fn post(url, body, headers = nil) {
+    return http._text(http._fetch("POST", str(url), str(body).encode(), headers, true))
+}
+
+// Purpose: This function sends a PUT request over a Unix socket.
+fn put(url, body, headers = nil) {
+    return http._text(http._fetch("PUT", str(url), str(body).encode(), headers, true))
+}
+
+// Purpose: This function sends a DELETE request over a Unix socket.
+fn delete(url, headers = nil) {
+    return http._text(http._fetch("DELETE", str(url), nil, headers, true))
+}
+
+// Purpose: This function sends a HEAD request over a Unix socket.
+fn head(url, headers = nil) {
+    return http._text(http._fetch("HEAD", str(url), nil, headers, true))
+}
+
+// Purpose: This function sends a GET request over a Unix socket and keeps the
+// body as octets.
+fn get_bytes(url, headers = nil) {
+    return http._octets(http._fetch("GET", str(url), nil, headers, true))
+}
+
+// Purpose: This function sends a POST request over a Unix socket with a body
+// of octets.
+fn post_bytes(url, body, headers = nil) {
+    return http._text(http._fetch("POST", str(url), body, headers, true))
+}
+
+// Purpose: This function follows a response that stays open, such as Docker's
+// `/events`, calling `handler` with each line, until the stream ends or the
+// handler returns false. A handler that raises stops it too, and its error
+// reaches the caller. A stream that ends with curl failing raises once its
+// lines are in.
+fn stream(url, handler, headers = nil) {
+    let t = http._unix_target(str(url), "uhttp stream")
+    let argv = ["curl", "-sS", "-N", "--unix-socket", t[0]]
+    http._header_args(argv, headers)
+    argv.push("--")
+    argv.push(t[1])
+    let p = __sys.spawn(argv, false)
+    if __sys.os_error() != 0 {
+        http._fail("stream", url, true, 127)
+    }
+    let stopped = false
+    try {
+        stopped = _lines(p[2], handler)
+    } catch e {
+        __sys.kill(p[0])
+        __sys.close(p[2])
+        __sys.wait(p[0])
+        raise e
+    }
+    if stopped {
+        __sys.kill(p[0])
+    }
+    __sys.close(p[2])
+    let code = __sys.wait(p[0])
+    if not stopped and code != 0 {
+        http._fail("stream", url, true, code)
+    }
+}
+
+// Purpose: This function reads curl's output and calls the handler with each
+// line, a last line without a newline included.
+//
+// Outputs: true when the handler stopped the stream.
+fn _lines(fd, handler) {
+    let pending = bytes.zeros(0)
+    while true {
+        let chunk = __sys.read_chunk(fd)
+        if len(chunk) == 0 {
+            if len(pending) > 0 {
+                _deliver(handler, pending)
+            }
+            return false
+        }
+        let start = 0
+        let i = 0
+        while i < len(chunk) {
+            if chunk[i] == 10 {
+                let line = bytes.concat(pending, chunk.slice(start, i))
+                pending = bytes.zeros(0)
+                start = i + 1
+                if _deliver(handler, line) {
+                    return true
+                }
+            }
+            i = i + 1
+        }
+        pending = bytes.concat(pending, chunk.slice(start, len(chunk)))
+    }
+    return false
+}
+
+// Purpose: This function calls the handler with one line, its bad UTF-8
+// sequences replaced.
+//
+// Outputs: true when the handler returned false, which stops the stream.
+fn _deliver(handler, line) {
+    let answer = handler(__sys.lossy(line))
+    if answer is bool {
+        return not answer
+    }
+    return false
+}

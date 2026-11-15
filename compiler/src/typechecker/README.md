@@ -21,7 +21,9 @@ It was `src/compiler/` until 2.0.1, when the crate itself became `compiler/`. Th
 
 ## What each file does
 
-- *`resolve.rs`* is the per-file pass. It keeps a `Names` table, a scope stack of what each name is, a `NameKind`: a function, an async function, a generator, a class, a grammar, a prompt, a std package, or some other value. The pipe and dereference rewrites need that and nothing more. It also keeps flat maps for each class's fields, parents, ancestry, member decorators and method names. A std package's name is bound when a `use` names it, from `Package::global_name`, and the globals every program has are bound by `builtins::register_core_names`.
+- *`resolve.rs`* is the per-file pass. It keeps a `Names` table, a scope stack of what each name is, a `NameKind`: a function, an async function, a generator, a class, a grammar, a prompt, a std package, or some other value. The pipe and dereference rewrites need that and nothing more. It also keeps flat maps for each class's fields, parents, ancestry, member decorators and method names. A std package's name is bound when a `use` names it, from `builtins::std_global_name`, which answers for a package the backend writes and one written in Jade alike, and the globals every program has are bound by `builtins::register_core_names`.
+
+  `resolve_library` runs the same pass over a std package written in Jade, `src/lib/`, in the one mode that may `use std::__sys`, the hook package, test a built-in type with `x is int`, and name another library module's private function, `http._fetch`, which `uhttp.jde` calls. A program's own `use std::__sys` is refused as an undefined name, as `__infer` is, and its `http._fetch` as a function the package does not have.
 
   `resolve_inheritance` runs here, folding each parent's fields into its children so nothing downstream has to know inheritance exists. It inherits an ancestor reached by two paths once, by tracking which class declared each field, and two parents supplying different versions of one method are an error unless the class defines that method itself.
 

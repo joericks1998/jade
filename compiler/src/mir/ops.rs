@@ -55,7 +55,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             return self.method(m, r, &rt, argv, et, span, addr_of(e));
         }
         if let Some((pkg, f)) = name.split_once('.') {
-            return self.package_fn(pkg, f, args, kwargs, et, span);
+            return self.package_fn(pkg, f, args, et, span);
         }
         if name == "as" {
             // `Animal(x)`: the same object, read as its class or a parent.

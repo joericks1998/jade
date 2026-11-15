@@ -2,11 +2,14 @@
 //! globals, every std package function, and the primitive methods on strings,
 //! arrays, dicts, bytes and futures.
 //!
-//! Std results that v1 returned as dicts with mixed values are built-in structs
-//! here, with the same field names, per design decision 3: `http.get` returns an
-//! `HttpResponse`, `sh.output` a `ShOutput`, and `time.parts` a `TimeParts`. A
-//! struct reads by `r.status` and also by `r["status"]`, so a program that read
-//! one of these dicts reads the struct the same way.
+//! A std package written in Jade, which since 2.0.8 is every package but the
+//! value types' own, is typed from its functions' bodies like any program's;
+//! only what it asks of `__sys` is typed here. A record such a package
+//! returns, which v1 returned as a dict with mixed values, is a class the
+//! package declares, with the same field names, per design decision 3:
+//! `http.get` returns an `HttpResponse`, declared in `http.jde`. A class reads
+//! by `r.status` and also by `r["status"]`, so a program that read one of
+//! these dicts reads the class the same way.
 
 use super::check::Frame;
 use super::ty::{FuncRef, SizedNum, Ty, with_article};
@@ -16,26 +19,7 @@ use crate::frontend::error::Span;
 
 /// The structs every program has without declaring them, with their field types.
 fn builtin_structs() -> Vec<(&'static str, Vec<(&'static str, Ty)>)> {
-    let int = || Ty::Int;
-    vec![
-        ("RuntimeError", vec![("message", Ty::Str)]),
-        ("HttpResponse", vec![("status", Ty::Int), ("body", Ty::Str)]),
-        ("HttpBytesResponse", vec![("status", Ty::Int), ("body", Ty::Bytes)]),
-        ("ShOutput", vec![("stdout", Ty::Str), ("stderr", Ty::Str), ("code", Ty::Int)]),
-        (
-            "TimeParts",
-            vec![
-                ("year", int()),
-                ("month", int()),
-                ("day", int()),
-                ("hour", int()),
-                ("minute", int()),
-                ("second", int()),
-                ("weekday", int()),
-                ("yearday", int()),
-            ],
-        ),
-    ]
+    vec![("RuntimeError", vec![("message", Ty::Str)])]
 }
 
 /// Purpose: This function registers the built-in structs before the program's own.
@@ -167,16 +151,6 @@ fn type_fn_ty(name: &str) -> Ty {
         "bool" => Ty::Bool,
         _ => Ty::Char,
     }
-}
-
-/// Purpose: This function says whether a type is a number.
-///
-/// Inputs:
-/// - `t`: a type.
-///
-/// Outputs: true for int or float.
-fn is_num(t: &Ty) -> bool {
-    matches!(t, Ty::Int | Ty::Float)
 }
 
 /// Purpose: This function gives the message for a `toDict` argument that is
@@ -484,7 +458,13 @@ impl<'a> Checker<'a> {
             Ok(t) => t,
             Err(m) => {
                 self.report(span, m);
-                Ty::Nil
+                // A type function that refused its argument still gives its
+                // type, so the code after it is not refused for the same
+                // mistake: `str(5)` is the error, not what is done with it.
+                match canonical(name) {
+                    n @ ("int" | "float" | "str" | "bool" | "char") => type_fn_ty(n),
+                    n => SizedNum::from_name(n).map_or(Ty::Nil, Ty::Sized),
+                }
             }
         }
     }
@@ -516,13 +496,8 @@ impl<'a> Checker<'a> {
             tys.push(self.check_expr(a, f));
         }
         for (k, v) in kwargs {
-            let t = self.check_expr(v, f);
-            let known = matches!((pkg, name, k.as_str()), ("fs", "read" | "read_bytes", "trust"));
-            if known {
-                self.unify(&t, &Ty::Bool, v.span, "trust");
-            } else {
-                self.report(v.span, format!("{pkg}.{name} has no parameter named '{k}'"));
-            }
+            self.check_expr(v, f);
+            self.report(v.span, format!("{pkg}.{name} has no parameter named '{k}'"));
         }
         self.record_target(f, node, Target::Builtin(format!("{pkg}.{name}")));
 
@@ -560,70 +535,7 @@ impl<'a> Checker<'a> {
                 }
             };
         }
-        let num_arg = |c: &mut Checker, i: usize| {
-            if let Some(t) = r.get(i)
-                && !is_num(t)
-                && !matches!(t, Ty::Var(_))
-            {
-                c.report(span, format!("{pkg}.{name} takes a number, got {t}"));
-            }
-        };
         match (pkg, name) {
-            // ── math ─────────────────────────────────────────────────────────
-            ("math", "floor" | "ceil" | "round" | "trunc") => {
-                if !count(1..=1) {
-                    return bad_count(self, "one number");
-                }
-                num_arg(self, 0);
-                Ty::Int
-            }
-            ("math", "abs" | "sign") => {
-                if !count(1..=1) {
-                    return bad_count(self, "one number");
-                }
-                num_arg(self, 0);
-                r[0].clone()
-            }
-            (
-                "math",
-                "sqrt" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
-                | "atan",
-            ) => {
-                if !count(1..=1) {
-                    return bad_count(self, "one number");
-                }
-                num_arg(self, 0);
-                Ty::Float
-            }
-            ("math", "is_nan" | "is_inf") => {
-                if !count(1..=1) {
-                    return bad_count(self, "one number");
-                }
-                num_arg(self, 0);
-                Ty::Bool
-            }
-            ("math", "min" | "max" | "pow" | "atan2" | "hypot") => {
-                if !count(2..=2) {
-                    return bad_count(self, "two numbers");
-                }
-                num_arg(self, 0);
-                num_arg(self, 1);
-                let both_int = matches!((&r[0], &r[1]), (Ty::Int, Ty::Int));
-                if both_int && matches!(name, "min" | "max" | "pow") { Ty::Int } else { Ty::Float }
-            }
-            ("math", "clamp") => {
-                if !count(3..=3) {
-                    return bad_count(self, "three numbers");
-                }
-                (0..3).for_each(|i| num_arg(self, i));
-                if r.iter().all(|t| matches!(t, Ty::Int)) { Ty::Int } else { Ty::Float }
-            }
-            ("math", "pi" | "e" | "tau" | "inf" | "nan") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Float
-            }
             // ── array (copies, not the in-place methods) ────────────────────
             ("array", "sort" | "reverse") => {
                 if !count(1..=1) {
@@ -637,254 +549,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // ── fs ───────────────────────────────────────────────────────────
-            ("fs", "read") => {
-                want!(0, Ty::Str, "path");
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
+            // ── the std library's hooks; see SysFn in src/mir/ ──────────────
+            ("__sys", _) => {
+                let Some(h) = crate::mir::SysFn::from_name(name) else {
+                    self.report(span, format!("__sys has no function '{name}'"));
+                    return Ty::Nil;
+                };
+                let params = h.params();
+                if r.len() != params.len() {
+                    return bad_count(self, &format!("{} arguments", params.len()));
                 }
-                Ty::Str
-            }
-            ("fs", "read_bytes") => {
-                want!(0, Ty::Str, "path");
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
+                // Only library code calls a hook, and a type error there is
+                // reported at the program's call, naming the library function,
+                // so the hook's own name stays out of the message.
+                for (t, p) in tys.iter().zip(&params) {
+                    self.unify(t, p, span, "an argument");
                 }
-                Ty::Bytes
-            }
-            ("fs", "write_bytes" | "append_bytes") => {
-                if !count(2..=2) {
-                    return bad_count(self, "a path and bytes");
-                }
-                want!(0, Ty::Str, "path");
-                want!(1, Ty::Bytes, "data");
-                Ty::Nil
-            }
-            ("fs", "read_stdin_bytes") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Bytes
-            }
-            ("fs", "write_stdout_bytes") => {
-                if !count(1..=1) {
-                    return bad_count(self, "bytes");
-                }
-                want!(0, Ty::Bytes, "data");
-                Ty::Nil
-            }
-            ("fs", "write" | "append") => {
-                if !count(2..=2) {
-                    return bad_count(self, "a path and a str");
-                }
-                want!(0, Ty::Str, "path");
-                want!(1, Ty::Str, "content");
-                Ty::Nil
-            }
-            ("fs", "exists" | "is_file" | "is_dir") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Bool
-            }
-            ("fs", "delete" | "mkdir" | "rmdir") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Nil
-            }
-            ("fs", "list_dir") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Array(Box::new(Ty::Str))
-            }
-            ("fs", "size") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Int
-            }
-            ("fs", "copy" | "rename") => {
-                if !count(2..=2) {
-                    return bad_count(self, "two paths");
-                }
-                want!(0, Ty::Str, "source");
-                want!(1, Ty::Str, "destination");
-                Ty::Nil
-            }
-            // ── time ─────────────────────────────────────────────────────────
-            ("time", "now" | "now_ms") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Int
-            }
-            ("time", "monotonic") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Float
-            }
-            ("time", "sleep" | "after") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a number of seconds");
-                }
-                num_arg(self, 0);
-                if name == "after" { Ty::Future(Box::new(Ty::Nil)) } else { Ty::Nil }
-            }
-            ("time", "local") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a timezone name or nil");
-                }
-                want!(0, Ty::opt(Ty::Str), "timezone");
-                Ty::Str
-            }
-            ("time", "utc") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a timestamp");
-                }
-                want!(0, Ty::Int, "timestamp");
-                Ty::Str
-            }
-            ("time", "parts") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a timestamp");
-                }
-                want!(0, Ty::Int, "timestamp");
-                Ty::Struct("TimeParts".into())
-            }
-            ("time", "stamp") => {
-                if !count(3..=6) {
-                    return bad_count(self, "three to six ints");
-                }
-                for i in 0..r.len() {
-                    want!(i, Ty::Int, "calendar field");
-                }
-                Ty::Int
-            }
-            // ── http and uhttp ───────────────────────────────────────────────
-            ("http" | "uhttp", "get" | "delete" | "head" | "get_bytes") => {
-                if !count(1..=2) {
-                    return bad_count(self, "a url and optional headers");
-                }
-                want!(0, Ty::Str, "url");
-                want!(1, Ty::Map(Box::new(Ty::Str)), "headers");
-                if name == "get_bytes" {
-                    Ty::Struct("HttpBytesResponse".into())
-                } else {
-                    Ty::Struct("HttpResponse".into())
-                }
-            }
-            ("http" | "uhttp", "post" | "put" | "post_bytes") => {
-                if !count(2..=3) {
-                    return bad_count(self, "a url, a body and optional headers");
-                }
-                want!(0, Ty::Str, "url");
-                if name == "post_bytes" {
-                    want!(1, Ty::Bytes, "body");
-                } else {
-                    want!(1, Ty::Str, "body");
-                }
-                want!(2, Ty::Map(Box::new(Ty::Str)), "headers");
-                Ty::Struct("HttpResponse".into())
-            }
-            ("uhttp", "stream") => {
-                if !count(2..=3) {
-                    return bad_count(self, "a url, a handler and optional headers");
-                }
-                want!(0, Ty::Str, "url");
-                want!(2, Ty::Map(Box::new(Ty::Str)), "headers");
-                // The handler is called once per line; its answer only matters
-                // when it is `false`, which stops the stream.
-                let h = tys[1].clone();
-                self.call_value(&h, vec![Ty::Str], span, f, node + 1);
-                Ty::Nil
-            }
-            // ── sh ───────────────────────────────────────────────────────────
-            ("sh", "exec") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a command");
-                }
-                want!(0, Ty::Str, "command");
-                Ty::Str
-            }
-            ("sh", "run") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a command");
-                }
-                want!(0, Ty::Str, "command");
-                Ty::Int
-            }
-            ("sh", "output") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a command");
-                }
-                want!(0, Ty::Str, "command");
-                Ty::Struct("ShOutput".into())
-            }
-            // ── env ──────────────────────────────────────────────────────────
-            ("env", "get") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a name");
-                }
-                want!(0, Ty::Str, "name");
-                Ty::opt(Ty::Str)
-            }
-            ("env", "set") => {
-                if !count(2..=2) {
-                    return bad_count(self, "a name and a value");
-                }
-                want!(0, Ty::Str, "name");
-                want!(1, Ty::Str, "value");
-                Ty::Nil
-            }
-            ("env", "args") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Array(Box::new(Ty::Str))
-            }
-            ("env", "cwd") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Str
-            }
-            // ── path ─────────────────────────────────────────────────────────
-            ("path", "join") => {
-                if r.len() < 2 {
-                    return bad_count(self, "two or more segments");
-                }
-                for i in 0..r.len() {
-                    want!(i, Ty::Str, "segment");
-                }
-                Ty::Str
-            }
-            ("path", "basename" | "dirname" | "stem" | "abs") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Str
-            }
-            ("path", "ext") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::opt(Ty::Str)
-            }
-            ("path", "is_abs") => {
-                if !count(1..=1) {
-                    return bad_count(self, "a path");
-                }
-                want!(0, Ty::Str, "path");
-                Ty::Bool
+                h.result()
             }
             // ── the inference prelude's own package; see src/infer/ ─────────
             ("__infer", _) => {
@@ -921,44 +602,6 @@ impl<'a> Checker<'a> {
                     want!(i, p.clone(), "argument");
                 }
                 ret
-            }
-            // ── random ───────────────────────────────────────────────────────
-            ("random", "int") => {
-                if !count(2..=2) {
-                    return bad_count(self, "a low and a high int");
-                }
-                want!(0, Ty::Int, "low");
-                want!(1, Ty::Int, "high");
-                Ty::Int
-            }
-            ("random", "float") => {
-                if !count(0..=0) {
-                    return bad_count(self, "no arguments");
-                }
-                Ty::Float
-            }
-            ("random", "choice") => {
-                if !count(1..=1) {
-                    return bad_count(self, "an array");
-                }
-                let elem = self.slot(f, node + 2);
-                want!(0, Ty::Array(Box::new(elem.clone())), "array");
-                elem
-            }
-            ("random", "shuffle") => {
-                if !count(1..=1) {
-                    return bad_count(self, "an array");
-                }
-                let elem = self.slot(f, node + 2);
-                want!(0, Ty::Array(Box::new(elem)), "array");
-                Ty::Nil
-            }
-            ("random", "seed") => {
-                if !count(1..=1) {
-                    return bad_count(self, "an int");
-                }
-                want!(0, Ty::Int, "seed");
-                Ty::Nil
             }
             // ── bytes ────────────────────────────────────────────────────────
             ("bytes", "zeros") => {

@@ -1,0 +1,52 @@
+200 OK
+["-sS", "-X", "GET", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/v1.43/containers/json"]
+["-sS", "-X", "GET", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/"]
+["-sS", "-X", "GET", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/"]
+["-sS", "-X", "GET", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/a?b=c:d"]
+["-sS", "-X", "GET", "--unix-socket", "relative.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhostnoslash"]
+I/O error: uhttp GET: url must start with unix://
+I/O error: uhttp GET: empty socket path
+I/O error: uhttp GET: empty socket path
+I/O error: uhttp POST: url must start with unix://
+200 {"Image": "alpine"}
+["-sS", "-X", "POST", "--unix-socket", "/tmp/d.sock", "-H", "Content-Type: application/json", "--data-binary", "@-", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/create"]
+200 put body
+200 3
+["-sS", "-X", "POST", "--unix-socket", "/tmp/d.sock", "-H", "Z: 1", "-H", "A: 2", "--data-binary", "@-", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/play"]
+200
+["-sS", "-X", "DELETE", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/containers/x?force=true"]
+200 []
+["-sS", "--head", "-o", "/dev/null", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/_ping"]
+200 5 99
+ab
+["-sS", "-X", "GET", "--unix-socket", "/tmp/d.sock", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://localhost/img"]
+I/O error: uhttp GET: could not resolve host
+I/O error: uhttp GET: could not connect to the socket
+I/O error: uhttp GET: request timed out
+I/O error: uhttp GET: TLS handshake failed
+I/O error: uhttp GET: request failed
+I/O error: uhttp DELETE: could not connect to the socket
+I/O error: uhttp GET: curl executable not found
+line [one]
+line [two]
+line []
+line [three]
+line [last]
+["-sS", "-N", "--unix-socket", "/tmp/d.sock", "--", "http://localhost/v1.43/events"]
+line [only]
+["-sS", "-N", "--unix-socket", "/tmp/d.sock", "-H", "X-Stream: yes", "--", "http://localhost/events"]
+line [a�b]
+nil
+got [one]
+got [two]
+true
+got [one]
+got [two]
+the handler gave up
+true
+line [partial]
+I/O error: uhttp stream: could not connect to the socket
+I/O error: uhttp stream: url must start with unix://
+I/O error: uhttp stream: curl executable not found
+a body is refused
+a streamed line is refused

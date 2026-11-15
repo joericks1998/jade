@@ -73,7 +73,7 @@ pub struct ImportContext<'a> {
 pub fn resolve_import(ctx: &ImportContext, path: &str) -> Result<ImportTarget, String> {
     // Stdlib packages are compiled in and always win — the VM binds them under
     // their own global name before it ever consults the filesystem.
-    if crate::builtins::find_package(path).is_some() {
+    if crate::builtins::is_std_package(path) {
         return Ok(ImportTarget::Builtin);
     }
 

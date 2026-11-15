@@ -1,0 +1,10 @@
+// A path is a str. std::path is written in Jade, and a call that gives it
+// something else is refused where the program calls it, naming the function:
+//
+//   in path.join(int, str): str() needs a str, got int; convert one with toString()
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+use std::path
+
+print(path.join(5, "b"))

@@ -1,0 +1,238 @@
+// std::uhttp's request path and its stream, run against a stand-in for curl,
+// so they need no daemon. 2.0.8 moved std::uhttp from the backend into Jade
+// source (compiler/src/lib/uhttp.jde): reading the target out of the URL,
+// building curl's command line and splitting lines are Jade, and starting
+// curl, reading what it writes and stopping it are hooks. Every line here is
+// what the backend's version printed.
+//
+// The stand-in writes each argument it was given on a line of its own, keeps
+// what came on its standard input, and answers as the mode file says. It goes
+// first on PATH, where the program looks for curl.
+
+use std::bytes
+use std::env
+use std::fs
+use std::sh
+use std::time
+use std::uhttp
+
+let root = "/tmp/jade_uhttp_local"
+let fake = [
+    "#!/bin/sh",
+    "dir=/tmp/jade_uhttp_local",
+    ": > $dir/args",
+    "fmt=",
+    "prev=",
+    "for a in \"$@\"; do",
+    "    printf '%s\\n' \"$a\" >> $dir/args",
+    "    if [ \"$prev\" = -w ]; then fmt=\"$a\"; fi",
+    "    prev=\"$a\"",
+    "done",
+    "case \" $* \" in *\" @- \"*) cat > $dir/stdin ;; esac",
+    "mode=$(cat $dir/mode)",
+    "status=200",
+    "case \"$mode\" in",
+    "    text) printf 'OK' ;;",
+    "    empty) ;;",
+    "    nul) printf 'ab\\000cd' ;;",
+    "    echo) cat $dir/stdin ;;",
+    "    lines) printf 'one\\ntwo\\n\\nthree\\nlast'; exit 0 ;;",
+    "    endline) printf 'only\\n'; exit 0 ;;",
+    "    bad) printf 'a\\377b\\n'; exit 0 ;;",
+    "    commands) printf 'echo hi\\n'; exit 0 ;;",
+    "    stop) printf 'one\\ntwo\\nthree\\n'; exec sleep 5 ;;",
+    "    fail) printf 'partial\\n'; exit 7 ;;",
+    "    exit*) exit \"${mode#exit}\" ;;",
+    "esac",
+    "if [ -n \"$fmt\" ]; then printf '%s%s' \"${fmt%%%*}\" \"$status\"; fi",
+    ""
+].join("\n")
+
+sh.run("rm -rf /tmp/jade_uhttp_local")
+fs.mkdir(root + "/bin")
+fs.mkdir(root + "/empty")
+fs.write(root + "/bin/curl", fake)
+sh.run("chmod +x /tmp/jade_uhttp_local/bin/curl")
+env.set("PATH", root + "/bin:/usr/bin:/bin")
+
+fn mode(m) {
+    fs.write("/tmp/jade_uhttp_local/mode", m)
+}
+
+fn args() {
+    print(fs.read("/tmp/jade_uhttp_local/args").lines())
+}
+
+// ── The target ───────────────────────────────────────────────────────────────
+
+// The socket runs to the first colon after the scheme, the rest is the
+// request path, and a missing path is "/".
+mode("text")
+let r = uhttp.get("unix:///tmp/d.sock:/v1.43/containers/json")
+print(f"{r.status} {r.body}")
+args()
+uhttp.get("unix:///tmp/d.sock")
+args()
+uhttp.get("unix:///tmp/d.sock:")
+args()
+uhttp.get("unix:///tmp/d.sock:/a?b=c:d")
+args()
+uhttp.get("unix://relative.sock:noslash")
+args()
+
+for url in ["http://localhost/x", "unix://:/path", "unix://"] {
+    try {
+        uhttp.get(url)
+    } catch e {
+        print(e.message)
+    }
+}
+try {
+    uhttp.post("unix:/tmp/d.sock:/x", "body")
+} catch e {
+    print(e.message)
+}
+
+// ── Each method ──────────────────────────────────────────────────────────────
+
+mode("echo")
+r = uhttp.post("unix:///tmp/d.sock:/create", "{\"Image\": \"alpine\"}", {"Content-Type": "application/json"})
+print(f"{r.status} {r.body}")
+args()
+r = uhttp.put("unix:///tmp/d.sock:/put", "put body")
+print(f"{r.status} {r.body}")
+let sent = uhttp.post_bytes("unix:///tmp/d.sock:/play", bytes.from_ints([1, 0, 2]), {"Z": "1", "A": "2"})
+print(f"{sent.status} {len(fs.read_bytes("/tmp/jade_uhttp_local/stdin"))}")
+args()
+mode("text")
+print(uhttp.delete("unix:///tmp/d.sock:/containers/x?force=true")["status"])
+args()
+mode("empty")
+r = uhttp.head("unix:///tmp/d.sock:/_ping")
+print(f"{r.status} [{r.body}]")
+args()
+mode("nul")
+let img = uhttp.get_bytes("unix:///tmp/d.sock:/img", {"Accept": "image/png"})
+print(f"{img.status} {len(img.body)} {img.body[3]}")
+print(uhttp.get("unix:///tmp/d.sock:/img").body)
+args()
+
+// ── Failures ─────────────────────────────────────────────────────────────────
+
+for code in ["exit6", "exit7", "exit28", "exit35", "exit3"] {
+    mode(code)
+    try {
+        uhttp.get("unix:///tmp/d.sock:/f")
+    } catch e {
+        print(e.message)
+    }
+}
+mode("exit7")
+try {
+    uhttp.delete("unix:///tmp/d.sock:/f")
+} catch e {
+    print(e.message)
+}
+env.set("PATH", root + "/empty")
+try {
+    uhttp.get("unix:///tmp/d.sock:/none")
+} catch e {
+    print(e.message)
+}
+env.set("PATH", root + "/bin:/usr/bin:/bin")
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+
+fn show(line) {
+    print(f"line [{line}]")
+}
+
+fn shout(line) {
+    return line.upper()
+}
+
+fn stop_at_two(line) {
+    print(f"got [{line}]")
+    return line != "two"
+}
+
+fn give_up_at_two(line) {
+    print(f"got [{line}]")
+    if line == "two" {
+        raise "the handler gave up"
+    }
+}
+
+fn try_to_run(line) {
+    try {
+        sh.exec(line)
+        print("NOT REFUSED")
+    } catch e {
+        print("a streamed line is refused")
+    }
+}
+
+// One call a line, an empty line included, and a last line without a newline
+// still counts.
+mode("lines")
+uhttp.stream("unix:///tmp/d.sock:/v1.43/events", show)
+args()
+mode("endline")
+uhttp.stream("unix:///tmp/d.sock:/events", show, {"X-Stream": "yes"})
+args()
+mode("bad")
+uhttp.stream("unix:///tmp/d.sock:/events", show)
+
+// What the handler returns matters only when it is false.
+mode("lines")
+print(uhttp.stream("unix:///tmp/d.sock:/events", shout))
+
+// False stops the stream and curl with it, so this does not wait out the
+// stand-in's sleep.
+mode("stop")
+let t0 = time.monotonic()
+uhttp.stream("unix:///tmp/d.sock:/events", stop_at_two)
+print(time.monotonic() - t0 < 2.0)
+
+// A handler that raises stops it too, and the error reaches the caller.
+let t1 = time.monotonic()
+try {
+    uhttp.stream("unix:///tmp/d.sock:/events", give_up_at_two)
+} catch e {
+    print(e.message)
+}
+print(time.monotonic() - t1 < 2.0)
+
+// A stream that ends badly raises once its lines are in.
+mode("fail")
+try {
+    uhttp.stream("unix:///tmp/d.sock:/events", show)
+} catch e {
+    print(e.message)
+}
+try {
+    uhttp.stream("tcp://nope", show)
+} catch e {
+    print(e.message)
+}
+env.set("PATH", root + "/empty")
+try {
+    uhttp.stream("unix:///tmp/d.sock:/events", show)
+} catch e {
+    print(e.message)
+}
+env.set("PATH", root + "/bin:/usr/bin:/bin")
+
+// ── Trust ────────────────────────────────────────────────────────────────────
+
+mode("text")
+try {
+    sh.exec(uhttp.get("unix:///tmp/d.sock:/t").body)
+    print("NOT REFUSED")
+} catch e {
+    print("a body is refused")
+}
+mode("commands")
+uhttp.stream("unix:///tmp/d.sock:/events", try_to_run)
+
+sh.run("rm -rf /tmp/jade_uhttp_local")

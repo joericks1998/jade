@@ -374,13 +374,22 @@ impl Store {
 
     /// Purpose: This function sets a slot's type, counting the change.
     ///
+    /// A type the slot already holds, read through its slots, is no change,
+    /// even when it is written through other slots: an array parameter joined
+    /// with each of three callers' arrays of ints would otherwise be rewritten
+    /// to each caller's element slot in turn, every pass, and never settle.
+    ///
     /// Inputs:
     /// - `root`: a representative slot id.
     /// - `t`: its new type.
     ///
     /// Outputs: none.
     fn set(&mut self, root: u32, t: Ty) {
-        if self.slots[root as usize].ty.as_ref() != Some(&t) {
+        let same = match self.slots[root as usize].ty.clone() {
+            Some(old) => old == t || self.resolve(&old) == self.resolve(&t),
+            None => false,
+        };
+        if !same {
             self.slots[root as usize].ty = Some(t);
             self.version += 1;
         }

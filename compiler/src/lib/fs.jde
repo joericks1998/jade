@@ -1,0 +1,201 @@
+// std::fs: files and directories.
+//
+// Each C library call is a hook. A hook that fails returns an empty value and
+// leaves the C library's error code where `__sys.os_error()` reads it, and a
+// function here turns that into the error v1 raised, the text Rust's
+// `io::Error` gave: `I/O error: <op> '<path>': <reason> (os error <n>)`.
+//
+// Trust. What `read` and `read_bytes` return came from outside the program, so
+// it is tainted, unless the call says `trust = true`. Reading a path that is
+// itself tainted is refused unless the call says the same, because a path a
+// model or a file chose can name anything on the machine. Both checks happen
+// inside the read hooks, where library code cannot skip them.
+
+use std::__sys
+
+// Purpose: This function reads all of standard input, tainted.
+fn read_stdin_bytes() {
+    let data = __sys.read_all(0)
+    _check("read_stdin_bytes", "<stdin>")
+    return data
+}
+
+// Purpose: This function writes bytes to standard output, as they are.
+fn write_stdout_bytes(data) {
+    __sys.write_fd(1, data)
+    _check("write_stdout_bytes", "<stdout>")
+}
+
+// Purpose: This function reads a file as octets, tainted unless `trust` is
+// true. A tainted path is refused unless `trust` is true.
+fn read_bytes(path, trust = false) {
+    let p = str(path)
+    let data = __sys.read_file(p, bool(trust), "fs.read_bytes")
+    _check("read_bytes", p)
+    return data
+}
+
+// Purpose: This function writes octets to a file, replacing what it held.
+fn write_bytes(path, data) {
+    let p = str(path)
+    __sys.write_file(p, data, false)
+    _check("write_bytes", p)
+}
+
+// Purpose: This function adds octets to the end of a file, making it first
+// when it is not there.
+fn append_bytes(path, data) {
+    let p = str(path)
+    __sys.write_file(p, data, true)
+    _check("append_bytes", p)
+}
+
+// Purpose: This function reads a file as UTF-8 text, tainted unless `trust`
+// is true. A tainted path is refused unless `trust` is true.
+fn read(path, trust = false) {
+    let p = str(path)
+    let text = __sys.read_text(p, bool(trust), "fs.read")
+    _check("read", p)
+    if text is str {
+        return text
+    }
+    raise f"I/O error: read '{p}': stream did not contain valid UTF-8"
+    return ""
+}
+
+// Purpose: This function writes text to a file, replacing what it held.
+fn write(path, text) {
+    let p = str(path)
+    __sys.write_file(p, str(text).encode(), false)
+    _check("write", p)
+}
+
+// Purpose: This function adds text to the end of a file, making it first when
+// it is not there.
+fn append(path, text) {
+    let p = str(path)
+    __sys.write_file(p, str(text).encode(), true)
+    _check("append", p)
+}
+
+// Purpose: This function says whether anything is at a path. It never raises.
+fn exists(path) {
+    __sys.stat(str(path))
+    return __sys.os_error() == 0
+}
+
+// Purpose: This function removes a file.
+fn delete(path) {
+    let p = str(path)
+    __sys.unlink(p)
+    _check("delete", p)
+}
+
+// Purpose: This function lists a directory's entry names, without `.` and
+// `..`, in the order the file system gives them.
+fn list_dir(path) {
+    let names = __sys.read_dir(str(path))
+    if __sys.os_error() != 0 {
+        raise "list_dir: could not read directory"
+    }
+    let out = []
+    for name in names {
+        if name != "." and name != ".." {
+            out.push(name)
+        }
+    }
+    return out
+}
+
+// Purpose: This function makes a directory, and every missing directory above
+// it. One that is already there is fine.
+fn mkdir(path) {
+    let p = str(path)
+    // Each parent in turn: the path cut at each slash after the first
+    // character. One that cannot be made is left for the last call to report.
+    let i = 0
+    for c in p {
+        if c == '/' and i > 0 {
+            __sys.mkdir(p.slice(0, i))
+        }
+        i = i + 1
+    }
+    __sys.mkdir(p)
+    let code = __sys.os_error()
+    if code != 0 {
+        // v1 read the error after asking whether a directory was there, so a
+        // path it could not ask about reports why it could not.
+        let st = __sys.stat(p)
+        let asked = __sys.os_error()
+        if asked != 0 {
+            _fail("mkdir", p, asked)
+        } elif _kind(st[0]) != 0x4000 {
+            _fail("mkdir", p, code)
+        }
+    }
+}
+
+// Purpose: This function says whether a path is a regular file. It never
+// raises.
+fn is_file(path) {
+    let st = __sys.stat(str(path))
+    return __sys.os_error() == 0 and _kind(st[0]) == 0x8000
+}
+
+// Purpose: This function says whether a path is a directory. It never raises.
+fn is_dir(path) {
+    let st = __sys.stat(str(path))
+    return __sys.os_error() == 0 and _kind(st[0]) == 0x4000
+}
+
+// Purpose: This function copies a file's octets to another path, replacing
+// what it held. A failure names the source, as v1's did.
+fn copy(src, dst) {
+    let source = str(src)
+    __sys.copy_file(source, str(dst))
+    _check("copy", source)
+}
+
+// Purpose: This function moves a file or directory to another path. A failure
+// names the source, as v1's did.
+fn rename(src, dst) {
+    let source = str(src)
+    __sys.rename(source, str(dst))
+    _check("rename", source)
+}
+
+// Purpose: This function removes a directory, which must be empty.
+fn rmdir(path) {
+    let p = str(path)
+    __sys.rmdir(p)
+    _check("rmdir", p)
+}
+
+// Purpose: This function returns a file's size in bytes.
+fn size(path) {
+    let p = str(path)
+    let st = __sys.stat(p)
+    _check("size", p)
+    return st[1]
+}
+
+// Purpose: This function returns the file-type bits of a mode, `S_IFMT`,
+// which are the same on every Unix: 0x8000 for a regular file and 0x4000 for
+// a directory.
+fn _kind(mode) {
+    return mode & 0xF000
+}
+
+// Purpose: This function raises the error the last hook failed with, if it
+// failed.
+fn _check(op, path) {
+    let code = __sys.os_error()
+    if code != 0 {
+        _fail(op, path, code)
+    }
+}
+
+// Purpose: This function raises an operation's failure as v1 worded it.
+fn _fail(op, path, code) {
+    raise f"I/O error: {op} '{path}': {__sys.strerror(code)} (os error {code})"
+}

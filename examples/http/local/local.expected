@@ -1,0 +1,34 @@
+200 hello
+["-sS", "-X", "GET", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/a"]
+["-sS", "-X", "GET", "-H", "X-Second: 2", "-H", "X-First: 1", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/h"]
+200 payload text
+["-sS", "-X", "POST", "-H", "Content-Type: text/plain", "--data-binary", "@-", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/p"]
+200 update
+["-sS", "-X", "PUT", "--data-binary", "@-", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/u"]
+200
+["-sS", "-X", "DELETE", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/d"]
+200 []
+["-sS", "--head", "-o", "/dev/null", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/h"]
+ab
+200
+5
+0
+["-sS", "-X", "GET", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/n"]
+200 x
+3
+["-sS", "-X", "POST", "-H", "A: b", "--data-binary", "@-", "-w", "", "JADE_STATUS:%{http_code}", "--", "http://example.test/pb"]
+a�b
+201
+body
+JADE_STATUS:999
+0 plain
+404 not here
+I/O error: http GET 'http://example.test/f': could not resolve host (curl exit 6)
+I/O error: http GET 'http://example.test/f': could not connect to host (curl exit 7)
+I/O error: http GET 'http://example.test/f': request timed out (curl exit 28)
+I/O error: http GET 'http://example.test/f': TLS handshake failed (curl exit 35)
+I/O error: http GET 'http://example.test/f': request failed (curl exit 22)
+I/O error: http POST 'http://example.test/f': could not connect to host (curl exit 7)
+I/O error: http GET 'http://example.test/none': curl executable not found (curl exit 127)
+a text body is refused
+a bytes body is refused

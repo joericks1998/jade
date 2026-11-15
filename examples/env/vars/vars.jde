@@ -1,0 +1,57 @@
+// std::env: variables, arguments and the working directory, and which of them
+// are trusted. 2.0.8 moved std::env from the backend into Jade source
+// (compiler/src/lib/env.jde), and every line here is what the backend's
+// version printed.
+//
+// A variable is set by whoever started the program, so its value is tainted;
+// the arguments and the working directory are the program's own, so they are
+// trusted. The fixture runs itself as a child to choose its own arguments and
+// environment.
+
+use std::env
+use std::sh
+
+let args = env.args()
+if len(args) > 1 {
+    if args[1] == "args" {
+        print(len(args))
+        print(args[2])
+        print(args[3])
+    } elif args[1] == "env" {
+        print(env.get("JADE_GOOD"))
+        // A value that is not UTF-8 reads as nil, as Rust's env::var gave.
+        print(env.get("JADE_BAD"))
+    }
+} else {
+    let me = "'" + args[0] + "'"
+    print(len(args))
+    print(env.get("JADE_SURELY_UNSET_VARIABLE"))
+
+    env.set("JADE_FIXTURE_VAR", "echo from the environment")
+    let v = env.get("JADE_FIXTURE_VAR")
+    print(v)
+    if v != nil {
+        try {
+            sh.exec(v)
+            print("NOT REFUSED")
+        } catch e {
+            print("an environment value is refused")
+        }
+    }
+    env.set("JADE_FIXTURE_VAR", "")
+    print(env.get("JADE_FIXTURE_VAR") == "")
+
+    // A child started after set sees the variable.
+    env.set("JADE_FIXTURE_VAR", "inherited")
+    print(sh.exec("echo $JADE_FIXTURE_VAR"))
+
+    // The arguments, the program's path first, and trusted.
+    print(sh.exec(me + " args one 'two words'"))
+    print(sh.exec("echo " + args[0]) == args[0])
+
+    print(sh.exec("JADE_GOOD=ok JADE_BAD=$(printf '\\377') " + me + " env"))
+
+    // The working directory is trusted.
+    print(sh.exec("cd " + env.cwd() + " && echo cwd ran"))
+    print(len(env.cwd()) > 0)
+}

@@ -1,0 +1,75 @@
+// std::sh: running a command through `sh -c`.
+//
+// Every function here is a code-execution sink. The hook that starts the
+// shell, `__sys.shell`, refuses a tainted command itself, so no function here
+// can skip the check, and what a command prints is tainted, because the hooks
+// that read it mark it so; its output cannot be fed back in as a command.
+//
+// `exec` and `output` capture the command's output through two pipes, read
+// together so a command that fills one while the program waits on the other
+// cannot stall; `run` lets the command write to the program's own output.
+// Captured text is decoded as UTF-8 with bad sequences replaced, as v1 did
+// with Rust's `from_utf8_lossy`. An exit code of -1 means a signal ended the
+// command.
+
+use std::__sys
+
+// What `output` returns.
+class ShOutput {
+    @public stdout
+    @public stderr
+    @public code
+}
+
+// Purpose: This function runs a command and returns what it printed, without
+// trailing newlines. A command that fails raises, with its standard error in
+// the message.
+fn exec(cmd) {
+    let p = _start(str(cmd), "sh.exec", true)
+    let out = __sys.drain(p[1], p[2])
+    __sys.close(p[1])
+    __sys.close(p[2])
+    let code = __sys.wait(p[0])
+    if code != 0 {
+        let err = __sys.lossy(out[1]).trim_start().trim_end()
+        raise f"I/O error: sh.exec: command exited with code {code}: {err}"
+    }
+    // Trailing newlines go, and only those. A newline is never part of a
+    // longer UTF-8 sequence, so they can go before decoding.
+    let text = out[0]
+    let end = len(text)
+    while end > 0 and text[end - 1] == 10 {
+        end = end - 1
+    }
+    return __sys.lossy(text.slice(0, end))
+}
+
+// Purpose: This function runs a command with the program's own output and
+// returns its exit code.
+fn run(cmd) {
+    let p = _start(str(cmd), "sh.run", false)
+    return __sys.wait(p[0])
+}
+
+// Purpose: This function runs a command and returns its standard output, its
+// standard error and its exit code. A failing command does not raise.
+fn output(cmd) {
+    let p = _start(str(cmd), "sh.output", true)
+    let out = __sys.drain(p[1], p[2])
+    __sys.close(p[1])
+    __sys.close(p[2])
+    let code = __sys.wait(p[0])
+    return ShOutput { stdout: __sys.lossy(out[0]), stderr: __sys.lossy(out[1]), code: code }
+}
+
+// Purpose: This function starts the shell on a command, refusing a tainted
+// one, and returns its pid and, when `capture` is set, the read ends of its
+// standard output and standard error.
+fn _start(cmd, sink, capture) {
+    let p = __sys.shell(cmd, sink, capture)
+    let code = __sys.os_error()
+    if code != 0 {
+        raise f"I/O error: {sink}: could not spawn shell: {__sys.strerror(code)} (os error {code})"
+    }
+    return p
+}

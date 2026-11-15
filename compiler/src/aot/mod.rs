@@ -63,6 +63,12 @@ fn merge(program: Program, source_path: Option<&Path>) -> Result<Merged, imports
             let r = imports::resolve_and_namespace(program.stmts, src)?;
             (Program { stmts: r.stmts }, r.rust, r.native_sigs)
         }
+        // A program with no file has no imports to resolve, but a std package
+        // written in Jade that it uses is loaded all the same.
+        None if imports::uses_library(&program.stmts) => {
+            let stmts = imports::namespace_program(program.stmts)?;
+            (Program { stmts }, None, HashMap::new())
+        }
         None => (program, None, HashMap::new()),
     };
     // Class member rules read what literals wrote, so they run before the
@@ -74,6 +80,9 @@ fn merge(program: Program, source_path: Option<&Path>) -> Result<Merged, imports
     // Each `?p` becomes a call into the inference prelude, added here.
     program.stmts =
         crate::infer::rewrite::inject(program.stmts).map_err(imports::ResolveError::Program)?;
+    // The prelude's library modules, if it used one the program uses too,
+    // are defined once.
+    program.stmts = crate::stdlib::dedupe(program.stmts);
     Ok(Merged { program, rust, sigs })
 }
 

@@ -1,18 +1,23 @@
 //! The built-in registry: the `PACKAGES` table and the names every program has.
 //!
-//! Each package is a flat top-level module (`crate::array`, `crate::math`, …)
+//! Each package is a flat top-level module (`crate::array`, `crate::bytes`, …)
 //! that declares its function names. Nothing here runs: the per-file pass in
 //! `typechecker/resolve.rs` binds a package's name where a `use` names it,
 //! `typechecker/infer/builtins.rs` types each call, `mir/` lowers it, and
-//! `src/backend/` emits the code.
+//! `src/backend/` emits the code. Since 2.0.8 the table holds only the value
+//! types' own packages, `string`, `array`, `dict` and `bytes`, and the
+//! inference prelude's `__infer`.
+//!
+//! Every other std package, such as `std::fs`, is written in Jade: a `.jde`
+//! module in `src/lib/`, and `crate::stdlib` is its registry. The functions at
+//! the bottom of this file answer for both kinds, for the places that only
+//! need to know whether a `use` names a std package and what it has.
 
 use crate::typechecker::resolve::Names;
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
-use crate::{
-    array, bytes, core, dict, env, fs, future, http, math, path, random, sh, string, time, uhttp,
-};
+use crate::{array, bytes, core, dict, future, string};
 
 // ── Package ───────────────────────────────────────────────────────────────────
 
@@ -40,17 +45,8 @@ impl Package {
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
     &string::STRING_PKG,
-    &math::MATH_PKG,
     &array::ARRAY_PKG,
     &dict::DICT_PKG,
-    &fs::FS_PKG,
-    &time::TIME_PKG,
-    &http::HTTP_PKG,
-    &uhttp::UHTTP_PKG,
-    &sh::SH_PKG,
-    &env::ENV_PKG,
-    &path::PATH_PKG,
-    &random::RANDOM_PKG,
     &bytes::BYTES_PKG,
     &crate::infer::INFER_PKG,
 ];
@@ -109,11 +105,54 @@ pub fn package_by_global_name(name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.global_name == name).copied()
 }
 
-/// Returns true if `name` is the global binding name of any stdlib package
-/// (e.g. "fs", "http", "path"). Used to separate stdlib imports from
+/// Returns true if `name` is the global binding name of a package in this
+/// table (e.g. "string", "bytes"). Used to separate stdlib imports from
 /// user-defined exports when packaging module globals.
 pub fn is_package_global_name(name: &str) -> bool {
     PACKAGES.iter().any(|p| p.global_name == name)
+}
+
+/// Purpose: This function says whether a `use` names a std package, of
+/// either kind: one the backend writes, or one written in Jade.
+///
+/// Inputs:
+/// - `import_name`: the path the `use` names, such as `std/path`.
+///
+/// Outputs: true for a std package.
+pub fn is_std_package(import_name: &str) -> bool {
+    find_package(import_name).is_some() || crate::stdlib::find(import_name).is_some()
+}
+
+/// Purpose: This function returns the name a std package binds, of either kind.
+///
+/// Inputs:
+/// - `import_name`: the path the `use` names.
+///
+/// Outputs: the name, such as `path`, or `None` for a path that is not a std
+/// package.
+pub fn std_global_name(import_name: &str) -> Option<&'static str> {
+    find_package(import_name)
+        .map(|p| p.global_name)
+        .or_else(|| crate::stdlib::find(import_name).map(|l| l.name))
+}
+
+/// Purpose: This function lists the functions a std package bound under a
+/// name has, of either kind, in the order a message lists them.
+///
+/// Inputs:
+/// - `global_name`: the name the package binds, such as `math`.
+///
+/// Outputs: the package's path as a program writes it, `std::math`, and its
+/// functions, or `None` for a name no std package binds.
+pub fn std_functions(global_name: &str) -> Option<(String, Vec<String>)> {
+    if let Some(p) = package_by_global_name(global_name) {
+        return Some((
+            p.import_name.replace('/', "::"),
+            p.fns.iter().map(|f| f.to_string()).collect(),
+        ));
+    }
+    let lib = crate::stdlib::by_name(global_name)?;
+    Some((format!("std::{}", lib.name), lib.public_fns().to_vec()))
 }
 
 /// Every global a program has without an import.

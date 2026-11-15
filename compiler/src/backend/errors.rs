@@ -25,6 +25,10 @@ use crate::mir::Ty;
 /// The deepest a chain of calls may go before it raises, as in v1.
 pub const RECURSION_LIMIT: i64 = 10_000;
 
+/// The prefix v1 gave every failure of the outside world: a file, a command,
+/// or bytes that were not text.
+pub const IO_ERROR: &str = "I/O error: ";
+
 impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns a thread-local global, made the first time.
     ///
@@ -33,7 +37,7 @@ impl<'ctx> Cx<'ctx> {
     /// - `ptr`: true for a pointer slot, false for an i64 counter.
     ///
     /// Outputs: the global.
-    fn thread_global(&self, name: &str, ptr: bool) -> GlobalValue<'ctx> {
+    pub(super) fn thread_global(&self, name: &str, ptr: bool) -> GlobalValue<'ctx> {
         if let Some(g) = self.module.get_global(name) {
             return g;
         }
@@ -218,6 +222,11 @@ impl<'a, 'ctx> F<'a, 'ctx> {
 
     /// Purpose: This function raises when a condition holds, and carries on.
     pub fn raise_if(&self, c: IntValue<'ctx>, msg: &str) {
+        // A condition the builder already folded to false raises nothing, as
+        // for a division by a constant that is not zero.
+        if c.get_zero_extended_constant() == Some(0) {
+            return;
+        }
         self.if_(c, |f| f.raise(msg));
     }
 

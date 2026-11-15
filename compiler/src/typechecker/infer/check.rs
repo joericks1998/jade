@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::ty::{FuncRef, SizedNum, Ty, with_article};
-use super::{Checker, FnKey, InstKey, Target, addr, is_nil_literal};
+use super::{Checker, FnKey, InstKey, StaticTest, Target, addr, is_nil_literal};
 use crate::frontend::ast::{BinOpKind, Expr, ExprKind, FStrPart, Stmt, UnaryOpKind};
 use crate::frontend::error::Span;
 
@@ -36,6 +36,14 @@ impl<'a> Checker<'a> {
     ///
     /// Outputs: none. Types land in slots; errors land in `self.error`.
     pub(super) fn check_instance(&mut self, key: &InstKey) {
+        let site = self.lib_sites.get(key).cloned();
+        let outer = std::mem::replace(&mut self.lib_site, site);
+        self.check_instance_body(key);
+        self.lib_site = outer;
+    }
+
+    /// Purpose: This function checks one instance's body, for `check_instance`.
+    fn check_instance_body(&mut self, key: &InstKey) {
         let inst = self.instances.get_mut(key).expect("instance exists");
         let slots = std::mem::take(&mut inst.slots);
         let (params, ret, elem) = (inst.params.clone(), inst.ret.clone(), inst.elem.clone());
@@ -283,6 +291,34 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::If { condition, then_body, else_body, span } => {
+                // Library code's `if x is int`: one branch per instance.
+                if super::is_library_fn(&f.key.func) {
+                    let answer = self.static_answer(condition, f);
+                    match answer {
+                        StaticTest::Known(true) => {
+                            self.check_narrowed_block(then_body, f, HashMap::new());
+                            return;
+                        }
+                        StaticTest::Known(false) => {
+                            if let Some(e) = else_body {
+                                self.check_narrowed_block(e, f, HashMap::new());
+                            }
+                            return;
+                        }
+                        // On a pass before the types settle, neither branch is
+                        // checked: a later pass checks the instance again.
+                        StaticTest::Unknown if !self.final_pass => return,
+                        StaticTest::Unknown => {
+                            self.report(
+                                *span,
+                                "internal compiler error: a type test whose type never settled"
+                                    .to_string(),
+                            );
+                            return;
+                        }
+                        StaticTest::NotOne => {}
+                    }
+                }
                 let c = self.check_expr(condition, f);
                 self.unify(&c, &Ty::Bool, *span, "an if condition");
                 let (then_narrow, else_narrow) = self.narrowing_of(condition, f);
@@ -499,6 +535,26 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Library code's `if x is str`, with `x` a `str?`, reads `x` as a
+            // str inside and as nil outside; `x is nil` the other way round.
+            ExprKind::Is { value, class }
+                if let Some(want) = super::builtin_test_type(class)
+                    && super::is_library_fn(&f.key.func) =>
+            {
+                if let ExprKind::Identifier(n) = &value.kind
+                    && let Some(slot) = self.read_var(f, n)
+                    && let Ty::Opt(inner) = self.store.shallow(&slot)
+                {
+                    let inner = self.store.resolve(&inner);
+                    if want == inner {
+                        yes.insert(n.clone(), inner);
+                        no.insert(n.clone(), Ty::Nil);
+                    } else if want == Ty::Nil {
+                        yes.insert(n.clone(), Ty::Nil);
+                        no.insert(n.clone(), inner);
+                    }
+                }
+            }
             // `if a is Dog { … }` reads `a` as a Dog inside, when Dog is
             // narrower than what `a` holds.
             ExprKind::Is { value, class } => {
@@ -520,6 +576,31 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         (yes, no)
+    }
+
+    /// Purpose: This function answers a condition made of built-in type
+    /// tests, from the types the variables it tests have in this instance.
+    ///
+    /// Inputs:
+    /// - `condition`: the condition.
+    /// - `f`: the frame.
+    ///
+    /// Outputs: the answer, as `static_test` gives it.
+    fn static_answer(&mut self, condition: &'a Expr, f: &mut Frame) -> StaticTest {
+        // Checked like any condition first, so each tested variable's type at
+        // this point, narrowing included, is recorded for MIR to read too.
+        self.check_expr(condition, f);
+        let mut names = Vec::new();
+        tested_names(condition, &mut names);
+        let mut types = HashMap::new();
+        for n in names {
+            let t = self.read_var(f, &n).map(|t| self.store.resolve(&t));
+            types.insert(n, t.filter(|t| !matches!(t, Ty::Var(_))));
+        }
+        super::static_test(condition, &mut |e| match &e.kind {
+            ExprKind::Identifier(n) => types.get(n).cloned().flatten(),
+            _ => None,
+        })
     }
 
     /// Purpose: This function reads a variable, honoring narrowing.
@@ -612,6 +693,12 @@ impl<'a> Checker<'a> {
         match &e.kind {
             ExprKind::Is { value, class } => {
                 let t = self.check_expr(value, f);
+                if super::builtin_test_type(class).is_some()
+                    && !self.structs.contains_key(class.as_str())
+                    && super::is_library_fn(&f.key.func)
+                {
+                    return Ty::Bool;
+                }
                 let c = super::ty::display_name(class).to_string();
                 if !self.structs.contains_key(class.as_str()) {
                     self.report(span, format!("unknown class '{c}' after `is`"));
@@ -1145,7 +1232,7 @@ impl<'a> Checker<'a> {
                 span,
                 format!(
                     "'{}' takes {} argument{}, got {}",
-                    super::ty::display_name(name),
+                    super::callable_display(name),
                     params.len(),
                     if params.len() == 1 { "" } else { "s" },
                     args.len()
@@ -1170,7 +1257,7 @@ impl<'a> Checker<'a> {
                 None => {
                     self.report(
                         v.span,
-                        format!("'{}' has no parameter named '{k}'", super::ty::display_name(name)),
+                        format!("'{}' has no parameter named '{k}'", super::callable_display(name)),
                     );
                     return None;
                 }
@@ -1184,7 +1271,7 @@ impl<'a> Checker<'a> {
                 (None, None) => {
                     self.report(
                         span,
-                        format!("'{}' needs an argument for '{p}'", super::ty::display_name(name)),
+                        format!("'{}' needs an argument for '{p}'", super::callable_display(name)),
                     );
                     return None;
                 }
@@ -1623,6 +1710,17 @@ impl<'a> Checker<'a> {
                         Ty::Str
                     }
                     (Ty::Var(_), Ty::Var(_)) => self.unify(&l, &r, span, sym),
+                    // A char joins a string too, so a side not known yet facing
+                    // a string may be either: a char a loop takes from a string
+                    // a function returns, say. The sum is a string either way.
+                    // The side is left for the code that settles it, and made a
+                    // string only if nothing does.
+                    (Ty::Var(_), Ty::Str) | (Ty::Str, Ty::Var(_))
+                        if matches!(op, BinOpKind::Add) && !self.force_eq =>
+                    {
+                        self.deferred_eq = true;
+                        Ty::Str
+                    }
                     (Ty::Var(_), Ty::Int | Ty::Float | Ty::Str) => {
                         self.unify(&l, &r, span, sym);
                         sr
@@ -2534,4 +2632,28 @@ fn method_value_message(name: &str) -> String {
         "a method is called, not passed: write `x.{name}(…)` where it is needed, or pass `x` to \
          the function that calls it"
     )
+}
+
+/// Purpose: This function collects the variables a condition's type tests
+/// name, as in `x is int and y is int`.
+///
+/// Inputs:
+/// - `e`: the condition.
+/// - `out`: where the names go.
+///
+/// Outputs: none.
+fn tested_names(e: &Expr, out: &mut Vec<String>) {
+    match &e.kind {
+        ExprKind::Is { value, .. } => {
+            if let ExprKind::Identifier(n) = &value.kind {
+                out.push(n.clone());
+            }
+        }
+        ExprKind::UnaryOp { operand, .. } => tested_names(operand, out),
+        ExprKind::BinOp { left, right, .. } => {
+            tested_names(left, out);
+            tested_names(right, out);
+        }
+        _ => {}
+    }
 }

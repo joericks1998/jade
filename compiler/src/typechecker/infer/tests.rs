@@ -14,6 +14,8 @@ fn check(src: &str) -> Result<Typed, JadeError> {
     let program = crate::frontend::parser::parse(tokens).expect("parses");
     let mut program =
         crate::typechecker::resolve::resolve(program).expect("the per-file pass accepts it");
+    // A std package written in Jade is loaded the way a build loads it.
+    program.stmts = crate::aot::imports::namespace_program(program.stmts).expect("imports");
     check_members(&program)?;
     crate::typechecker::resolve::fill_struct_literal_defaults(&mut program).expect("defaults fill");
     check_program(&program)
@@ -262,6 +264,43 @@ fn generators_give_streams() {
 #[test]
 fn std_results_are_structs_that_read_both_ways() {
     ok("use std::sh\nlet r = sh.output(\"true\")\nprint(r.code)\nprint(r[\"stdout\"])\n");
+    // The class is the package's own: a program's class of the same name is
+    // another class.
+    ok(
+        "use std::http\nclass HttpResponse {\n    @public n\n}\nlet mine = HttpResponse { n: 1 }\nprint(mine.n)\n",
+    );
+}
+
+/// An array parameter joined with three callers' arrays of the same type used
+/// to be rewritten to each caller's element slot in turn, every pass, so the
+/// types never settled; `random.choice` and `random.shuffle` are such
+/// functions since 2.0.8.
+#[test]
+fn a_function_called_with_three_arrays_of_one_type_settles() {
+    ok(
+        "fn first(a) {\n    return a[0]\n}\nlet x = first([1])\nlet y = first([2])\nlet z = first([3])\n",
+    );
+    ok("fn swap(a) {\n    let held = a[0]\n    a[0] = a[1]\n    a[1] = held\n}\n\
+        let p = [1, 2]\nswap(p)\nlet q = [3, 4]\nswap(q)\nlet r = [5, 6]\nswap(r)\n");
+    ok(
+        "use std::random\nprint(random.choice([1]))\nprint(random.choice([2]))\nprint(random.choice([3]))\n",
+    );
+}
+
+/// A char joins a string, so a loop variable not known yet when it is added
+/// to a string is not made a string: the string it comes from, which a
+/// function returns, settles it as a char.
+#[test]
+fn a_char_from_a_returned_string_joins_a_string() {
+    let t = ok(
+        "fn word() {\n    return \"ab\".upper()\n}\nlet out = \"\"\nfor c in word() {\n    out = out + c\n}\n",
+    );
+    assert_eq!(global(&t, "out"), Ty::Str);
+    ok("use std::sh\nlet out = \"\"\nfor c in sh.exec(\"echo hi\") {\n    out = c + out\n}\n");
+    rejects(
+        "fn same(x) {\n    return x\n}\nlet s = \"a\" + same(1)\n",
+        "cannot combine str and int",
+    );
 }
 
 /// The value type of the dict `toDict` returns comes from how the program uses

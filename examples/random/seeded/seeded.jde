@@ -1,0 +1,84 @@
+// std::random with a fixed seed draws the same values every time, and these
+// are them. 2.0.8 moved std::random's range reduction, choice and shuffle from
+// the backend into Jade source (compiler/src/lib/random.jde); the generator,
+// xoshiro256** seeded through splitmix64, stays behind a hook, under a lock,
+// since tasks share it. Every value here is what the backend's version drew.
+
+use std::random
+
+class Card {
+    @public n
+}
+
+random.seed(42)
+let ints = []
+let i = 0
+while i < 12 {
+    ints.push(random.int(1, 100))
+    i = i + 1
+}
+print(ints)
+print(random.int(-5, 5))
+print(random.int(7, 7))
+
+// The whole int range, half of it, and ranges whose size is not a power of
+// two, which the draw rejects and retries rather than bias.
+print(random.int(-9223372036854775807 - 1, 9223372036854775807))
+print(random.int(0, 9223372036854775807))
+print(random.int(-9223372036854775807 - 1, -1))
+print(random.int(-3, 9223372036854775807))
+print(random.int(1, 6148914691236517206))
+
+let floats = []
+i = 0
+while i < 6 {
+    floats.push(random.float())
+    i = i + 1
+}
+print(floats)
+
+print(random.choice(["a", "b", "c", "d", "e"]))
+print(random.choice([1]))
+print(random.choice([1.5, 2.5, 3.5]))
+
+let deck = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+random.shuffle(deck)
+print(deck)
+let names = ["ann", "bob", "cy", "dee"]
+random.shuffle(names)
+print(names)
+let cards = [Card { n: 1 }, Card { n: 2 }, Card { n: 3 }, Card { n: 4 }]
+random.shuffle(cards)
+for c in cards {
+    print(c.n)
+}
+print(random.choice(cards).n)
+let one = [5]
+random.shuffle(one)
+print(one)
+
+// Seeding again starts the sequence again.
+random.seed(42)
+print(random.int(1, 100))
+random.seed(0)
+print(random.int(1, 1000000))
+random.seed(-1)
+print(random.float())
+random.seed(9223372036854775807)
+print(random.int(0, 1))
+
+// The two refusals.
+try {
+    random.int(5, 1)
+} catch e {
+    print(e.message)
+}
+let empty = [1]
+empty.pop()
+try {
+    random.choice(empty)
+} catch e {
+    print(e.message)
+}
+random.shuffle(empty)
+print(len(empty))

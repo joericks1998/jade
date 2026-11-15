@@ -1,0 +1,255 @@
+// std::http: HTTP requests through `curl`.
+//
+// std::http ran curl in v1 too, which is how it gets HTTPS without a TLS
+// library in every binary; this is the same command line. A request writes its
+// body to curl's standard input, reads the reply from curl's standard output,
+// and splits off the status curl appends after it. Only a transport failure
+// raises; a 4xx or 5xx is an ordinary status.
+//
+// Building the command line and reading the reply are here. Starting curl,
+// writing to it, reading what it writes and waiting for it are hooks. A
+// response body came off the network, so it is tainted: the hook that reads
+// curl's output marks it so.
+//
+// std::uhttp, `uhttp.jde`, is this package over a Unix socket. It calls the
+// functions here whose names start with `_`, and returns the same classes.
+
+use std::__sys
+
+// What every request but `get_bytes` returns.
+class HttpResponse {
+    @public status
+    @public body
+}
+
+// What `get_bytes` returns: the body as octets.
+class HttpBytesResponse {
+    @public status
+    @public body
+}
+
+// Purpose: This function sends a GET request.
+fn get(url, headers = nil) {
+    return _text(_fetch("GET", str(url), nil, headers, false))
+}
+
+// Purpose: This function sends a GET request and keeps the body as octets.
+fn get_bytes(url, headers = nil) {
+    return _octets(_fetch("GET", str(url), nil, headers, false))
+}
+
+// Purpose: This function sends a POST request with a body of octets.
+fn post_bytes(url, body, headers = nil) {
+    return _text(_fetch("POST", str(url), body, headers, false))
+}
+
+// Purpose: This function sends a POST request.
+fn post(url, body, headers = nil) {
+    return _text(_fetch("POST", str(url), str(body).encode(), headers, false))
+}
+
+// Purpose: This function sends a PUT request.
+fn put(url, body, headers = nil) {
+    return _text(_fetch("PUT", str(url), str(body).encode(), headers, false))
+}
+
+// Purpose: This function sends a DELETE request.
+fn delete(url, headers = nil) {
+    return _text(_fetch("DELETE", str(url), nil, headers, false))
+}
+
+// Purpose: This function sends a HEAD request. Its body is empty.
+fn head(url, headers = nil) {
+    return _text(_fetch("HEAD", str(url), nil, headers, false))
+}
+
+// Purpose: This function runs one request through curl and returns what curl
+// wrote: the body, then the status curl appends after it.
+//
+// Inputs:
+// - `method`: GET, POST, PUT, DELETE or HEAD.
+// - `url`: where, or for uhttp `unix://<socket>:<path>`.
+// - `body`: the octets to send, or nil for none.
+// - `headers`: a `{str: str}`, or nil for none.
+// - `unix`: true for uhttp, which reaches the server through a Unix socket.
+fn _fetch(method, url, body, headers, unix) {
+    let argv = ["curl", "-sS"]
+    if method == "HEAD" {
+        // `--head` rather than v1's `-X HEAD`, which left curl waiting for the
+        // body a HEAD response's length promised, and failing.
+        argv.push("--head")
+        argv.push("-o")
+        argv.push("/dev/null")
+    } else {
+        argv.push("-X")
+        argv.push(method)
+    }
+    let target = url
+    if unix {
+        let t = _unix_target(url, f"uhttp {method}")
+        argv.push("--unix-socket")
+        argv.push(t[0])
+        target = t[1]
+    }
+    _header_args(argv, headers)
+    // A body, which must be bytes, goes to curl's standard input.
+    let input = not (body is nil)
+    if input {
+        argv.push("--data-binary")
+        argv.push("@-")
+    }
+    // What curl writes after the body, so the status can be told apart from it.
+    argv.push("-w")
+    argv.push("\nJADE_STATUS:%{http_code}")
+    argv.push("--")
+    argv.push(target)
+    let p = __sys.spawn(argv, input)
+    if __sys.os_error() != 0 {
+        _fail(method, url, unix, 127)
+    }
+    if body is nil {
+    } else {
+        __sys.write_child(p[1], body)
+        __sys.close(p[1])
+    }
+    let raw = __sys.read_all(p[2])
+    __sys.close(p[2])
+    let code = __sys.wait(p[0])
+    if code != 0 {
+        _fail(method, url, unix, code)
+    }
+    return raw
+}
+
+// Purpose: This function reads a uhttp target, `unix://<socket>:<path>`. The
+// socket runs to the first colon after the scheme, so a colon in a query
+// survives, and a missing path is "/".
+//
+// Outputs: the socket, and the URL curl asks it for.
+fn _unix_target(url, label) {
+    if not url.starts_with("unix://") {
+        raise f"I/O error: {label}: url must start with unix://"
+    }
+    let rest = url.slice(7, len(url))
+    let colon = rest.index_of(":")
+    let socket = rest
+    let path = ""
+    if colon >= 0 {
+        socket = rest.slice(0, colon)
+        path = rest.slice(colon + 1, len(rest))
+    }
+    if socket == "" {
+        raise f"I/O error: {label}: empty socket path"
+    }
+    if path == "" {
+        path = "/"
+    }
+    return [socket, "http://localhost" + path]
+}
+
+// Purpose: This function adds a `-H` argument for each header, in the order
+// the program wrote them.
+fn _header_args(argv, headers) {
+    if headers is nil {
+    } else {
+        // Every header is text. Checking it here first makes a program's
+        // `{str: int}` an error that names the fix, rather than the hook's
+        // parameter type.
+        for name in headers {
+            str(headers[name])
+        }
+        for name in __sys.keys_in_order(headers) {
+            argv.push("-H")
+            argv.push(name + ": " + headers[name])
+        }
+    }
+}
+
+// Purpose: This function makes a response with a text body, which stops at
+// its first NUL, as v1's did, and has each bad UTF-8 sequence replaced.
+fn _text(raw) {
+    let at = _status_at(raw)
+    let body = raw.slice(0, _body_end(raw, at))
+    let nul = 0
+    while nul < len(body) and body[nul] != 0 {
+        nul = nul + 1
+    }
+    return HttpResponse { status: _status(raw, at), body: __sys.lossy(body.slice(0, nul)) }
+}
+
+// Purpose: This function makes a response that keeps the body's octets.
+fn _octets(raw) {
+    let at = _status_at(raw)
+    return HttpBytesResponse { status: _status(raw, at), body: raw.slice(0, _body_end(raw, at)) }
+}
+
+// Purpose: This function finds where the status curl wrote begins: the last
+// `\nJADE_STATUS:`, so a body holding the same text cannot fake it.
+//
+// Outputs: its index, or -1 when curl wrote none.
+fn _status_at(raw) {
+    let mark = "\nJADE_STATUS:".encode()
+    let i = len(raw) - len(mark)
+    while i >= 0 {
+        let k = 0
+        while k < len(mark) and raw[i + k] == mark[k] {
+            k = k + 1
+        }
+        if k == len(mark) {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// Purpose: This function reads the status's digits after the mark, or gives
+// 0 when there is no mark.
+fn _status(raw, at) {
+    let status = 0
+    if at >= 0 {
+        let i = at + 13
+        while i < len(raw) and raw[i] >= 48 and raw[i] <= 57 {
+            status = __sys.wrap_add(__sys.wrap_mul(status, 10), raw[i] - 48)
+            i = i + 1
+        }
+    }
+    return status
+}
+
+// Purpose: This function returns where the body ends: at the mark, or at the
+// end when there is none.
+fn _body_end(raw, at) {
+    if at < 0 {
+        return len(raw)
+    }
+    return at
+}
+
+// Purpose: This function raises a transport failure, worded as v1 worded it.
+//
+// Inputs:
+// - `what`: the method, or `stream`.
+// - `url`: the URL the program gave.
+// - `unix`: true for uhttp, whose message names neither.
+// - `code`: curl's exit code, 127 when curl could not start.
+fn _fail(what, url, unix, code) {
+    let reason = "request failed"
+    if code == 6 {
+        reason = "could not resolve host"
+    } elif code == 7 and unix {
+        reason = "could not connect to the socket"
+    } elif code == 7 {
+        reason = "could not connect to host"
+    } elif code == 28 {
+        reason = "request timed out"
+    } elif code == 35 {
+        reason = "TLS handshake failed"
+    } elif code == 127 {
+        reason = "curl executable not found"
+    }
+    if unix {
+        raise f"I/O error: uhttp {what}: {reason}"
+    }
+    raise f"I/O error: http {what} '{url}': {reason} (curl exit {code})"
+}

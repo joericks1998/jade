@@ -17,7 +17,7 @@ use super::*;
 use crate::frontend::ast::{self, Expr, ExprKind, FStrPart};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::infer::{FnKey, InstKey, Target, Typed};
+use crate::typechecker::infer::{FnKey, InstKey, StaticTest, Target, Typed};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -319,6 +319,7 @@ impl<'a> Lowerer<'a> {
             packages: crate::builtins::all_packages()
                 .iter()
                 .map(|p| p.global_name.to_string())
+                .chain(std::iter::once(crate::stdlib::SYS.to_string()))
                 .collect(),
         }
     }
@@ -466,6 +467,7 @@ impl<'a> Lowerer<'a> {
             locals,
             ret: want,
             blocks,
+            library: false,
         };
         let mut all = self.extra.borrow_mut();
         all.push(Extra { adapter: Some((name.to_string(), ft.clone())), func });
@@ -489,6 +491,7 @@ impl<'a> Lowerer<'a> {
                 locals: Vec::new(),
                 ret: Ty::Nil,
                 blocks: vec![Block::new(Term::Unreachable)],
+                library: false,
             },
         });
         FuncId((self.n_instances + all.len() - 1) as u32)
@@ -723,7 +726,15 @@ impl<'a> Lowerer<'a> {
             ));
         }
         fx.lower_body(body)?;
-        Ok(Func { name, params: nparams, locals: fx.locals, ret: fx.ret, blocks: fx.blocks })
+        let library = sink.is_none() && crate::typechecker::infer::is_library_fn(&k.func);
+        Ok(Func {
+            name,
+            params: nparams,
+            locals: fx.locals,
+            ret: fx.ret,
+            blocks: fx.blocks,
+            library,
+        })
     }
 }
 
@@ -997,6 +1008,23 @@ impl<'a, 'l> Fx<'a, 'l> {
             .get(&addr(e))
             .cloned()
             .ok_or_else(|| internal("an expression with no type", e.span))
+    }
+
+    /// Purpose: This function answers a condition made of built-in type
+    /// tests in library code, from this instance's variable types.
+    ///
+    /// Inputs:
+    /// - `condition`: the condition.
+    ///
+    /// Outputs: the answer, or `NotOne` outside library code, where `x is
+    /// int` names a class.
+    pub(super) fn static_answer(&self, condition: &Expr) -> StaticTest {
+        if !crate::typechecker::infer::is_library_fn(&self.key.func) {
+            return StaticTest::NotOne;
+        }
+        // The type the checker recorded for each tested variable where it is
+        // tested, which is its narrowed type inside a branch that narrowed it.
+        crate::typechecker::infer::static_test(condition, &mut |e| self.ty(e).ok())
     }
 
     /// Purpose: This function finds a variable: a local in scope, then a global.
@@ -1303,6 +1331,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Ok(())
             }
             ast::Stmt::If { condition, then_body, else_body, .. } => {
+                // Library code's `if x is int`, which the checker answered for
+                // this instance: only the branch it checked is lowered.
+                if let StaticTest::Known(taken) = self.static_answer(condition) {
+                    return match (taken, else_body) {
+                        (true, _) => self.block(then_body),
+                        (false, Some(e)) => self.block(e),
+                        (false, None) => Ok(()),
+                    };
+                }
                 let mark = self.temps.len();
                 let (c, _) = self.expr(condition)?;
                 self.drop_temps(mark);
@@ -1676,6 +1713,26 @@ impl<'a, 'l> Fx<'a, 'l> {
             ExprKind::Float(x) => Operand::Const(Const::Float(*x)),
             ExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
             ExprKind::Str(s) => Operand::Const(Const::Str(s.clone())),
+            // Library code's test of a built-in type: known for a value of one
+            // type, and for a `T?` whether it holds its value, or for `x is
+            // nil` whether it does not.
+            ExprKind::Is { value, class }
+                if let Some(want) = crate::typechecker::infer::builtin_test_type(class)
+                    && crate::typechecker::infer::is_library_fn(&self.key.func) =>
+            {
+                let (v, t) = self.expr(value)?;
+                match crate::typechecker::infer::type_test(&t, &want) {
+                    StaticTest::Known(answer) => Operand::Const(Const::Bool(answer)),
+                    _ => {
+                        let missing = self.assign_temp(Ty::Bool, Rvalue::IsNil(v));
+                        if want == Ty::Nil {
+                            missing
+                        } else {
+                            self.assign_temp(Ty::Bool, Rvalue::Un(UnOp::Not, missing))
+                        }
+                    }
+                }
+            }
             ExprKind::Is { value, class } => {
                 let (v, _) = self.expr(value)?;
                 let ids: Vec<i64> = self

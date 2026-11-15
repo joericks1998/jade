@@ -257,18 +257,9 @@ fn op_name(op: &Op) -> String {
         Op::DictValues(t) => typed("dict.values", t),
         Op::DictMerge(t) => typed("dict.merge", t),
         Op::Str(m) => format!("str.{m:?}").to_lowercase(),
-        Op::Math(m) => format!("math.{m:?}").to_lowercase(),
-        Op::Fs(m) => format!("fs.{m:?}").to_lowercase(),
-        Op::Sh(m) => format!("sh.{m:?}").to_lowercase(),
-        Op::Env(m) => format!("env.{m:?}").to_lowercase(),
-        Op::Path(m) => format!("path.{m:?}").to_lowercase(),
-        Op::Random(m) => format!("random.{m:?}").to_lowercase(),
+        Op::Sys(h) => format!("sys.{}", h.name()),
         Op::ToDict(t) => format!("todict.{t}"),
         Op::Infer(m) => format!("infer.{m:?}").to_lowercase(),
-        Op::Http(m, unix) => {
-            format!("{}.{m:?}", if *unix { "uhttp" } else { "http" }).to_lowercase()
-        }
-        Op::UhttpStream(t) => typed("uhttp.stream", t),
         Op::Native(c) => format!("native {} -> {}", c.display, c.ret),
         Op::Fail(m) => format!("fail {m:?}"),
         Op::Await(t) => typed("await", t),

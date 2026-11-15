@@ -12,6 +12,8 @@ fn compile(src: &str) -> Result<(), String> {
     let tokens = lexer::tokenize(src).map_err(|e| e.to_string())?;
     let program = parser::parse(tokens).map_err(|e| e.to_string())?;
     let mut tp = resolve::resolve(program).map_err(|e| e.to_string())?;
+    // A std package written in Jade is loaded the way a build loads it.
+    tp.stmts = crate::aot::imports::namespace_program(tp.stmts).map_err(|e| e.to_string())?;
     crate::typechecker::infer::check_members(&tp).map_err(|e| e.to_string())?;
     resolve::fill_struct_literal_defaults(&mut tp).map_err(|e| e.to_string())?;
     let typed = crate::typechecker::infer::check_program(&tp).map_err(|e| e.to_string())?;
@@ -502,4 +504,27 @@ fn a_pipe_whose_stage_writes_a_global_is_rejected_in_a_task() {
         "print(await work())\n",
     ));
     assert!(msg.contains("`two |> bump`, which writes a global"), "{msg}");
+}
+
+/// `random.shuffle` is Jade since 2.0.8, and the check reads library code like
+/// any other: shuffling a global from a task is a race, named by the function
+/// a program calls, while shuffling what the task built is not.
+#[test]
+fn shuffling_a_global_from_a_task_is_refused() {
+    let e = rejection(
+        r#"
+        use std::random
+        let deck = [1, 2, 3]
+        async fn deal() {
+            random.shuffle(deck)
+            return 0
+        }
+        await deal()
+        "#,
+    );
+    assert!(e.contains("`random.shuffle`"), "should name the library function: {e}");
+    let own = compile(
+        "use std::random\nasync fn deal() {\n    let d = [1, 2, 3]\n    random.shuffle(d)\n    return random.choice(d)\n}\nprint(await deal())\n",
+    );
+    assert!(own.is_ok(), "a task's own array is its own: {own:?}");
 }

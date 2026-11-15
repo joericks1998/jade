@@ -4,7 +4,9 @@
 
 This is the table of contents for everything a Jade program can call without writing it. It owns three things: the `Package` struct, the `PACKAGES` table listing every `std/*` package, and the lookups the type checkers and MIR lowering use to ask what exists.
 
-The packages themselves are *flat top-level modules*, such as `src/array/`, `src/math/`, and `src/string/`, rather than children of this directory. Each one declares its function names, and for a primitive's methods their names. None of them runs anything. `typechecker/infer/builtins.rs` gives every built-in call its static type, `mir/packages.rs` and `mir/ops.rs` lower it to a MIR operation, and a file in `src/backend/` emits the code, into a program only when that program uses it: `math.rs` for `std::math`, `fs.rs` for `std::fs`, `tasks.rs` for the task controls, and so on.
+The packages themselves are *flat top-level modules*, such as `src/array/`, `src/bytes/`, and `src/string/`, rather than children of this directory. Each one declares its function names, and for a primitive's methods their names. None of them runs anything. `typechecker/infer/builtins.rs` gives every built-in call its static type, `mir/packages.rs` and `mir/ops.rs` lower it to a MIR operation, and a file in `src/backend/` emits the code, into a program only when that program uses it: `bytes.rs` for `std::bytes`, `tasks.rs` for the task controls, and so on.
+
+Since 2.0.8 every other std package is written in Jade: `std::path`, `std::time`, `std::math`, `std::env`, `std::fs`, `std::sh`, `std::random`, `std::http` and `std::uhttp` are each a `.jde` module in [`src/lib/`](../lib/README.md), whose registry is `crate::stdlib`. Such a package is not in `PACKAGES`, and nothing about it is written here: its functions are typed from their bodies and compile like a program's own. What is left in `PACKAGES` is the value types' own packages, `string`, `array`, `dict` and `bytes`, whose functions are the values' methods, and `__infer`, the inference prelude's. `is_std_package`, `std_global_name` and `std_functions` answer for both kinds, for the per-file pass, which binds a package's name and refuses a function it does not have, and the import walk, which treats both as built in.
 
 Until v1.4.8 each package also held a second implementation for the bytecode VM, as `BuiltinFn` values over `VmValue`. v2 removed the VM, and with it those bodies, their tests, and the `seed_globals`, `NativeFnId` and `PrimType` machinery that served it. What is left is names. Until 2.0.6 each package also registered its name, and each primitive its method types, with the per-file pass; that pass no longer types anything, and binds a package's `global_name` itself when a `use` names it.
 
@@ -21,7 +23,7 @@ Two things to keep in mind when adding a function:
 
 ## What each file does
 
-- *`mod.rs`* holds the `Package` struct, `PACKAGES`, `primitive_method_arity`, `primitive_method_tables`, `global_names`, the package lookups, and `register_core_names`, which binds the globals in the per-file pass's name table.
+- *`mod.rs`* holds the `Package` struct, `PACKAGES`, `primitive_method_arity`, `primitive_method_tables`, `global_names`, the package lookups, the lookups that answer for both kinds of std package, and `register_core_names`, which binds the globals in the per-file pass's name table.
 - *`tests.rs`* holds the registry tests, including the tripwire that every primitive method declares an arity.
 
 ## The packages it registers
@@ -32,17 +34,12 @@ Two things to keep in mind when adding a function:
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods, such as `upper`, `split`, and `trim`. |
 | `src/array/` | `std/array` | Its package functions take the *functional* style, so `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |
-| `src/math/` | `std/math` | |
-| `src/fs/` | `std/fs` | Output is tainted (see `src/backend/fs.rs`). |
 | `src/future/` | *(none)* | Supplies the `future` primitive methods, `ready` and `cancel`. No package form: see that module's README for why. |
-| `src/path/` | `std/path` | |
-| `src/env/` | `std/env` | |
-| `src/time/` | `std/time` | |
-| `src/random/` | `std/random` | |
-| `src/sh/` | `std/sh` | Refuses tainted command strings. |
-| `src/http/` | `std/http` | TCP HTTP; returns `{status, body}`. |
-| `src/uhttp/` | `std/uhttp` | The same API over a Unix socket, addressed as `unix://<sock>:<path>`, plus `uhttp.stream`. |
+| `src/bytes/` | `std/bytes` | Also supplies the `bytes` primitive methods. |
+| `src/infer/` | `std/__infer` | The inference prelude's own package, which only the compiler's Jade can name. |
 | `src/stdio/` | *(internal)* | Not a Jade package. It provides stdout writes that survive a closed pipe, so `jade check app.jde \| head -3` does not panic. |
+
+`std/math`, `std/path` and `std/time` left this table in 2.0.8, when each became a `.jde` module in `src/lib/`, and their directories went with them. `std/env`, `std/fs`, `std/sh`, `std/random`, `std/http` and `std/uhttp` followed in the same release, with `src/env/`, `src/fs/`, `src/sh/`, `src/random/`, `src/http/` and `src/uhttp/`. Their records, `HttpResponse`, `HttpBytesResponse` and `ShOutput`, are classes their `.jde` declares, and no longer built into every program.
 
 `src/json/` and `std/json` were removed in 2.0.7: JSON is read with `toDict(text)` and written with `toString(d)`, both globals. A `use std::json` is refused by the per-file pass in `typechecker/resolve.rs`, which names the two.
 
@@ -50,9 +47,11 @@ Two things to keep in mind when adding a function:
 
 *Depends on:* `typechecker/resolve` for `Names`, the table `register_core_names` fills.
 
-*Used by:* `typechecker/resolve.rs`, which binds the global names and a package's name, and checks `math.round`-style field access against a package's `fns`. `typechecker/infer/`, the static checker, which reads `all_packages` to know every package name and the method lists, such as `string::STR_METHODS`, to know which methods a primitive has. `mir/lower.rs`, which reads `all_packages` to tell a package name from a value. `project/imports.rs` and `aot/imports.rs`, which tell a `std/*` import from a file import.
+*Used by:* `typechecker/resolve.rs`, which binds the global names and a package's name, and checks `fs.read`-style field access against a package's functions, of either kind. `typechecker/infer/`, the static checker, which reads `all_packages` to know every package name and the method lists, such as `string::STR_METHODS`, to know which methods a primitive has. `mir/lower.rs`, which reads `all_packages` to tell a package name from a value. `project/imports.rs` and `aot/imports.rs`, which tell a `std/*` import from a file import.
 
 ## Adding a built-in
+
+Write it in Jade if it can be: a function in a package's `.jde` in `src/lib/`, with a hook for what Jade cannot do. `src/lib/README.md` says how. What follows is for a function the backend writes.
 
 1. Add its name to the package's `fns` list, or to `core::GLOBAL_NAMES` for a global.
 2. *Type it, lower it, and emit it, in the same change.* A package function gets its static type in `package_call` in `typechecker/infer/builtins.rs`, its MIR operation in `mir/packages.rs`, and its code in the matching file in `src/backend/`. A bare global goes in `is_builtin_value` and `builtin_result` in the same checker file, and in `builtin` in `mir/ops.rs`. A name with no checker arm is refused as `std/<pkg> has no function '<name>'`, and one with no MIR arm stops with `jade cannot compile std/<pkg> yet`. `jade check` runs both, so either gap shows up there rather than when a program tries to ship.

@@ -227,6 +227,14 @@ pub struct Checker<'a> {
     force_eq: bool,
     error: Option<JadeError>,
     out: Typed,
+    /// Where a program first calls each instance of library code, and what it
+    /// called, such as `path.join(int, int)`. An instance one library function
+    /// makes for another takes its caller's.
+    lib_sites: HashMap<InstKey, (Span, String)>,
+    /// The call site of the library instance being checked, if it is one. A
+    /// type error inside library code is reported there, naming the function,
+    /// since the program's call is what made it.
+    lib_site: Option<(Span, String)>,
 }
 
 /// Purpose: This function checks a whole merged program.
@@ -292,6 +300,8 @@ impl<'a> Checker<'a> {
             force_eq: false,
             error: None,
             out: Typed::default(),
+            lib_sites: HashMap::new(),
+            lib_site: None,
         }
     }
 
@@ -309,6 +319,9 @@ impl<'a> Checker<'a> {
         for pkg in crate::builtins::all_packages() {
             self.packages.insert(pkg.global_name.to_string());
         }
+        // Only library code can name the hooks; the per-file pass refuses a
+        // program that does.
+        self.packages.insert(crate::stdlib::SYS.to_string());
         for s in stmts {
             match s {
                 Stmt::FnDef { name, params, body, decorators, .. }
@@ -768,6 +781,13 @@ impl<'a> Checker<'a> {
                 Instance { params: args, ret, elem, slots: HashMap::new(), checked_in: 0 },
             );
         }
+        if is_library_fn(&func) && !self.lib_sites.contains_key(&key) {
+            let site = self.lib_site.clone().unwrap_or_else(|| {
+                let args: Vec<String> = key.args.iter().map(|t| t.to_string()).collect();
+                (span, format!("{}({})", self.fn_name(&func), args.join(", ")))
+            });
+            self.lib_sites.insert(key.clone(), site);
+        }
         if self.instances[&key].checked_in != self.pass {
             self.worklist.push(key.clone());
         }
@@ -831,8 +851,22 @@ impl<'a> Checker<'a> {
     fn fn_display(&self, f: &FnKey) -> String {
         match f {
             FnKey::Main => "the program".to_string(),
-            FnKey::Named(n) => format!("'{}'", ty::display_name(n)),
-            FnKey::Method(t, n) => format!("'{}.{}'", ty::display_name(t), n),
+            _ => format!("'{}'", self.fn_name(f)),
+        }
+    }
+
+    /// Purpose: This function names a function or method, a library one as a
+    /// program calls it.
+    ///
+    /// Inputs:
+    /// - `f`: the code.
+    ///
+    /// Outputs: such as `path.join` or `Dog.speak`.
+    fn fn_name(&self, f: &FnKey) -> String {
+        match f {
+            FnKey::Main => "the program".to_string(),
+            FnKey::Named(n) => callable_display(n),
+            FnKey::Method(t, n) => format!("{}.{}", ty::display_name(t), n),
         }
     }
 
@@ -845,6 +879,10 @@ impl<'a> Checker<'a> {
     /// Outputs: none.
     fn report(&mut self, span: Span, message: String) {
         if self.final_pass && self.error.is_none() {
+            let (span, message) = match &self.lib_site {
+                Some((site, called)) => (*site, format!("in {called}: {message}")),
+                None => (span, message),
+            };
             self.error = Some(JadeError::TypeError { message, span });
         }
     }
@@ -917,6 +955,130 @@ impl<'a> Checker<'a> {
             self.out.fields.insert(k, r);
         }
     }
+}
+
+/// Purpose: This function names the type a type test on a built-in type asks
+/// about, as in `x is int`.
+///
+/// Inputs:
+/// - `name`: the name after `is`.
+///
+/// Outputs: the type, or `None` for a name that is not a built-in type.
+pub fn builtin_test_type(name: &str) -> Option<Ty> {
+    Some(match name {
+        "int" => Ty::Int,
+        "float" => Ty::Float,
+        "str" => Ty::Str,
+        "bool" => Ty::Bool,
+        "char" => Ty::Char,
+        "bytes" => Ty::Bytes,
+        "nil" => Ty::Nil,
+        _ => return None,
+    })
+}
+
+/// Purpose: This function says whether an instance's code is the std
+/// library's, written in Jade under `src/lib/`.
+///
+/// Library code may test a value's built-in type with `x is int`, which the
+/// checker answers for each instance it checks, so a function such as
+/// `math.abs` keeps one branch for an int and another for a float. A program's
+/// own code cannot, so its language stays what it was.
+///
+/// Inputs:
+/// - `key`: the code.
+///
+/// Outputs: true for a library function or a library class's method.
+pub fn is_library_fn(key: &FnKey) -> bool {
+    match key {
+        FnKey::Named(n) | FnKey::Method(n, _) => crate::stdlib::is_library_name(n),
+        FnKey::Main => false,
+    }
+}
+
+/// What a condition made of built-in type tests comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticTest {
+    /// The condition is not made of type tests alone, or one of them asks
+    /// whether a `T?` holds its value, which only the running program knows.
+    NotOne,
+    /// It is, but a type it tests is not known yet.
+    Unknown,
+    /// It is, and this is its answer.
+    Known(bool),
+}
+
+/// Purpose: This function answers one built-in type test from the tested
+/// value's type: `x is int` is true for an int and false for a float, and is
+/// asked at run time for an `int?`, as `x is nil` is for any `T?`.
+///
+/// Inputs:
+/// - `t`: the value's type.
+/// - `want`: the type the test names.
+///
+/// Outputs: the answer, `NotOne` when the program must ask it while running.
+pub fn type_test(t: &Ty, want: &Ty) -> StaticTest {
+    match t {
+        t if t == want => StaticTest::Known(true),
+        Ty::Opt(inner) if **inner == *want || *want == Ty::Nil => StaticTest::NotOne,
+        _ => StaticTest::Known(false),
+    }
+}
+
+/// Purpose: This function works out a condition made of built-in type tests,
+/// `x is int`, joined by `and`, `or` and `not`, from the types of the
+/// variables it tests. Each instance has one type per variable, so such a
+/// condition has one answer per instance, and an `if` on it keeps one branch.
+///
+/// Inputs:
+/// - `e`: the condition.
+/// - `type_of`: the type of a tested variable, given its identifier node, or
+///   `None` when it is not known yet.
+///
+/// Outputs: the answer, as [`StaticTest`] says.
+pub fn static_test(e: &Expr, type_of: &mut dyn FnMut(&Expr) -> Option<Ty>) -> StaticTest {
+    use crate::frontend::ast::{BinOpKind, UnaryOpKind};
+    match &e.kind {
+        ExprKind::Is { value, class } => {
+            let (Some(want), ExprKind::Identifier(_)) = (builtin_test_type(class), &value.kind)
+            else {
+                return StaticTest::NotOne;
+            };
+            match type_of(value) {
+                Some(t) => type_test(&t, &want),
+                None => StaticTest::Unknown,
+            }
+        }
+        ExprKind::UnaryOp { op: UnaryOpKind::Not, operand } => {
+            match static_test(operand, type_of) {
+                StaticTest::Known(b) => StaticTest::Known(!b),
+                other => other,
+            }
+        }
+        ExprKind::BinOp { op: op @ (BinOpKind::And | BinOpKind::Or), left, right } => {
+            let is_and = matches!(op, BinOpKind::And);
+            match (static_test(left, type_of), static_test(right, type_of)) {
+                (StaticTest::NotOne, _) | (_, StaticTest::NotOne) => StaticTest::NotOne,
+                (StaticTest::Known(a), _) if a != is_and => StaticTest::Known(a),
+                (_, StaticTest::Known(b)) if b != is_and => StaticTest::Known(b),
+                (StaticTest::Known(_), StaticTest::Known(_)) => StaticTest::Known(is_and),
+                _ => StaticTest::Unknown,
+            }
+        }
+        _ => StaticTest::NotOne,
+    }
+}
+
+/// Purpose: This function names a function the way a message should: a
+/// library function as a program calls it, `path.join`, and any other by its
+/// own name.
+///
+/// Inputs:
+/// - `name`: the function's name, possibly mangled.
+///
+/// Outputs: the name to show.
+pub(crate) fn callable_display(name: &str) -> String {
+    crate::stdlib::display(name).unwrap_or_else(|| ty::display_name(name).to_string())
 }
 
 /// Purpose: This function gives a struct field default's type when it is a
