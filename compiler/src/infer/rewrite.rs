@@ -21,8 +21,8 @@
 //! A dereference into a class, `City(?p)`, or through a grammar, `g(?p)`, is
 //! left as it is, and MIR names it as not compiled yet.
 
+use crate::frontend::ast::{CatchArm, Expr, ExprKind, FStrPart, Stmt, StructFieldDef};
 use crate::frontend::error::Span;
-use crate::typechecker::tir::{JadeType, TCatchArm, TExpr, TExprKind, TFStrPart, TStmt};
 
 /// The namespace id the prelude's names are mangled with, as `reply$<id>`.
 /// Far above any id the import pass hands out, so the two never meet.
@@ -39,10 +39,10 @@ pub const PRELUDE: &str = include_str!("prelude.jde");
 ///
 /// Outputs: the program, unchanged when it dereferences no prompt, or a message
 /// when the prelude does not compile, which is a compiler bug.
-pub fn inject(mut stmts: Vec<TStmt>) -> Result<Vec<TStmt>, String> {
+pub fn inject(mut stmts: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
     let mut found = false;
     for s in &mut stmts {
-        stmt(s, &mut found);
+        stmt(s, &mut found)?;
     }
     if !found {
         return Ok(stmts);
@@ -60,11 +60,13 @@ pub fn inject(mut stmts: Vec<TStmt>) -> Result<Vec<TStmt>, String> {
 /// - `stmts`: the program.
 ///
 /// Outputs: whether any `?p` appears in it.
-pub fn dereferences(stmts: &[TStmt]) -> bool {
+pub fn dereferences(stmts: &[Stmt]) -> bool {
     let mut copy = stmts.to_vec();
     let mut found = false;
     for s in &mut copy {
-        stmt(s, &mut found);
+        if stmt(s, &mut found).is_err() {
+            return found;
+        }
     }
     found
 }
@@ -88,8 +90,8 @@ fn target(output_type: Option<&str>) -> Option<&'static str> {
 }
 
 /// Purpose: This function builds an expression node.
-fn node(kind: TExprKind, span: Span) -> TExpr {
-    TExpr { kind, ty: JadeType::Unknown, span }
+fn node(kind: ExprKind, span: Span) -> Expr {
+    Expr::new(kind, span)
 }
 
 /// Purpose: This function rewrites one expression and everything inside it.
@@ -98,105 +100,118 @@ fn node(kind: TExprKind, span: Span) -> TExpr {
 /// - `e`: the expression.
 /// - `found`: set when a dereference is seen.
 ///
-/// Outputs: none.
-fn expr(e: &mut TExpr, found: &mut bool) {
+/// Outputs: `Ok(())`, or an internal error for a pipe the per-file pass did
+/// not flatten.
+fn expr(e: &mut Expr, found: &mut bool) -> Result<(), String> {
     match &mut e.kind {
-        TExprKind::PromptDeref { expr: inner, output_type, grammar_expr } => {
-            expr(inner, found);
+        ExprKind::PromptDeref { expr: inner, output_type, grammar_expr, .. } => {
+            expr(inner, found)?;
             if let Some(g) = grammar_expr {
-                expr(g, found);
+                expr(g, found)?;
             }
             *found = true;
             if grammar_expr.is_some() {
-                return;
+                return Ok(());
             }
-            let Some(f) = target(output_type.as_deref()) else { return };
+            let Some(f) = target(output_type.as_deref()) else { return Ok(()) };
             let span = e.span;
             let text = text_of(inner, span);
-            e.kind = TExprKind::Call {
-                callee: Box::new(node(TExprKind::Identifier(format!("{f}${PRELUDE_ID}")), span)),
+            e.kind = ExprKind::Call {
+                callee: Box::new(node(ExprKind::Identifier(format!("{f}${PRELUDE_ID}")), span)),
                 args: vec![text],
                 kwargs: Vec::new(),
             };
         }
-        TExprKind::Is { value, .. } => expr(value, found),
-        TExprKind::Call { callee, args, kwargs } => {
-            expr(callee, found);
+        ExprKind::Is { value, .. } => expr(value, found)?,
+        ExprKind::Call { callee, args, kwargs } => {
+            expr(callee, found)?;
             for a in args {
-                expr(a, found);
+                expr(a, found)?;
             }
             for (_, v) in kwargs {
-                expr(v, found);
+                expr(v, found)?;
             }
         }
-        TExprKind::BinOp { left, right, .. } => {
-            expr(left, found);
-            expr(right, found);
+        ExprKind::BinOp { left, right, .. } => {
+            expr(left, found)?;
+            expr(right, found)?;
         }
-        TExprKind::UnaryOp { operand, .. } => expr(operand, found),
-        TExprKind::StructLiteral { base, fields, .. } => {
+        ExprKind::UnaryOp { operand, .. } => expr(operand, found)?,
+        ExprKind::StructLiteral { base, fields, .. } => {
             if let Some(b) = base {
-                expr(b, found);
+                expr(b, found)?;
             }
             for (_, v, _) in fields {
-                expr(v, found);
+                expr(v, found)?;
             }
         }
-        TExprKind::FieldAccess { object, .. } => expr(object, found),
-        TExprKind::Index { object, index } => {
-            expr(object, found);
-            expr(index, found);
+        ExprKind::FieldAccess { object, .. } => expr(object, found)?,
+        ExprKind::Index { object, index } => {
+            expr(object, found)?;
+            expr(index, found)?;
         }
-        TExprKind::Array { elements } => {
+        ExprKind::Array { elements } => {
             for x in elements {
-                expr(x, found);
+                expr(x, found)?;
             }
         }
-        TExprKind::FStr { parts } => {
+        ExprKind::FStr { parts } => {
             for p in parts {
-                if let TFStrPart::Expr(x) = p {
-                    expr(x, found);
+                if let FStrPart::Expr(x) = p {
+                    expr(x, found)?;
                 }
             }
         }
-        TExprKind::Dict { entries } => {
+        ExprKind::Dict { entries } => {
             for (k, v) in entries {
-                expr(k, found);
-                expr(v, found);
+                expr(k, found)?;
+                expr(v, found)?;
             }
         }
-        TExprKind::Await { expr: x } | TExprKind::PromptLiteral { body: x } => expr(x, found),
+        ExprKind::Await { expr: x } | ExprKind::PromptLiteral { body: x } => expr(x, found)?,
         // `?p |> f`: the source becomes the prelude's generator of the reply's
         // pieces, so the pipe calls `f` on each as the model writes it.
-        TExprKind::Pipe { source, hoisted, body, .. } => {
+        ExprKind::Pipe { source, hoisted, body, .. } => {
             match &mut source.kind {
-                TExprKind::PromptDeref { expr: inner, output_type: None, grammar_expr: None } => {
-                    expr(inner, found);
+                ExprKind::PromptDeref {
+                    expr: inner,
+                    output_type: None,
+                    grammar_expr: None,
+                    ..
+                } => {
+                    expr(inner, found)?;
                     *found = true;
                     let span = source.span;
-                    source.kind = TExprKind::Call {
+                    source.kind = ExprKind::Call {
                         callee: Box::new(node(
-                            TExprKind::Identifier(format!("reply_pieces${PRELUDE_ID}")),
+                            ExprKind::Identifier(format!("reply_pieces${PRELUDE_ID}")),
                             span,
                         )),
                         args: vec![text_of(inner, span)],
                         kwargs: Vec::new(),
                     };
-                    source.ty = JadeType::Stream(Box::new(JadeType::Str));
                 }
-                _ => expr(source, found),
+                _ => expr(source, found)?,
             }
             for (_, v) in hoisted {
-                expr(v, found);
+                expr(v, found)?;
             }
-            expr(body, found);
+            expr(body, found)?;
         }
-        TExprKind::Integer(_)
-        | TExprKind::Float(_)
-        | TExprKind::Bool(_)
-        | TExprKind::Str(_)
-        | TExprKind::Identifier(_) => {}
+        ExprKind::RawPipe { .. } => {
+            return Err(format!(
+                "[{}:{}] internal compiler error: a pipe reached the inference rewrite before \
+                 the per-file pass flattened it",
+                e.span.line, e.span.col
+            ));
+        }
+        ExprKind::Integer(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::Identifier(_) => {}
     }
+    Ok(())
 }
 
 /// Purpose: This function builds `__infer.text(p)`, a prompt's text.
@@ -206,12 +221,12 @@ fn expr(e: &mut TExpr, found: &mut bool) {
 /// - `span`: where.
 ///
 /// Outputs: the call.
-fn text_of(prompt: &TExpr, span: Span) -> TExpr {
+fn text_of(prompt: &Expr, span: Span) -> Expr {
     node(
-        TExprKind::Call {
+        ExprKind::Call {
             callee: Box::new(node(
-                TExprKind::FieldAccess {
-                    object: Box::new(node(TExprKind::Identifier("__infer".into()), span)),
+                ExprKind::FieldAccess {
+                    object: Box::new(node(ExprKind::Identifier("__infer".into()), span)),
                     field: "text".into(),
                 },
                 span,
@@ -224,65 +239,77 @@ fn text_of(prompt: &TExpr, span: Span) -> TExpr {
 }
 
 /// Purpose: This function rewrites every expression in a block.
-fn block(stmts: &mut [TStmt], found: &mut bool) {
+fn block(stmts: &mut [Stmt], found: &mut bool) -> Result<(), String> {
     for s in stmts {
-        stmt(s, found);
+        stmt(s, found)?;
     }
+    Ok(())
 }
 
 /// Purpose: This function rewrites every expression in one statement.
-fn stmt(s: &mut TStmt, found: &mut bool) {
+fn stmt(s: &mut Stmt, found: &mut bool) -> Result<(), String> {
     match s {
-        TStmt::Let { value, .. }
-        | TStmt::Assign { value, .. }
-        | TStmt::Yield { value, .. }
-        | TStmt::FieldAssign { value, .. }
-        | TStmt::PromptDecl { body: value, .. }
-        | TStmt::Raise { value, .. }
-        | TStmt::Expr(value) => expr(value, found),
-        TStmt::Return { value, .. } => {
-            if let Some(v) = value {
-                expr(v, found);
-            }
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Yield { value, .. }
+        | Stmt::FieldAssign { value, .. }
+        | Stmt::PromptDecl { body: value, .. }
+        | Stmt::Raise { value, .. }
+        | Stmt::Expr(value) => expr(value, found),
+        Stmt::Return { value, .. } => match value {
+            Some(v) => expr(v, found),
+            None => Ok(()),
+        },
+        Stmt::IndexAssign { index, value, .. } => {
+            expr(index, found)?;
+            expr(value, found)
         }
-        TStmt::IndexAssign { index, value, .. } => {
-            expr(index, found);
-            expr(value, found);
-        }
-        TStmt::FnDef { params, body, .. } | TStmt::AsyncFnDef { params, body, .. } => {
+        Stmt::FnDef { params, body, .. } | Stmt::AsyncFnDef { params, body, .. } => {
             for (_, d) in params {
                 if let Some(d) = d {
-                    expr(d, found);
+                    expr(d, found)?;
                 }
             }
-            block(body, found);
+            block(body, found)
         }
-        TStmt::If { condition, then_body, else_body, .. } => {
-            expr(condition, found);
-            block(then_body, found);
-            if let Some(b) = else_body {
-                block(b, found);
+        Stmt::If { condition, then_body, else_body, .. } => {
+            expr(condition, found)?;
+            block(then_body, found)?;
+            match else_body {
+                Some(b) => block(b, found),
+                None => Ok(()),
             }
         }
-        TStmt::While { condition, body, .. } => {
-            expr(condition, found);
-            block(body, found);
+        Stmt::While { condition, body, .. } => {
+            expr(condition, found)?;
+            block(body, found)
         }
-        TStmt::For { iterable, body, .. } => {
-            expr(iterable, found);
-            block(body, found);
+        Stmt::For { iterable, body, .. } => {
+            expr(iterable, found)?;
+            block(body, found)
         }
-        TStmt::ExtendBlock { methods, .. } => block(methods, found),
-        TStmt::TryCatch { body, arms, .. } => {
-            block(body, found);
-            for TCatchArm { body, .. } in arms {
-                block(body, found);
+        Stmt::ExtendBlock { methods, .. } => block(methods, found),
+        Stmt::TryCatch { body, arms, .. } => {
+            block(body, found)?;
+            for CatchArm { body, .. } in arms {
+                block(body, found)?;
             }
+            Ok(())
         }
-        TStmt::Break { .. }
-        | TStmt::Continue { .. }
-        | TStmt::StructDef { .. }
-        | TStmt::Use { .. }
-        | TStmt::FromUse { .. } => {}
+        // A copy-with literal may take a field's default from the class when
+        // its base lacks the field, so a default is rewritten like any value.
+        Stmt::StructDef { fields, .. } => {
+            for f in fields {
+                if let StructFieldDef::Let { default, .. }
+                | StructFieldDef::Prompt { default, .. } = f
+                {
+                    expr(default, found)?;
+                }
+            }
+            Ok(())
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Use { .. } | Stmt::FromUse { .. } => {
+            Ok(())
+        }
     }
 }

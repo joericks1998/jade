@@ -2,10 +2,10 @@ use std::{fs, path::Path, process};
 
 use crate::{
     frontend::{lexer, parser},
-    typechecker::type_infer,
+    typechecker::resolve,
 };
 
-/// Checks that run after type inference, on both the cached and uncached paths.
+/// Checks that run after the per-file pass, on both the cached and uncached paths.
 ///
 /// Two of them. The import walk confirms every `use` names something that
 /// exists, and `aot::would_build` runs the whole build short of LLVM: the
@@ -17,9 +17,9 @@ use crate::{
 /// depends on. The import walk was missing until v1.1.33, and its absence made
 /// that claim false for any file with an import: `use totally_made_up_module`
 /// reported `ok` and then failed at run time.
-fn post_tir_checks(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Result<(), String> {
-    check_imports(tprogram, path)?;
-    crate::aot::would_build(tprogram, Some(Path::new(path)))
+fn post_checks(program: &crate::frontend::ast::Program, path: &str) -> Result<(), String> {
+    check_imports(program, path)?;
+    crate::aot::would_build(program, Some(Path::new(path)))
 }
 
 /// Resolve every import reachable from this file, without loading any of them.
@@ -34,14 +34,14 @@ fn post_tir_checks(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> 
 /// has not been populated yet will therefore report its dependency imports as
 /// unresolved, which is accurate: they cannot be loaded until `jade pkg install`
 /// runs.
-fn check_imports(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Result<(), String> {
-    use crate::typechecker::tir::TStmt;
+fn check_imports(program: &crate::frontend::ast::Program, path: &str) -> Result<(), String> {
+    use crate::frontend::ast::Stmt;
 
-    let paths: Vec<_> = tprogram
+    let paths: Vec<_> = program
         .stmts
         .iter()
         .filter_map(|s| match s {
-            TStmt::Use { path, span, .. } | TStmt::FromUse { path, span, .. } => {
+            Stmt::Use { path, span, .. } | Stmt::FromUse { path, span, .. } => {
                 Some((path.clone(), *span))
             }
             _ => None,
@@ -93,10 +93,12 @@ fn check_imports(tprogram: &crate::typechecker::tir::TProgram, path: &str) -> Re
 
 /// Run `jade check <path>`: type-check a source file without executing it.
 ///
-/// Cache strategy:
-///   L2 hit (tir.bin)  → skip everything, file previously passed check.
-///   L1 hit (ast.bin)  → skip lex + parse, still run type inference.
-///   Full miss         → lex → parse → type-check → write L1 + L2 caches.
+/// Cache strategy: the cache holds the file's tree after the per-file pass,
+/// keyed by the file's hash.
+///   Hit   → skip lex, parse and the per-file pass.
+///   Miss  → lex → parse → per-file pass → write the cache.
+/// Either way the checks after it run: the import walk and the whole build
+/// short of LLVM.
 pub fn run_check(path: &str) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -108,25 +110,13 @@ pub fn run_check(path: &str) {
 
     let hash = crate::cache::file_hash(Path::new(path));
 
-    // L2: cached TIR means lex + parse + infer already succeeded for this exact
-    // source. It does NOT mean the file still passes: the cache key is the file
-    // hash, so an entry written before a new check existed would skip that check
-    // forever. Re-run the post-TIR checks against the cached tree rather than
-    // returning early — they are cheap next to the stages the cache saves.
-    if let Some(ref h) = hash
-        && let Some(tprogram) = crate::cache::read_tir_cache(h)
-    {
-        if let Err(e) = post_tir_checks(&tprogram, path) {
-            eprintln!("{}: {}", path, e);
-            process::exit(1);
-        }
-        println!("{}: ok", path);
-        return;
-    }
-
-    // L1: try to skip lex + parse.
-    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
-    let program = match cached_ast {
+    // A cached tree means lex, parse and the per-file pass already succeeded
+    // for this exact source. It does NOT mean the file still passes: the cache
+    // key is the file hash, so an entry written before a new check existed
+    // would skip that check forever. The later checks run against the cached
+    // tree rather than returning early — they are cheap next to the stages the
+    // cache saves.
+    let program = match hash.as_ref().and_then(crate::cache::read_ast_cache) {
         Some(p) => p,
         None => {
             let tokens = match lexer::tokenize(&source) {
@@ -136,37 +126,30 @@ pub fn run_check(path: &str) {
                     process::exit(1);
                 }
             };
-            let p = match parser::parse(tokens) {
+            let parsed = match parser::parse(tokens) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}: parse error: {}", path, e);
                     process::exit(1);
                 }
             };
+            let program = match resolve::resolve(parsed) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("{}: {}", path, e);
+                    process::exit(1);
+                }
+            };
             if let Some(ref h) = hash {
-                crate::cache::write_ast_cache(h, path, &p);
+                crate::cache::write_ast_cache(h, path, &program);
             }
-            p
+            program
         }
     };
 
-    // Type-check.
-    let tprogram = match type_infer::infer(program) {
-        Ok(tp) => tp,
-        Err(e) => {
-            eprintln!("{}: {}", path, e);
-            process::exit(1);
-        }
-    };
-
-    if let Err(e) = post_tir_checks(&tprogram, path) {
+    if let Err(e) = post_checks(&program, path) {
         eprintln!("{}: {}", path, e);
         process::exit(1);
-    }
-
-    // Write L2 cache only on success.
-    if let Some(ref h) = hash {
-        crate::cache::write_tir_cache(h, path, &tprogram);
     }
 
     println!("{}: ok", path);
@@ -188,12 +171,12 @@ mod tests {
         let source = fs::read_to_string(path).map_err(|e| format!("unreadable: {e}"))?;
         let tokens = lexer::tokenize(&source).map_err(|e| format!("lexer error: {e}"))?;
         let program = parser::parse(tokens).map_err(|e| format!("parse error: {e}"))?;
-        let tprogram = type_infer::infer(program).map_err(|e| format!("{e}"))?;
-        // The same passes `jade check` runs after inference, including the
-        // whole-program static types, so a fixture is judged the way the CLI
-        // judges it.
-        super::post_tir_checks(&tprogram, &path.to_string_lossy())?;
-        check_imports(&tprogram, &path.to_string_lossy())
+        let program = resolve::resolve(program).map_err(|e| format!("{e}"))?;
+        // The same passes `jade check` runs after the per-file pass, including
+        // the whole-program static types, so a fixture is judged the way the
+        // CLI judges it.
+        super::post_checks(&program, &path.to_string_lossy())?;
+        check_imports(&program, &path.to_string_lossy())
     }
 
     /// Every `.jde` file under `examples/`, sorted for deterministic output.

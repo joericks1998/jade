@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is the `std::http` package for HTTP over TCP, as the checker sees it. It is thin on purpose. It names the package's seven functions and registers the `http` global's type, and nothing about how a request is actually made lives in this directory. Until v1.4.8 it also held the VM's surface, which validated arguments, called into v1's runtime, and turned the result into a `VmValue`.
+This is the `std::http` package for HTTP over TCP, as the checker sees it. It is thin on purpose. It names the package's seven functions, and nothing about how a request is actually made lives in this directory. The per-file pass binds the `http` name when a `use` names the package. Until v1.4.8 it also held the VM's surface, which validated arguments, called into v1's runtime, and turned the result into a `VmValue`.
 
 ## Why it is only a surface
 

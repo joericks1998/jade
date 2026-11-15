@@ -16,10 +16,10 @@ use crate::frontend::error::JadeError;
 fn lower(src: &str) -> Result<Program, JadeError> {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
-    let mut tir = crate::typechecker::type_infer::infer(program).expect("infer");
-    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tir).expect("defaults");
-    let typed = crate::typechecker::infer::check_program(&tir).expect("check");
-    lower_program(&tir, &typed)
+    let mut tree = crate::typechecker::resolve::resolve(program).expect("resolve");
+    crate::typechecker::resolve::fill_struct_literal_defaults(&mut tree).expect("defaults");
+    let typed = crate::typechecker::infer::check_program(&tree).expect("check");
+    lower_program(&tree, &typed)
 }
 
 /// Purpose: This function lowers a program that must lower and prints it.

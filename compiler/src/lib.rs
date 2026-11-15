@@ -42,8 +42,8 @@ pub mod project;
 /// in, cargo, and the description records read out of the built library.
 pub mod rustpkg;
 pub mod stdio;
-/// The type checker: `type_infer` types each file into TIR, and `infer` gives
-/// every value of the merged program one static type.
+/// The type checker: `resolve` rewrites each file's tree on its own, and
+/// `infer` gives every value of the merged program one static type.
 pub mod typechecker;
 
 // Native built-in packages (the `std/*` + core intrinsic registry).

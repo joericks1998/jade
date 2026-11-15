@@ -8,12 +8,12 @@ pub const MAX_NESTING_DEPTH: usize = 1000;
 
 /// The stack every compiler stage runs on.
 ///
-/// The parser, type inference and code generation all recurse over the source,
-/// and a debug build spends roughly 15 KB of stack per nesting level, so the
-/// 8 MiB of a main thread runs out well before [`MAX_NESTING_DEPTH`]. `main`
-/// runs the whole CLI on a thread of this size instead. Reserving address space
-/// costs nothing until it is touched: a 64-bit process does not commit stack
-/// pages it never writes.
+/// The parser, the per-file pass, the checker and code generation all recurse
+/// over the source, and a debug build spends roughly 15 KB of stack per nesting
+/// level, so the 8 MiB of a main thread runs out well before
+/// [`MAX_NESTING_DEPTH`]. `main` runs the whole CLI on a thread of this size
+/// instead. Reserving address space costs nothing until it is touched: a
+/// 64-bit process does not commit stack pages it never writes.
 #[cfg(debug_assertions)]
 pub const COMPILER_STACK_SIZE: usize = 3 * 1024 * 1024 * 1024;
 #[cfg(not(debug_assertions))]
@@ -109,9 +109,6 @@ pub enum JadeError {
 
     /// Called a function with the wrong number of arguments.
     ArityMismatch { expected: usize, got: usize, span: Span },
-
-    /// Tried to call a non-function value.
-    NotCallable { span: Span },
 
     /// `return` used outside of a function body.
     ReturnOutsideFunction { span: Span },
@@ -226,14 +223,8 @@ pub enum JadeError {
     /// Dict lookup used a key that does not exist.
     KeyNotFound { key: String, span: Span },
 
-    /// A `prompt` field's default or provided value is not a string.
-    PromptFieldNotStr { field: String, span: Span },
-
     /// A struct literal supplies the same field name more than once.
     DuplicateField { field: String, span: Span },
-
-    /// Type checker: an operator or construct received incompatible types.
-    TypeMismatch { expected: String, got: String, span: Span },
 
     /// `use "path"` used the removed quoted-string import form. Imports name a
     /// module (`use utils`, `use sub::helper`, `use std::math`), never a file path.
@@ -375,9 +366,6 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] wrong number of arguments: expected {}, got {}",
                 span.line, span.col, expected, got
             ),
-            JadeError::NotCallable { span } => {
-                write!(f, "[{}:{}] value is not callable", span.line, span.col)
-            }
             JadeError::YieldOutsideFunction { span } => write!(
                 f,
                 "[{}:{}] 'yield' outside a function — it appends to the stream a function produces, so there must be one",
@@ -543,20 +531,10 @@ impl std::fmt::Display for JadeError {
             JadeError::KeyNotFound { key, span } => {
                 write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key)
             }
-            JadeError::PromptFieldNotStr { field, span } => write!(
-                f,
-                "[{}:{}] prompt field '{}' requires a string value",
-                span.line, span.col, field
-            ),
             JadeError::DuplicateField { field, span } => write!(
                 f,
                 "[{}:{}] field '{}' is specified more than once in class literal",
                 span.line, span.col, field
-            ),
-            JadeError::TypeMismatch { expected, got, span } => write!(
-                f,
-                "[{}:{}] type mismatch: expected {}, got {}",
-                span.line, span.col, expected, got
             ),
             JadeError::QuotedImport { path, span } => {
                 let dotted = path.trim_end_matches(".jde").replace('/', "::");

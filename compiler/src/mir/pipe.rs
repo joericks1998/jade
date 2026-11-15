@@ -19,9 +19,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::lower::{FnDef, Fx, FxSink, Lowerer, Sink, addr, inst_label, internal};
 use super::*;
+use crate::frontend::ast::{Expr, ExprKind, FStrPart};
 use crate::frontend::error::{JadeError, Span};
 use crate::typechecker::infer::{InstKey, Target, display_type_name};
-use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -30,9 +30,9 @@ type Result<T> = std::result::Result<T, JadeError>;
 struct GenCall<'a> {
     key: InstKey,
     def: FnDef<'a>,
-    callee: &'a TExpr,
-    args: &'a [TExpr],
-    kwargs: &'a [(String, TExpr)],
+    callee: &'a Expr,
+    args: &'a [Expr],
+    kwargs: &'a [(String, Expr)],
 }
 
 impl<'a, 'l> Fx<'a, 'l> {
@@ -46,12 +46,12 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: the pipe's value and type.
     pub(super) fn pipe(
         &mut self,
-        e: &'a TExpr,
+        e: &'a Expr,
         et: &Ty,
-        source: &'a TExpr,
-        hoisted: &'a [(String, TExpr)],
+        source: &'a Expr,
+        hoisted: &'a [(String, Expr)],
         piece: &'a str,
-        body: &'a TExpr,
+        body: &'a Expr,
     ) -> Result<(Operand, Ty)> {
         let span = e.span;
         let streamed = self.l.streams.contains(&(self.key.clone(), addr(source)));
@@ -89,12 +89,12 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: the stream of what the stages gave.
     fn live_pipe(
         &mut self,
-        e: &'a TExpr,
+        e: &'a Expr,
         et: &Ty,
         call: GenCall<'a>,
-        hoisted: &'a [(String, TExpr)],
+        hoisted: &'a [(String, Expr)],
         piece: &'a str,
-        body: &'a TExpr,
+        body: &'a Expr,
     ) -> Result<Operand> {
         let span = e.span;
         let GenCall { key, def, callee, args, kwargs } = call;
@@ -191,12 +191,12 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: the stream of what the stages gave.
     fn held_pipe(
         &mut self,
-        e: &'a TExpr,
+        e: &'a Expr,
         et: &Ty,
         src: Operand,
         st: &Ty,
         piece: &str,
-        body: &'a TExpr,
+        body: &'a Expr,
     ) -> Result<Operand> {
         let span = e.span;
         let (Ty::Array(el), Ty::Array(out_el)) = (st, et) else {
@@ -276,7 +276,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `hoisted`: the arguments, by name.
     ///
     /// Outputs: `Ok(())` or an error.
-    fn bind_hoisted(&mut self, hoisted: &'a [(String, TExpr)]) -> Result<()> {
+    fn bind_hoisted(&mut self, hoisted: &'a [(String, Expr)]) -> Result<()> {
         for (name, v) in hoisted {
             let (o, t) = self.expr(v)?;
             let (p, pt) = self.declare(name, addr(v) + 1, v.span)?;
@@ -293,8 +293,8 @@ impl<'a, 'l> Fx<'a, 'l> {
     ///
     /// Outputs: the call, or `None` for anything else, such as a call through
     /// a function value, whose stream arrives whole.
-    fn generator_call(&self, source: &'a TExpr) -> Option<GenCall<'a>> {
-        let TExprKind::Call { callee, args, kwargs } = &source.kind else {
+    fn generator_call(&self, source: &'a Expr) -> Option<GenCall<'a>> {
+        let ExprKind::Call { callee, args, kwargs } = &source.kind else {
             return None;
         };
         let Some(Target::Instance(k)) = self.targets.get(&addr(source)) else {
@@ -324,7 +324,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: `Ok(())` or an error.
     pub(super) fn yield_to_stages(
         &mut self,
-        value: &'a TExpr,
+        value: &'a Expr,
         sink: &FxSink,
         s: Local,
         el: &Ty,
@@ -371,7 +371,7 @@ impl<'a> Lowerer<'a> {
         name: String,
         piece: (&str, &Ty),
         captured: &[(String, Ty)],
-        body: &'a TExpr,
+        body: &'a Expr,
         ret: &Ty,
         span: Span,
     ) -> Result<Func> {
@@ -402,17 +402,17 @@ impl<'a> Lowerer<'a> {
 /// - `out`: the names so far.
 ///
 /// Outputs: none.
-fn stage_names(body: &TExpr, out: &mut Vec<String>) {
-    let TExprKind::Call { callee, args, .. } = &body.kind else {
+fn stage_names(body: &Expr, out: &mut Vec<String>) {
+    let ExprKind::Call { callee, args, .. } = &body.kind else {
         return;
     };
     if let Some(inner) = args.first() {
         stage_names(inner, out);
     }
     out.push(match &callee.kind {
-        TExprKind::Identifier(n) => display_type_name(n).to_string(),
-        TExprKind::FieldAccess { object, field } => match &object.kind {
-            TExprKind::Identifier(o) => format!("{}.{field}", display_type_name(o)),
+        ExprKind::Identifier(n) => display_type_name(n).to_string(),
+        ExprKind::FieldAccess { object, field } => match &object.kind {
+            ExprKind::Identifier(o) => format!("{}.{field}", display_type_name(o)),
             _ => field.clone(),
         },
         _ => "a function".to_string(),
@@ -427,12 +427,12 @@ fn stage_names(body: &TExpr, out: &mut Vec<String>) {
 /// - `out`: the names so far.
 ///
 /// Outputs: none.
-fn free_names(e: &TExpr, out: &mut Vec<String>) {
+fn free_names(e: &Expr, out: &mut Vec<String>) {
     match &e.kind {
-        TExprKind::Identifier(n) => out.push(n.clone()),
-        TExprKind::Integer(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) => {}
-        TExprKind::Is { value, .. } => free_names(value, out),
-        TExprKind::Call { callee, args, kwargs } => {
+        ExprKind::Identifier(n) => out.push(n.clone()),
+        ExprKind::Integer(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => {}
+        ExprKind::Is { value, .. } => free_names(value, out),
+        ExprKind::Call { callee, args, kwargs } => {
             free_names(callee, out);
             for a in args {
                 free_names(a, out);
@@ -441,12 +441,12 @@ fn free_names(e: &TExpr, out: &mut Vec<String>) {
                 free_names(v, out);
             }
         }
-        TExprKind::BinOp { left, right, .. } => {
+        ExprKind::BinOp { left, right, .. } => {
             free_names(left, out);
             free_names(right, out);
         }
-        TExprKind::UnaryOp { operand, .. } => free_names(operand, out),
-        TExprKind::StructLiteral { base, fields, .. } => {
+        ExprKind::UnaryOp { operand, .. } => free_names(operand, out),
+        ExprKind::StructLiteral { base, fields, .. } => {
             if let Some(b) = base {
                 free_names(b, out);
             }
@@ -454,38 +454,38 @@ fn free_names(e: &TExpr, out: &mut Vec<String>) {
                 free_names(v, out);
             }
         }
-        TExprKind::FieldAccess { object, .. } => free_names(object, out),
-        TExprKind::Index { object, index } => {
+        ExprKind::FieldAccess { object, .. } => free_names(object, out),
+        ExprKind::Index { object, index } => {
             free_names(object, out);
             free_names(index, out);
         }
-        TExprKind::Array { elements } => {
+        ExprKind::Array { elements } => {
             for x in elements {
                 free_names(x, out);
             }
         }
-        TExprKind::FStr { parts } => {
+        ExprKind::FStr { parts } => {
             for p in parts {
-                if let TFStrPart::Expr(x) = p {
+                if let FStrPart::Expr(x) = p {
                     free_names(x, out);
                 }
             }
         }
-        TExprKind::PromptDeref { expr, grammar_expr, .. } => {
+        ExprKind::PromptDeref { expr, grammar_expr, .. } => {
             free_names(expr, out);
             if let Some(g) = grammar_expr {
                 free_names(g, out);
             }
         }
-        TExprKind::Dict { entries } => {
+        ExprKind::Dict { entries } => {
             for (k, v) in entries {
                 free_names(k, out);
                 free_names(v, out);
             }
         }
-        TExprKind::Await { expr } => free_names(expr, out),
-        TExprKind::PromptLiteral { body } => free_names(body, out),
-        TExprKind::Pipe { source, hoisted, piece, body } => {
+        ExprKind::Await { expr } => free_names(expr, out),
+        ExprKind::PromptLiteral { body } => free_names(body, out),
+        ExprKind::Pipe { source, hoisted, piece, body } => {
             free_names(source, out);
             for (_, v) in hoisted {
                 free_names(v, out);
@@ -495,6 +495,11 @@ fn free_names(e: &TExpr, out: &mut Vec<String>) {
             out.extend(
                 inner.into_iter().filter(|n| n != piece && !hoisted.iter().any(|(h, _)| h == n)),
             );
+        }
+        // Never reaches MIR: lowering it reports an internal error.
+        ExprKind::RawPipe { value, stage } => {
+            free_names(value, out);
+            free_names(stage, out);
         }
     }
 }

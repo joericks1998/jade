@@ -4,7 +4,7 @@
 
 Two things that belong together. The method surface of the `bytes` type, which is `len`, `decode`, and `slice`. And the `std::bytes` package, which is the three ways to *build* a blob: `zeros`, `from_ints`, and `concat`.
 
-The value itself is not here, and neither is any behavior. A blob is a heap object with the string layout, `{ rc, len, trust, bytes…, 0 }`, and `src/backend/bytes.rs` emits every method and package function into the program that uses it. Since v2 this directory only names them and gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
+The value itself is not here, and neither is any behavior. A blob is a heap object with the string layout, `{ rc, len, trust, bytes…, 0 }`, and `src/backend/bytes.rs` emits every method and package function into the program that uses it. Since v2 this directory only names them; `typechecker/infer/builtins.rs` gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
 
 ## Why `bytes` is not just a string
 

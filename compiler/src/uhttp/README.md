@@ -15,11 +15,11 @@ The socket path runs up to the *first* `:` after the scheme, so colons inside a 
 
 Local daemons speak HTTP but do not listen on a port. Docker, systemd, and a sound server are all examples. In v1 nothing in the dependency tree did HTTP over a Unix socket, so `jade-runtime` framed the transport by hand: the request head built as text, the response read to end of file, and the framing honoring `Content-Length`, `Transfer-Encoding: chunked`, and `Connection: close`.
 
-Since phase 6 the transport is `curl --unix-socket`, the same command `std::http` runs, emitted into the program by `src/backend/http.rs`. This directory holds only the package's function names and type registration, exactly as `src/http/` does. Until v1.4.8 it held the VM's marshalling over v1's framing.
+Since phase 6 the transport is `curl --unix-socket`, the same command `std::http` runs, emitted into the program by `src/backend/http.rs`. This directory holds only the package's function names, exactly as `src/http/` does. Until v1.4.8 it held the VM's marshalling over v1's framing.
 
 ## What each file does
 
-- *`mod.rs`* holds `UHTTP_PKG`, the `Package` descriptor that names the eight functions, and the type registration for the `uhttp` global.
+- *`mod.rs`* holds `UHTTP_PKG`, the `Package` descriptor that names the eight functions; the per-file pass binds the `uhttp` name when a `use` names the package.
 
 ## Streaming
 

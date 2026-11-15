@@ -41,9 +41,8 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::frontend::ast::StructFieldDef;
+use crate::frontend::ast::{Expr, ExprKind, Program, Stmt, StructFieldDef};
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::tir::{TExpr, TExprKind, TProgram, TStmt};
 
 pub(crate) use builtins::canonical;
 pub use members::check_members;
@@ -82,8 +81,8 @@ pub struct InstKey {
 struct FnInfo<'a> {
     /// The name as the program wrote it, possibly mangled by the import pass.
     name: String,
-    params: &'a [(String, Option<TExpr>)],
-    body: &'a [TStmt],
+    params: &'a [(String, Option<Expr>)],
+    body: &'a [Stmt],
     is_async: bool,
     is_generator: bool,
 }
@@ -188,19 +187,25 @@ pub struct Checker<'a> {
     /// Literal field defaults, joined into their field's slot: a declared
     /// default is a value the field can hold, even where every literal sets it.
     field_defaults: Vec<(String, String, Ty)>,
+    /// Each field's declared default, by class and field. A copy-with literal
+    /// whose base's class lacks a field takes the field's default instead.
+    default_exprs: HashMap<(String, String), &'a Expr>,
+    /// The address of each call a pipe makes to one of its stages, so a stage
+    /// that turns out not to be a function is reported in the pipe's words.
+    stage_calls: HashSet<usize>,
     /// Global variable slots.
     globals: HashMap<String, Ty>,
     /// Each class member's decorators, with whether the member is a field and
     /// where its class is: `(class, member, decorators, is_field, span)`.
     member_decorators: Vec<(String, String, Vec<String>, bool, Span)>,
     /// Globals bound to the result of a decorator applied to a function.
-    decorated: HashMap<String, crate::typechecker::tir::TDecorators>,
+    decorated: HashMap<String, crate::frontend::ast::DecoratorList>,
     /// Std package names, which a variable or function of the same name shadows.
     packages: HashSet<String>,
     instances: HashMap<InstKey, Instance>,
     instance_count: HashMap<FnKey, usize>,
     worklist: Vec<InstKey>,
-    top: &'a [TStmt],
+    top: &'a [Stmt],
     pass: usize,
     final_pass: bool,
     /// Slots a number literal met while they were still empty, each with the
@@ -225,7 +230,7 @@ pub struct Checker<'a> {
 /// - `program`: the program after imports are merged and struct defaults filled.
 ///
 /// Outputs: the types of everything in it, or the first type error.
-pub fn check_program(program: &TProgram) -> Result<Typed, JadeError> {
+pub fn check_program(program: &Program) -> Result<Typed, JadeError> {
     check_program_with(program, &HashMap::new())
 }
 
@@ -238,7 +243,7 @@ pub fn check_program(program: &TProgram) -> Result<Typed, JadeError> {
 ///
 /// Outputs: the checker's answer, as `check_program` gives it.
 pub fn check_program_with(
-    program: &TProgram,
+    program: &Program,
     natives: &HashMap<String, native::NativeSig>,
 ) -> Result<Typed, JadeError> {
     let mut c = Checker::new(&program.stmts);
@@ -254,7 +259,7 @@ impl<'a> Checker<'a> {
     /// - `top`: the program's top-level statements.
     ///
     /// Outputs: the checker.
-    fn new(top: &'a [TStmt]) -> Self {
+    fn new(top: &'a [Stmt]) -> Self {
         Checker {
             store: Store::default(),
             natives: HashMap::new(),
@@ -264,6 +269,8 @@ impl<'a> Checker<'a> {
             field_slots: HashMap::new(),
             constructed: HashSet::new(),
             field_defaults: Vec::new(),
+            default_exprs: HashMap::new(),
+            stage_calls: HashSet::new(),
             globals: HashMap::new(),
             decorated: HashMap::new(),
             member_decorators: Vec::new(),
@@ -288,7 +295,7 @@ impl<'a> Checker<'a> {
     /// - `stmts`: the program's top-level statements.
     ///
     /// Outputs: `Ok(())`, or an error for a definition the checker cannot accept.
-    fn register(&mut self, stmts: &'a [TStmt]) -> Result<(), JadeError> {
+    fn register(&mut self, stmts: &'a [Stmt]) -> Result<(), JadeError> {
         builtins::register_builtin_structs(self);
         // The import pass drops a std `use` once it has checked it, so every
         // package name is available here; a variable of the same name still
@@ -298,9 +305,9 @@ impl<'a> Checker<'a> {
         }
         for s in stmts {
             match s {
-                TStmt::FnDef { name, params, body, decorators, .. }
-                | TStmt::AsyncFnDef { name, params, body, decorators, .. } => {
-                    let is_async = matches!(s, TStmt::AsyncFnDef { .. });
+                Stmt::FnDef { name, params, body, decorators, .. }
+                | Stmt::AsyncFnDef { name, params, body, decorators, .. } => {
+                    let is_async = matches!(s, Stmt::AsyncFnDef { .. });
                     self.store
                         .arities
                         .insert(FuncRef::Named(name.clone()), (params.len(), is_async));
@@ -320,7 +327,7 @@ impl<'a> Checker<'a> {
                         self.decorated.insert(name.clone(), decorators.clone());
                     }
                 }
-                TStmt::StructDef { name, fields, parents, members, span } => {
+                Stmt::StructDef { name, fields, parents, members, span } => {
                     for (member, decs) in &members.decorators {
                         let is_field = fields.iter().any(|fd| fd.name() == member);
                         self.member_decorators.push((
@@ -336,6 +343,11 @@ impl<'a> Checker<'a> {
                             && let Some(t) = default_type(default)
                         {
                             self.field_defaults.push((name.clone(), fname.clone(), t));
+                        }
+                        if let StructFieldDef::Let { name: fname, default }
+                        | StructFieldDef::Prompt { name: fname, default } = fd
+                        {
+                            self.default_exprs.insert((name.clone(), fname.clone()), default);
                         }
                     }
                     let info = StructInfo {
@@ -358,12 +370,12 @@ impl<'a> Checker<'a> {
                     };
                     self.structs.insert(name.clone(), info);
                 }
-                TStmt::ExtendBlock { type_name, methods, span, .. } => {
+                Stmt::ExtendBlock { type_name, methods, span, .. } => {
                     for m in methods {
-                        if let TStmt::FnDef { name, params, .. }
-                        | TStmt::AsyncFnDef { name, params, .. } = m
+                        if let Stmt::FnDef { name, params, .. }
+                        | Stmt::AsyncFnDef { name, params, .. } = m
                             && name == "drop"
-                            && (params.len() != 1 || matches!(m, TStmt::AsyncFnDef { .. }))
+                            && (params.len() != 1 || matches!(m, Stmt::AsyncFnDef { .. }))
                         {
                             return Err(JadeError::TypeError {
                                 message: format!(
@@ -374,8 +386,8 @@ impl<'a> Checker<'a> {
                                 span: *span,
                             });
                         }
-                        if let TStmt::FnDef { name, params, body, .. }
-                        | TStmt::AsyncFnDef { name, params, body, .. } = m
+                        if let Stmt::FnDef { name, params, body, .. }
+                        | Stmt::AsyncFnDef { name, params, body, .. } = m
                         {
                             self.methods.insert(
                                 (type_name.clone(), name.clone()),
@@ -383,16 +395,16 @@ impl<'a> Checker<'a> {
                                     name: name.clone(),
                                     params,
                                     body,
-                                    is_async: matches!(m, TStmt::AsyncFnDef { .. }),
+                                    is_async: matches!(m, Stmt::AsyncFnDef { .. }),
                                     is_generator: body_yields(body),
                                 },
                             );
                         }
                     }
                 }
-                TStmt::Let { name, .. }
-                | TStmt::Assign { name, .. }
-                | TStmt::PromptDecl { name, .. }
+                Stmt::Let { name, .. }
+                | Stmt::Assign { name, .. }
+                | Stmt::PromptDecl { name, .. }
                     if !self.globals.contains_key(name) =>
                 {
                     let slot = self.store.fresh();
@@ -904,14 +916,13 @@ impl<'a> Checker<'a> {
 /// - `e`: the default expression, as written.
 ///
 /// Outputs: its type, or `None` for anything that is not a scalar literal.
-fn default_type(e: &crate::frontend::ast::Expr) -> Option<Ty> {
-    use crate::frontend::ast::Expr;
-    match e {
-        Expr::Integer { .. } => Some(Ty::Int),
-        Expr::Float { .. } => Some(Ty::Float),
-        Expr::Str { .. } => Some(Ty::Str),
-        Expr::Bool { .. } => Some(Ty::Bool),
-        Expr::Identifier { name, .. } if matches!(name.as_str(), "nil" | "None" | "null") => {
+fn default_type(e: &Expr) -> Option<Ty> {
+    match &e.kind {
+        ExprKind::Integer(_) => Some(Ty::Int),
+        ExprKind::Float(_) => Some(Ty::Float),
+        ExprKind::Str(_) => Some(Ty::Str),
+        ExprKind::Bool(_) => Some(Ty::Bool),
+        ExprKind::Identifier(name) if matches!(name.as_str(), "nil" | "None" | "null") => {
             Some(Ty::Nil)
         }
         _ => None,
@@ -925,14 +936,14 @@ fn default_type(e: &crate::frontend::ast::Expr) -> Option<Ty> {
 /// - `body`: the statements.
 ///
 /// Outputs: true when the function is a generator.
-fn body_yields(body: &[TStmt]) -> bool {
+fn body_yields(body: &[Stmt]) -> bool {
     body.iter().any(|s| match s {
-        TStmt::Yield { .. } => true,
-        TStmt::If { then_body, else_body, .. } => {
+        Stmt::Yield { .. } => true,
+        Stmt::If { then_body, else_body, .. } => {
             body_yields(then_body) || else_body.as_deref().is_some_and(body_yields)
         }
-        TStmt::While { body, .. } | TStmt::For { body, .. } => body_yields(body),
-        TStmt::TryCatch { body, arms, .. } => {
+        Stmt::While { body, .. } | Stmt::For { body, .. } => body_yields(body),
+        Stmt::TryCatch { body, arms, .. } => {
             body_yields(body) || arms.iter().any(|a| body_yields(&a.body))
         }
         _ => false,
@@ -956,6 +967,6 @@ fn addr<T>(x: &T) -> usize {
 /// - `e`: the expression.
 ///
 /// Outputs: true for `nil`, `None` or `null`.
-fn is_nil_literal(e: &TExpr) -> bool {
-    matches!(&e.kind, TExprKind::Identifier(n) if n == "nil" || n == "None" || n == "null")
+fn is_nil_literal(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Identifier(n) if n == "nil" || n == "None" || n == "null")
 }

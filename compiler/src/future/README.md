@@ -38,7 +38,7 @@ Cancelled outranks a result that arrived anyway. The caller said it had stopped 
 
 ## What each file does
 
-- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`, and `register_future_method_types`, which gives the checker their types. The behavior lives in `src/backend/tasks.rs` and the `Op::Ready` and `Op::Cancel` arms of `src/backend/func.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
+- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`; `typechecker/infer/builtins.rs` gives the checker their types. The behavior lives in `src/backend/tasks.rs` and the `Op::Ready` and `Op::Cancel` arms of `src/backend/func.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
 
 ## What `ready` means
 
@@ -58,9 +58,9 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 ## Who uses it
 
-*Depends on:* `typechecker/type_infer` for `TypeContext`, which the method types register into.
+*Depends on:* nothing; it is a list of names.
 
-*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`, and `builtins::register_primitive_method_types`. The compiled backend does not come through here at all: `mir/ops.rs` lowers `ready` to `Op::Ready`, and `src/backend/func.rs` answers it from the job's state and cancel words under the task queue's lock.
+*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`. The compiled backend does not come through here at all: `mir/ops.rs` lowers `ready` to `Op::Ready`, and `src/backend/func.rs` answers it from the job's state and cancel words under the task queue's lock.
 
 ## Gotchas
 

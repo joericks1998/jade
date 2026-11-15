@@ -1,13 +1,14 @@
-//! The type checker: source AST → typed IR → static types.
+//! The type checker: the parser's tree → the same tree, rewritten → static types.
 //!
-//! `type_infer` turns each file's AST into typed IR, and `infer` gives every
-//! value of the merged program one static type. What consumes that answer,
-//! `src/mir/` and `src/backend/`, lives alongside this module rather than
-//! within it.
+//! `resolve` rewrites each file's tree on its own: it flattens pipes, folds a
+//! converter around a dereference into it, fills class literal defaults, and
+//! refuses what one file can settle, such as an undefined name. `infer` gives
+//! every value of the merged program one static type. What consumes that
+//! answer, `src/mir/` and `src/backend/`, lives alongside this module rather
+//! than within it.
 
 pub mod infer;
-pub mod tir;
-pub mod type_infer;
+pub mod resolve;
 
 #[cfg(test)]
 mod tests;

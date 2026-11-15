@@ -26,18 +26,6 @@ pub mod rewrite;
 pub mod unicode;
 
 use crate::builtins::Package;
-use crate::typechecker::tir::JadeType;
-use crate::typechecker::type_infer::TypeContext;
-
-/// Purpose: This function registers the internal package's name.
-///
-/// Inputs:
-/// - `ctx`: the per-file checker's context.
-///
-/// Outputs: none.
-fn register_infer_pkg_types(ctx: &mut TypeContext) {
-    ctx.define("__infer".to_string(), JadeType::Unknown);
-}
 
 /// The prelude's own package: what `prelude.jde` asks of the backend. It is
 /// not documented for programs; its name keeps it out of their way.
@@ -56,7 +44,6 @@ pub static INFER_PKG: Package = Package {
         "next",
         "conversation",
     ],
-    register_types: register_infer_pkg_types,
 };
 
 #[cfg(test)]

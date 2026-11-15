@@ -2,7 +2,7 @@
 //! `input`, the task controls, the type functions and their converters, and
 //! `Grammar`.
 
-use crate::typechecker::{tir::JadeType, type_infer::TypeContext};
+use crate::typechecker::resolve::{NameKind, Names};
 
 /// Every global a program can name without importing anything.
 ///
@@ -52,109 +52,24 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "Grammar",
 ];
 
-// ── Type registration ─────────────────────────────────────────────────────────
+// ── Name registration ─────────────────────────────────────────────────────────
 
-pub fn register_types(ctx: &mut TypeContext) {
-    ctx.define(
-        "print".to_string(),
-        JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Nil) },
-    );
-    ctx.define(
-        "len".to_string(),
-        JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Int) },
-    );
-    ctx.define(
-        "join".to_string(),
-        JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))),
-        },
-    );
-    ctx.define(
-        "input".to_string(),
-        JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Str) },
-    );
-    ctx.define(
-        "cancelled".to_string(),
-        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bool) },
-    );
-    ctx.define(
-        "max_tasks".to_string(),
-        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) },
-    );
-    ctx.define(
-        "set_max_tasks".to_string(),
-        JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Int) },
-    );
-    ctx.define(
-        "max_tokens".to_string(),
-        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) },
-    );
-    ctx.define(
-        "set_max_tokens".to_string(),
-        JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Int) },
-    );
-    ctx.define(
-        "wait".to_string(),
-        JadeType::Fn {
-            params: vec![JadeType::Array(Box::new(JadeType::Unknown))],
-            ret: Box::new(JadeType::Int),
-        },
-    );
-    ctx.define(
-        "write".to_string(),
-        JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Nil) },
-    );
-    ctx.define(
-        "route".to_string(),
-        JadeType::Fn {
-            params: vec![JadeType::Unknown, JadeType::Unknown],
-            ret: Box::new(JadeType::Unknown),
-        },
-    );
-    // The type functions, which check a value's type and return it unchanged,
-    // and the converters, which make a value of that type from another.
-    // The sized number types have both too; see `design/v2-number-types.md`.
-    for name in &[
-        "int",
-        "float",
-        "bool",
-        "str",
-        "char",
-        "toInt",
-        "toFloat",
-        "toString",
-        "toBool",
-        "toChar",
-        "byte",
-        "short",
-        "ushort",
-        "int32",
-        "uint32",
-        "long",
-        "ulong",
-        "float32",
-        "double",
-        "toByte",
-        "toShort",
-        "toUshort",
-        "toInt32",
-        "toUint32",
-        "toLong",
-        "toUlong",
-        "toFloat32",
-        "toDouble",
-        "func",
-    ] {
-        ctx.define(
-            name.to_string(),
-            JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Unknown) },
-        );
+/// Purpose: This function binds every global in the per-file pass's name
+/// table, so a call to one is not an undefined name.
+///
+/// Inputs:
+/// - `names`: the table a file starts with.
+///
+/// Outputs: none.
+pub fn register_names(names: &mut Names) {
+    // `join` is a builtin the checker types, though not one a program lists.
+    for name in GLOBAL_NAMES.iter().chain(&["join"]) {
+        // `Grammar` is a namespace, `Grammar.new(…)`, not a function to call.
+        let kind = if *name == "Grammar" { NameKind::Value } else { NameKind::Function };
+        names.define(name.to_string(), kind);
     }
     // nil / None / null literals — all three spellings are valid
-    ctx.define("nil".to_string(), JadeType::Nil);
-    ctx.define("None".to_string(), JadeType::Nil);
-    ctx.define("null".to_string(), JadeType::Nil);
-    // Grammar global: Grammar.new(pattern) -> Grammar
-    ctx.define("Grammar".to_string(), JadeType::Unknown);
+    for name in ["nil", "None", "null"] {
+        names.define(name.to_string(), NameKind::Value);
+    }
 }

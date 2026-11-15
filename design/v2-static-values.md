@@ -233,6 +233,8 @@ v1:  AST → type_infer → TIR (partly Unknown) → emit → bytecode → codeg
 v2:  AST → infer → TIR (fully typed) → MIR → LLVM
 ```
 
+*Changed in 2.0.6 (2026-11-14):* TIR is removed. The per-file pass, now `typechecker/resolve.rs`, rewrites the parser's tree in place and gives no node a type; the whole-program checker keeps every type in its own table and MIR reads that table. The pipeline is `AST → per-file pass → AST → imports → checker → MIR → LLVM`. See part 1 of `v2-simplify.md`.
+
 - *`infer`* replaces `type_infer.rs`'s single pass with checking per call, type variables and unification, `T?`, typed dicts and struct fields, and parent-struct joins. `Unknown` becomes an error, and the lenient `opaque_imports` mode goes away: the whole program is checked after imports are merged, at the point `aot/mod.rs` already re-checks struct defaults.
 - *MIR* is new: one function per checked copy, every value's type explicit, control flow as basic blocks, and reference counting written out as instructions. It is the layer the GPU work later plugs into, and the place memory optimizations happen.
 - *Codegen from MIR* replaces `src/codegen/`'s bytecode lowering. Support code for strings, collections, printing and so on is generated as LLVM functions with internal linkage, once per program, only when used. System calls go through the C library, which macOS ships as libSystem and Linux as libc.

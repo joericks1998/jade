@@ -1,445 +1,189 @@
-//! Unit tests for the compiler proper: type inference, TIR, emission, GBNF.
+//! Unit tests for the type checker: the per-file pass, and the types the
+//! whole-program checker gives the programs the per-file pass used to type.
 //!
-//! The VM and bytecode tests used to live here too. They moved out with their
-//! modules — `vm/tests.rs` and `bytecode/tests.rs` — when the VM stopped being
-//! filed as a compiler phase. One inline submodule per source module keeps each
-//! test scope clean.
+//! Until 2.0.6 the per-file pass gave every node a type of its own, and most of
+//! these tests read that type. The whole-program checker in `infer/` works out
+//! every type once, so those tests now ask it instead (`mod types`), and the
+//! ones that read a rewritten shape, a flattened pipe or a typed dereference,
+//! ask the per-file pass (`mod resolve`). The VM and bytecode tests used to
+//! live here too; they left with their modules.
 #![allow(clippy::all)]
 
-mod type_infer {
+mod resolve {
+    use crate::frontend::ast::{Expr, ExprKind, Program, Stmt};
     use crate::frontend::error::{JadeError, Result};
     use crate::frontend::{lexer, parser};
-    use crate::typechecker::tir::{JadeType, TProgram, TStmt};
-    use crate::typechecker::type_infer::*;
+    use crate::typechecker::resolve::resolve;
 
-    fn infer_src(src: &str) -> Result<TProgram> {
+    fn resolve_src(src: &str) -> Result<Program> {
         let tokens = lexer::tokenize(src).expect("lex");
         let program = parser::parse(tokens).expect("parse");
-        infer(program)
+        resolve(program)
     }
 
-    fn infer_ok(src: &str) -> TProgram {
-        infer_src(src).expect("type check failed")
+    fn resolve_ok(src: &str) -> Program {
+        resolve_src(src).expect("the per-file pass failed")
     }
 
-    fn infer_err(src: &str) -> JadeError {
-        infer_src(src).expect_err("expected type error")
+    fn resolve_err(src: &str) -> JadeError {
+        resolve_src(src).expect_err("expected an error from the per-file pass")
     }
 
-    /// The inferred return type of the named top-level function.
-    fn fn_ret(p: &TProgram, name: &str) -> JadeType {
-        p.stmts
-            .iter()
-            .find_map(|s| match s {
-                TStmt::FnDef { name: n, ret_ty, .. } if n == name => Some(ret_ty.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("no fn {name}"))
+    /// The value of the `let` at index `i`.
+    fn let_value(p: &Program, i: usize) -> &Expr {
+        let Stmt::Let { value, .. } = &p.stmts[i] else { panic!("expected Let at {i}") };
+        value
     }
 
-    /// The inferred type of the named top-level `let`.
-    fn global_ty(p: &TProgram, name: &str) -> Option<JadeType> {
-        p.stmts.iter().find_map(|s| match s {
-            TStmt::Let { name: n, value, .. } if n == name => Some(value.ty.clone()),
-            _ => None,
-        })
-    }
-
-    // ── Literals ──────────────────────────────────────────────────────────────
+    // ── Classes ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_infer_int_literal() {
-        let tp = infer_ok("let x = 42");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_float_literal() {
-        let tp = infer_ok("let x = 3.14");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_bool_literal() {
-        let tp = infer_ok("let x = true");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_str_literal() {
-        let tp = infer_ok(r#"let x = "hello""#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    #[test]
-    fn test_infer_nil_literal() {
-        let tp = infer_ok("let x = nil");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Nil);
-    }
-
-    #[test]
-    fn test_infer_null_literal() {
-        // `null` is a third spelling of nil (alongside `None`); all infer as JadeType::Nil
-        for src in ["let x = null", "let x = None", "let x = nil"] {
-            let tp = infer_ok(src);
-            let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-            assert_eq!(value.ty, JadeType::Nil, "failed for: {src}");
-        }
-    }
-
-    #[test]
-    fn test_infer_bool_nil() {
-        // bool(nil) must pass type inference with nil recognized as JadeType::Nil.
-        let tp = infer_ok("let x = bool(nil)");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        // The conversion constructors int/float/bool/str now infer their concrete
-        // result type (so AOT codegen can format e.g. bool → "true"/"false" instead
-        // of the Unknown→1/0 path); `bool(_)` is therefore Bool, not Unknown.
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    // ── Arithmetic ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_int_add() {
-        let tp = infer_ok("let x = 1 + 2");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_float_add() {
-        let tp = infer_ok("let x = 1.0 + 2.0");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_mixed_add_promotes_to_float() {
-        let tp = infer_ok("let x = 1 + 2.0");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_str_concat() {
-        let tp = infer_ok(r#"let x = "a" + "b""#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    #[test]
-    fn test_infer_int_plus_str_is_error() {
-        let err = infer_err(r#"let x = 1 + "a""#);
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    // ── Logical and comparison ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_logical_and() {
-        let tp = infer_ok("let x = true && false");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_and_non_bool_is_error() {
-        let err = infer_err("let x = 1 && 0");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_comparison_int() {
-        let tp = infer_ok("let x = 1 < 2");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_strict_equality_cross_type_is_error() {
-        let err = infer_err("let x = 1 == 1.0");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    // ── Unary operators ───────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_unary_neg_int() {
-        let tp = infer_ok("let x = -5");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_unary_not_bool() {
-        let tp = infer_ok("let x = !true");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_unary_not_int_is_error() {
-        let err = infer_err("let x = !1");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_logical_with_unknown_operand_is_bool() {
-        // `!x`, `x && y`, `x || y` on untyped (Unknown) params must infer Bool,
-        // not int/Unknown — native codegen emits i1 for these, so a function
-        // returning one needs a Bool signature or LLVM verification fails.
-        // Regression for the v1.1.10 fix (and guards against re-widening `!`
-        // to accept non-bool concrete operands).
-        for (src, label) in [
-            ("fn f(x) {\n return !x\n}", "not"),
-            ("fn f(x, y) {\n return x && y\n}", "and"),
-            ("fn f(x, y) {\n return x || y\n}", "or"),
-        ] {
-            let tp = infer_ok(src);
-            let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-            assert_eq!(*ret_ty, JadeType::Bool, "failed for: {label}");
-        }
-    }
-
-    // ── Arrays ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_array_int() {
-        let tp = infer_ok("let a = [1, 2, 3]");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Int)));
-    }
-
-    #[test]
-    fn test_infer_array_empty() {
-        let tp = infer_ok("let a = []");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
-    }
-
-    #[test]
-    fn test_infer_heterogeneous_array_widens_to_unknown() {
-        // Nothing more precise than `Unknown` is true of every element, so that
-        // is the element type — not an error. It was one until v1.1.32, which is
-        // why this test's name outlived two opposite assertions.
-        let tp = infer_ok(r#"let a = [1, "hello"]"#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
-    }
-
-    /// Uniform elements still give a concrete element type — widening is the
-    /// fallback, not the rule. Losing this would pessimize every typed array.
-    #[test]
-    fn test_infer_homogeneous_array_keeps_its_element_type() {
-        let tp = infer_ok(r#"let a = ["x", "y"]"#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Str)));
-    }
-
-    /// Mixed numerics widen rather than promoting to float. Typing `a[0]` as
-    /// float while the slot holds a tagged int would send AOT codegen down a
-    /// specialized path for a value that is not that type.
-    #[test]
-    fn test_infer_mixed_numeric_array_widens_rather_than_promoting() {
-        let tp = infer_ok("let a = [1, 2.0]");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
-    }
-
-    /// An element the checker cannot type does not itself make the array mixed.
-    #[test]
-    fn test_infer_array_ignores_unknown_elements_when_widening() {
-        let tp = infer_ok("fn f() { return 1 }\nlet a = [1, f(), 3]");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Int)));
-    }
-
-    // ── Control flow ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_if_bool_condition() {
-        infer_ok("if true {\n let x = 1\n}");
-    }
-
-    #[test]
-    fn test_infer_if_int_condition_is_error() {
-        let err = infer_err("if 1 {\n let x = 2\n}");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_while_bool_condition() {
-        infer_ok("while false {\n let x = 1\n}");
-    }
-
-    // ── Functions ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_fn_return_type_int() {
-        let tp = infer_ok("fn add(x, y) {\n return 42\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_fn_no_return_is_nil() {
-        let tp = infer_ok("fn noop(x) {\n let y = 1\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Nil);
-    }
-
-    #[test]
-    fn test_infer_call_return_type() {
-        let tp = infer_ok("fn id(x) {\n return 1\n}\nlet r = id(99)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_call_builtin_len() {
-        let tp = infer_ok("let n = len([1, 2])");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    // ── Structs ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_struct_literal_type() {
-        let tp =
-            infer_ok("class Point {\n @public x,\n @public y\n}\nlet p = Point { x: 1, y: 2 }");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Struct("Point".to_string()));
-    }
-
-    #[test]
-    fn test_infer_struct_undefined_type_is_error() {
-        let err = infer_err("let p = Foo { x: 1 }");
+    fn a_literal_of_an_undefined_class_is_an_error() {
+        let err = resolve_err("let p = Foo { x: 1 }");
         assert!(matches!(err, JadeError::UndefinedType { .. }));
     }
 
     #[test]
-    fn test_infer_struct_missing_field_is_error() {
-        let err = infer_err("class P {\n @public x,\n @public y\n}\nlet p = P { x: 1 }");
+    fn a_literal_missing_a_required_field_is_an_error() {
+        let err = resolve_err("class P {\n @public x,\n @public y\n}\nlet p = P { x: 1 }");
         assert!(matches!(err, JadeError::MissingField { .. }));
     }
 
     #[test]
-    fn test_infer_struct_extra_field_is_error() {
-        let err = infer_err("class P {\n @public x\n}\nlet p = P { x: 1, z: 2 }");
+    fn a_literal_naming_a_field_the_class_lacks_is_an_error() {
+        let err = resolve_err("class P {\n @public x\n}\nlet p = P { x: 1, z: 2 }");
+        assert!(matches!(err, JadeError::UndefinedField { .. }));
+        let err = resolve_err("class Unit {}\nlet u = Unit { x: 1 }");
         assert!(matches!(err, JadeError::UndefinedField { .. }));
     }
 
     #[test]
-    fn test_infer_empty_struct_literal_type() {
-        let tp = infer_ok("class Unit {}\nlet u = Unit {}");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Struct("Unit".to_string()));
+    fn a_literal_naming_a_field_twice_is_an_error() {
+        let err = resolve_err("class P {\n @public x\n}\nlet p = P { x: 1, x: 2 }");
+        assert!(matches!(err, JadeError::DuplicateField { .. }));
     }
 
+    /// A literal of a class this file defines comes out complete: every field
+    /// in definition order, the defaults filled in, a prompt field marked, and
+    /// what the source wrote kept in `given`.
     #[test]
-    fn test_infer_empty_struct_extra_field_is_error() {
-        let err = infer_err("class Unit {}\nlet u = Unit { x: 1 }");
-        assert!(matches!(err, JadeError::UndefinedField { .. }));
+    fn a_literal_is_completed_in_definition_order() {
+        let p = resolve_ok(
+            "class A {\n @public b,\n @public let a = 1,\n @public prompt q = \"hi\"\n}\nlet x = A { b: 2 }",
+        );
+        let ExprKind::StructLiteral { fields, given, base, .. } = &let_value(&p, 1).kind else {
+            panic!("expected a class literal")
+        };
+        assert!(base.is_none());
+        let names: Vec<(&str, bool)> = fields.iter().map(|(n, _, pr)| (n.as_str(), *pr)).collect();
+        assert_eq!(names, vec![("b", false), ("a", false), ("q", true)]);
+        assert_eq!(given, &vec!["b".to_string()]);
+    }
+
+    /// With a base, a field the literal leaves out is not filled in: whether
+    /// the base or the default supplies it depends on the base's class, which
+    /// the whole-program checker decides.
+    #[test]
+    fn a_literal_with_a_base_holds_only_what_it_names() {
+        let p = resolve_ok(
+            "class A {\n @public b,\n @public let a = 1\n}\nlet x = A { b: 2 }\nlet y = A { ...x, b: 3 }",
+        );
+        let ExprKind::StructLiteral { fields, base, .. } = &let_value(&p, 2).kind else {
+            panic!("expected a class literal")
+        };
+        assert!(base.is_some());
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "b");
+    }
+
+    /// A class's own definition carries its fields flattened, inherited ones
+    /// first.
+    #[test]
+    fn a_child_class_carries_its_parents_fields() {
+        let p = resolve_ok("class A {\n @public a\n}\nclass B(A) {\n @public b\n}");
+        let Stmt::StructDef { fields, .. } = &p.stmts[1] else { panic!("expected StructDef") };
+        let names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    /// A default that builds its own class would be filled in forever, so it
+    /// is refused with the fix.
+    #[test]
+    fn a_default_that_builds_its_own_class_is_refused() {
+        let err = resolve_err("class Node {\n @public let next = Node {}\n}\nlet n = Node {}");
+        let m = err.to_string();
+        assert!(m.contains("builds another Node"), "got {m}");
+        assert!(m.contains("such as nil"), "the message names the fix: {m}");
     }
 
     // ── Imports ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_infer_quoted_file_import_is_error() {
+    fn a_quoted_file_import_is_an_error() {
         // Quoted file imports were removed — use a bare/`::` module name instead.
-        let err = infer_err(r#"use "my_lib.jde""#);
+        let err = resolve_err(r#"use "my_lib.jde""#);
         assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]
-    fn test_infer_bare_module_import_is_ok() {
+    fn a_bare_module_import_is_ok() {
         // A sibling `.jde` file is imported by bare module name; resolution is
-        // deferred to run/build, so type-check accepts it.
-        infer_ok("use my_lib");
-        infer_ok("use sub::helper");
+        // deferred to run/build, so the per-file pass accepts it.
+        resolve_ok("use my_lib");
+        resolve_ok("use sub::helper");
     }
 
     #[test]
-    fn test_infer_import_alias_is_error() {
-        let err = infer_err("use my_lib as m");
+    fn an_import_alias_is_an_error() {
+        let err = resolve_err("use my_lib as m");
         assert!(matches!(err, JadeError::ImportAlias { .. }));
     }
 
     #[test]
-    fn test_infer_stdlib_import_is_ok() {
-        infer_ok("use std::math");
+    fn a_std_import_is_ok() {
+        resolve_ok("use std::math");
     }
 
     #[test]
-    fn test_infer_quoted_stdlib_import_is_error() {
-        let err = infer_err(r#"use "std/math""#);
+    fn a_quoted_std_import_is_an_error() {
+        let err = resolve_err(r#"use "std/math""#);
         assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]
-    fn test_infer_from_use_quoted_is_error() {
-        let err = infer_err(r#"from "std/math" use floor"#);
+    fn a_quoted_from_use_is_an_error() {
+        let err = resolve_err(r#"from "std/math" use floor"#);
         assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]
-    fn test_infer_from_use_dot_stdlib_is_ok() {
-        infer_ok("from std::math use floor");
+    fn a_from_use_of_a_std_package_is_ok() {
+        resolve_ok("from std::math use floor");
     }
 
-    // ── Prompts ───────────────────────────────────────────────────────────────
+    // ── Names ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_infer_prompt_decl_type() {
-        let tp = infer_ok(r#"prompt p = "hello""#);
-        let TStmt::PromptDecl { .. } = &tp.stmts[0] else { panic!() };
-    }
-
-    #[test]
-    fn test_infer_prompt_decl_non_str_is_error() {
-        let err = infer_err("prompt p = 42");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
+    fn a_prompt_declaration_is_kept() {
+        let p = resolve_ok(r#"prompt p = "hello""#);
+        assert!(matches!(&p.stmts[0], Stmt::PromptDecl { .. }));
     }
 
     #[test]
-    fn test_infer_prompt_deref_untyped_is_str() {
-        let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    #[test]
-    fn test_infer_prompt_deref_typed_int() {
-        let tp = infer_ok("prompt p = \"hi\"\nlet r = toInt(?p)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    // ── Undefined variable ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_undefined_variable_is_error() {
-        let err = infer_err("let x = y + 1");
+    fn an_undefined_variable_is_an_error() {
+        let err = resolve_err("let x = y + 1");
         assert!(matches!(err, JadeError::UndefinedVariable { .. }));
     }
 
-    /// A stdlib import must not turn the check off.
+    /// A std import must not turn the check off.
     ///
-    /// It used to: any `use` at all made every unknown name `Unknown`, so
-    /// `exit(main())` type-checked, emitted a read of a nil global, and built a
-    /// binary that did nothing. A stdlib package registers everything it
-    /// contributes, so after one there is still nothing this pass cannot
-    /// account for.
+    /// It used to: any `use` at all made every unknown name unknown, so
+    /// `exit(main())` passed, emitted a read of a nil global, and built a
+    /// binary that did nothing. A std package contributes its own name, so
+    /// after one there is still nothing this pass cannot account for.
     #[test]
-    fn test_infer_stdlib_import_does_not_excuse_undefined_variable() {
-        let err = infer_err("use std::env\nfn main() { return 0 }\nexit(main())");
+    fn a_std_import_does_not_excuse_an_undefined_variable() {
+        let err = resolve_err("use std::env\nfn main() { return 0 }\nexit(main())");
         assert!(
             matches!(&err, JadeError::UndefinedVariable { name, .. } if name == "exit"),
             "expected undefined 'exit', got {err}"
@@ -453,31 +197,30 @@ mod type_infer {
     /// The other half: leniency is kept where it is actually needed. A user
     /// module's top-level names only exist once the importer merges the
     /// modules, well after this pass, so a bare name has to be allowed through
-    /// here. The backend catches an unbound one after inlining.
+    /// here. The checker catches an unbound one after the merge.
     #[test]
-    fn test_infer_user_module_import_stays_lenient() {
-        infer_ok("use some_helper\nlet x = whatever_it_exports()");
+    fn a_user_module_import_stays_lenient() {
+        resolve_ok("use some_helper\nlet x = whatever_it_exports()");
     }
 
-    /// `from … use a, b` binds bare names this pass never sees, stdlib or not.
+    /// `from … use a, b` binds bare names this pass never sees, std or not.
     #[test]
-    fn test_infer_from_use_stays_lenient() {
-        infer_ok("from std::env use args\nlet x = args()");
+    fn a_from_use_stays_lenient() {
+        resolve_ok("from std::env use args\nlet x = args()");
     }
 
-    // ── Stdlib package contents ───────────────────────────────────────────────
+    // ── Std package contents ──────────────────────────────────────────────────
 
     /// A package's functions are known at compile time, so a name it does not
     /// have is settled here. It used to survive to run time and surface as
-    /// `struct 'dict' has no field 'round'` — a package is a dict at run time,
+    /// `struct 'dict' has no field 'round'` — a package was a dict at run time,
     /// so the report named neither the module nor a type the reader would know.
     ///
-    /// The example used to be `math.round`, which v1.3.23 added — so the name
-    /// here is deliberately one nothing will ever provide, rather than one that
-    /// is merely missing today.
+    /// The name is deliberately one nothing will ever provide, rather than one
+    /// that is merely missing today.
     #[test]
-    fn test_infer_unknown_package_fn_names_the_module() {
-        let err = infer_err("use std::math\nlet v = 2.5\nlet r = math.frobnicate(v)");
+    fn an_unknown_package_function_names_the_module() {
+        let err = resolve_err("use std::math\nlet v = 2.5\nlet r = math.frobnicate(v)");
         let JadeError::UnknownPackageFn { package, name, available, .. } = &err else {
             panic!("expected UnknownPackageFn, got {err}");
         };
@@ -488,82 +231,30 @@ mod type_infer {
 
     /// A local that shadows the package name is not checked against it.
     #[test]
-    fn test_infer_a_shadowed_package_is_not_checked() {
-        infer_ok("use std::math\nlet math = {\"round\": 1}\nlet r = math.round");
+    fn a_shadowed_package_is_not_checked() {
+        resolve_ok("use std::math\nlet math = {\"round\": 1}\nlet r = math.round");
     }
 
     /// Only an imported package. A bare `math.round` with no `use` is an
     /// undefined variable, which is a different mistake and already reported.
     #[test]
-    fn test_infer_package_check_needs_the_import() {
-        let err = infer_err("let r = math.round(2.5)");
+    fn the_package_check_needs_the_import() {
+        let err = resolve_err("let r = math.round(2.5)");
         assert!(
             matches!(&err, JadeError::UndefinedVariable { name, .. } if name == "math"),
             "expected undefined 'math', got {err}"
         );
     }
 
-    // ── Unknown propagation ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_unknown_param_propagates() {
-        // Function body with unannotated params: operator with Unknown propagates to Unknown.
-        let tp = infer_ok("fn add(x, y) {\n return x + y\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Unknown);
-    }
-
-    // ── Dict value-type tracking ───────────────────────────────────────────────
-    // A variable bound to a homogeneous dict literal lets `d[k]` infer the value's
-    // concrete type (drives the AOT backend's static print/format codegen); mixed
-    // or mutated dicts fall back to Unknown so the type is never wrong.
-
-    #[test]
-    fn test_index_homogeneous_bool_dict_is_bool() {
-        let tp = infer_ok("let d = {\"ok\": true}\nlet r = d[\"ok\"]");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_index_homogeneous_int_dict_is_int() {
-        let tp = infer_ok("let d = {\"a\": 1, \"b\": 2}\nlet r = d[\"a\"]");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_index_mixed_dict_is_unknown() {
-        let tp = infer_ok("let d = {\"name\": \"jade\", \"version\": 1}\nlet r = d[\"name\"]");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Unknown);
-    }
-
-    #[test]
-    fn test_reassigned_dict_clears_value_type() {
-        let tp = infer_ok("let d = {\"ok\": true}\nd = {\"a\": 1, \"b\": \"x\"}\nlet r = d[\"a\"]");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!() };
-        assert_eq!(value.ty, JadeType::Unknown);
-    }
-
-    #[test]
-    fn test_index_assign_heterogeneous_clears_value_type() {
-        let tp = infer_ok("let d = {\"a\": true}\nd[\"b\"] = 5\nlet r = d[\"a\"]");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!() };
-        assert_eq!(value.ty, JadeType::Unknown);
-    }
-
     // ── Pipes and typed dereferences ──────────────────────────────────────────
     //
     // A pipe calls its stages once per piece of its source, so a whole chain
-    // becomes one `TExprKind::Pipe`. A typed dereference is a call around the
+    // becomes one `ExprKind::Pipe`. A typed dereference is a call around the
     // whole reply instead, `toInt(?p)`. See `design/v2-pipes.md`.
 
-    use crate::typechecker::tir::{TExpr, TExprKind};
-
     /// The pipe a `let` holds, with its parts.
-    fn pipe_of(value: &TExpr) -> (&TExpr, &Vec<(String, TExpr)>, &str, &TExpr) {
-        let TExprKind::Pipe { source, hoisted, piece, body } = &value.kind else {
+    fn pipe_of(value: &Expr) -> (&Expr, &Vec<(String, Expr)>, &str, &Expr) {
+        let ExprKind::Pipe { source, hoisted, piece, body } = &value.kind else {
             panic!("expected Pipe, got {:?}", value.kind)
         };
         (source, hoisted, piece, body)
@@ -573,19 +264,14 @@ mod type_infer {
     /// it folds into the dereference as an `output_type`.
     #[test]
     fn a_converter_around_a_deref_becomes_an_output_type() {
-        for (conv, ty, want) in [
-            ("toInt", "int", JadeType::Int),
-            ("toChar", "char", JadeType::Char),
-            ("toBool", "bool", JadeType::Bool),
-        ] {
-            let tp = infer_ok(&format!("prompt p = \"x\"\nlet n = {conv}(?p)"));
-            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-            let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
-                panic!("expected PromptDeref, got {:?}", value.kind)
+        for (conv, ty) in [("toInt", "int"), ("toChar", "char"), ("toBool", "bool")] {
+            let p = resolve_ok(&format!("prompt p = \"x\"\nlet n = {conv}(?p)"));
+            let ExprKind::PromptDeref { output_type, grammar_expr, .. } = &let_value(&p, 1).kind
+            else {
+                panic!("expected PromptDeref, got {:?}", let_value(&p, 1).kind)
             };
             assert_eq!(output_type.as_deref(), Some(ty));
             assert!(grammar_expr.is_none());
-            assert_eq!(value.ty, want);
         }
     }
 
@@ -593,34 +279,30 @@ mod type_infer {
     /// which the static checker refuses since the reply is a str.
     #[test]
     fn a_type_function_around_a_deref_is_a_call() {
-        let tp = infer_ok("prompt p = \"x\"\nlet n = int(?p)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert!(matches!(value.kind, TExprKind::Call { .. }), "got {:?}", value.kind);
+        let p = resolve_ok("prompt p = \"x\"\nlet n = int(?p)");
+        assert!(matches!(let_value(&p, 1).kind, ExprKind::Call { .. }));
     }
 
-    /// A class registers itself under its own name, so by type alone it looks
-    /// like a function; around a dereference it is a type, not a class view.
+    /// A class is a name in scope, so by name alone it looks like something to
+    /// call; around a dereference it is a type, not a class view.
     #[test]
     fn a_class_around_a_deref_is_a_type() {
-        let tp = infer_ok("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = City(?p)");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
-            panic!("expected PromptDeref, got {:?}", value.kind)
+        let p = resolve_ok("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = City(?p)");
+        let ExprKind::PromptDeref { output_type, .. } = &let_value(&p, 2).kind else {
+            panic!("expected PromptDeref, got {:?}", let_value(&p, 2).kind)
         };
         assert_eq!(output_type.as_deref(), Some("City"));
     }
 
     #[test]
     fn a_grammar_around_a_deref_becomes_a_grammar_expr() {
-        let tp =
-            infer_ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = g(?p)");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
-            panic!("expected PromptDeref, got {:?}", value.kind)
+        let p =
+            resolve_ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = g(?p)");
+        let ExprKind::PromptDeref { output_type, grammar_expr, .. } = &let_value(&p, 2).kind else {
+            panic!("expected PromptDeref, got {:?}", let_value(&p, 2).kind)
         };
         assert!(output_type.is_none());
         assert!(grammar_expr.is_some());
-        assert_eq!(value.ty, JadeType::Str);
     }
 
     /// The old spellings of a typed dereference would call the stage on each
@@ -636,7 +318,7 @@ mod type_infer {
             ("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = ?p |> City", "City(?p)"),
             ("let g = Grammar.new('\"a\"')\nprompt p = \"x\"\nlet r = ?p |> g", "g(?p)"),
         ] {
-            let err = infer_err(src);
+            let err = resolve_err(src);
             let JadeError::WholeReplyStage { fix: got, .. } = &err else {
                 panic!("expected WholeReplyStage for {src}, got {err}")
             };
@@ -645,134 +327,556 @@ mod type_infer {
     }
 
     /// A function after a dereference runs on each piece of the reply: the
-    /// piece is a str, and the pipe is a stream of what the stage gives.
+    /// piece is the stage's first argument.
     #[test]
     fn a_function_piped_after_a_deref_runs_per_piece() {
-        let tp = infer_ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let (source, _, piece, body) = pipe_of(value);
-        assert!(matches!(source.kind, TExprKind::PromptDeref { output_type: None, .. }));
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
-        assert!(matches!(&args[0].kind, TExprKind::Identifier(n) if n == piece));
-        assert_eq!(args[0].ty, JadeType::Str);
-        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+        let p = resolve_ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
+        let (source, _, piece, body) = pipe_of(let_value(&p, 2));
+        assert!(matches!(source.kind, ExprKind::PromptDeref { output_type: None, .. }));
+        let ExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&args[0].kind, ExprKind::Identifier(n) if n == piece));
     }
 
-    /// A typed dereference is one piece, so the stage after it gets the int.
+    /// A typed dereference is one piece, so it is the pipe's source whole.
     #[test]
     fn a_function_piped_after_a_typed_deref_receives_the_converted_value() {
-        let tp = infer_ok(
+        let p = resolve_ok(
             "fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = toInt(?p) |> double",
         );
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let (source, _, _, body) = pipe_of(value);
-        assert!(matches!(source.kind, TExprKind::PromptDeref { .. }));
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        let (source, _, _, body) = pipe_of(let_value(&p, 2));
+        assert!(matches!(
+            &source.kind,
+            ExprKind::PromptDeref { output_type: Some(t), .. } if t == "int"
+        ));
+        let ExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
         assert_eq!(args.len(), 1, "the piece is the sole argument");
-        assert_eq!(args[0].ty, JadeType::Int, "double() receives an int, not the reply text");
     }
 
     /// A plain value is one piece, and the pipe gives back the stage's result.
     #[test]
     fn a_function_stage_on_an_ordinary_value_is_one_call() {
-        let tp = infer_ok("fn double(x) { return x * 2 }\nlet n = 5 |> double");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let (source, hoisted, _, body) = pipe_of(value);
-        assert!(matches!(source.kind, TExprKind::Integer(5)));
+        let p = resolve_ok("fn double(x) { return x * 2 }\nlet n = 5 |> double");
+        let (source, hoisted, _, body) = pipe_of(let_value(&p, 1));
+        assert!(matches!(source.kind, ExprKind::Integer(5)));
         assert!(hoisted.is_empty());
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        let ExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0].ty, JadeType::Int);
-        assert!(!matches!(value.ty, JadeType::Stream(_)));
     }
 
     /// The piece goes in front of the stage's own arguments, and a literal
     /// argument stays where it is, so it still takes the type it meets.
     #[test]
     fn a_call_stage_takes_the_piece_as_its_first_argument() {
-        let tp = infer_ok("fn add(a, b) { return a + b }\nlet n = 5 |> add(3)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let (_, hoisted, piece, body) = pipe_of(value);
+        let p = resolve_ok("fn add(a, b) { return a + b }\nlet n = 5 |> add(3)");
+        let (_, hoisted, piece, body) = pipe_of(let_value(&p, 1));
         assert!(hoisted.is_empty());
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        let ExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
         assert_eq!(args.len(), 2);
-        assert!(matches!(&args[0].kind, TExprKind::Identifier(n) if n == piece));
-        assert!(matches!(args[1].kind, TExprKind::Integer(3)));
+        assert!(matches!(&args[0].kind, ExprKind::Identifier(n) if n == piece));
+        assert!(matches!(args[1].kind, ExprKind::Integer(3)));
     }
 
     /// A stage argument that is neither a literal nor a name is worked out
     /// once, before the first piece, not once per piece.
     #[test]
     fn a_stage_argument_is_worked_out_once() {
-        let tp = infer_ok(
+        let p = resolve_ok(
             "fn add(a, b) { return a + b }\nfn ten() { return 10 }\nlet n = 5 |> add(ten())",
         );
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let (_, hoisted, _, body) = pipe_of(value);
+        let (_, hoisted, _, body) = pipe_of(let_value(&p, 2));
         assert_eq!(hoisted.len(), 1);
-        assert!(matches!(hoisted[0].1.kind, TExprKind::Call { .. }));
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
-        assert!(matches!(&args[1].kind, TExprKind::Identifier(n) if *n == hoisted[0].0));
+        assert!(matches!(hoisted[0].1.kind, ExprKind::Call { .. }));
+        let ExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&args[1].kind, ExprKind::Identifier(n) if *n == hoisted[0].0));
     }
 
     /// A chain is one pipe, so each piece goes through every stage before the
     /// next piece is made.
     #[test]
     fn a_chain_is_one_pipe() {
-        let tp = infer_ok(
+        let p = resolve_ok(
             "fn double(x) { return x * 2 }\nfn inc(x) { return x + 1 }\nlet n = 5 |> double |> inc",
         );
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let (source, _, piece, body) = pipe_of(value);
-        assert!(matches!(source.kind, TExprKind::Integer(5)));
-        let TExprKind::Call { callee, args, .. } = &body.kind else { panic!("expected Call") };
-        assert!(matches!(&callee.kind, TExprKind::Identifier(n) if n == "inc"));
-        let TExprKind::Call { callee, args: inner, .. } = &args[0].kind else {
+        let (source, _, piece, body) = pipe_of(let_value(&p, 2));
+        assert!(matches!(source.kind, ExprKind::Integer(5)));
+        let ExprKind::Call { callee, args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&callee.kind, ExprKind::Identifier(n) if n == "inc"));
+        let ExprKind::Call { callee, args: inner, .. } = &args[0].kind else {
             panic!("expected the inner stage to be a Call")
         };
-        assert!(matches!(&callee.kind, TExprKind::Identifier(n) if n == "double"));
-        assert!(matches!(&inner[0].kind, TExprKind::Identifier(n) if n == piece));
+        assert!(matches!(&callee.kind, ExprKind::Identifier(n) if n == "double"));
+        assert!(matches!(&inner[0].kind, ExprKind::Identifier(n) if n == piece));
     }
 
-    /// A pipe over a stream keeps the source's shape: a stream back.
+    /// A stage this file can see is not a function is refused here: a literal,
+    /// or a name bound to a prompt or a grammar. A name bound to any other
+    /// value may hold a function, so the checker decides (`mod types`).
     #[test]
-    fn a_pipe_over_a_stream_gives_a_stream() {
-        let tp = infer_ok(
-            "fn g() {\n    yield 1\n}\nfn double(x) { return x * 2 }\nlet s = g() |> double",
-        );
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let (_, _, _, body) = pipe_of(value);
-        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
-        assert_eq!(args[0].ty, JadeType::Int, "the piece is the stream's element");
-        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
-    }
-
-    #[test]
-    fn a_non_callable_stage_is_an_error() {
-        for src in ["let x = 5 |> 3", "let x = 5 |> \"nope\"", "let n = 1\nlet x = 5 |> n"] {
+    fn a_stage_that_is_plainly_not_a_function_is_an_error() {
+        for src in [
+            "let x = 5 |> 3",
+            "let x = 5 |> \"nope\"",
+            "prompt p = \"x\"\nlet x = 5 |> p",
+            "let g = Grammar.new('\"a\"')\nlet x = 5 |> g",
+        ] {
             assert!(
-                matches!(infer_err(src), JadeError::InvalidPipeStage { .. }),
+                matches!(resolve_err(src), JadeError::InvalidPipeStage { .. }),
                 "expected InvalidPipeStage for {src}",
             );
         }
     }
 
+    /// No parser-only node survives the pass, wherever a pipe was written:
+    /// nested, as an argument, inside a function, or in a class default.
+    #[test]
+    fn the_per_file_pass_leaves_no_raw_pipe() {
+        fn walk(e: &Expr) {
+            assert!(!matches!(e.kind, ExprKind::RawPipe { .. }), "a raw pipe survived: {e:?}");
+            match &e.kind {
+                ExprKind::Call { callee, args, kwargs } => {
+                    walk(callee);
+                    args.iter().for_each(walk);
+                    kwargs.iter().for_each(|(_, v)| walk(v));
+                }
+                ExprKind::Pipe { source, hoisted, body, .. } => {
+                    walk(source);
+                    hoisted.iter().for_each(|(_, v)| walk(v));
+                    walk(body);
+                }
+                ExprKind::BinOp { left, right, .. } => {
+                    walk(left);
+                    walk(right);
+                }
+                ExprKind::StructLiteral { fields, base, .. } => {
+                    fields.iter().for_each(|(_, v, _)| walk(v));
+                    base.iter().for_each(|b| walk(b));
+                }
+                ExprKind::Array { elements } => elements.iter().for_each(walk),
+                _ => {}
+            }
+        }
+        fn walk_stmts(stmts: &[Stmt]) {
+            for s in stmts {
+                match s {
+                    Stmt::Let { value, .. } | Stmt::Expr(value) => walk(value),
+                    Stmt::Return { value: Some(v), .. } => walk(v),
+                    Stmt::FnDef { body, .. } => walk_stmts(body),
+                    Stmt::StructDef { fields, .. } => {
+                        for f in fields {
+                            if let crate::frontend::ast::StructFieldDef::Let { default, .. } = f {
+                                walk(default);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let p = resolve_ok(
+            "fn double(x) { return x * 2 }\n\
+             fn f(n) { return n |> double |> double }\n\
+             class A {\n @public let d = 2 |> double\n}\n\
+             let a = A {}\n\
+             let xs = [1 |> double, f(3 |> double)]\n\
+             print((4 |> double) + 1)",
+        );
+        walk_stmts(&p.stmts);
+    }
+
+    // ── yield / streams ───────────────────────────────────────────────────────
+
+    /// A generator produces a stream, so returning a value as well asks it to be
+    /// two things. A *bare* return is fine — it stops the generator early.
+    #[test]
+    fn a_generator_cannot_also_return_a_value() {
+        let err = resolve_err("fn g() {\n    yield 1\n    return 2\n}");
+        assert!(matches!(err, JadeError::YieldAndReturn { .. }), "got {err:?}");
+        resolve_ok("fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}");
+    }
+}
+
+mod types {
+    use crate::frontend::error::JadeError;
+    use crate::typechecker::infer::{Ty, Typed, check_members, check_program};
+
+    /// Purpose: This function runs a program through the frontend, the
+    /// per-file pass and the whole-program checker, the way a build does,
+    /// prompt dereferences rewritten into the inference prelude included.
+    fn check(src: &str) -> Result<Typed, JadeError> {
+        let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
+        let program = crate::frontend::parser::parse(tokens).expect("parses");
+        let mut p = crate::typechecker::resolve::resolve(program)?;
+        check_members(&p)?;
+        crate::typechecker::resolve::fill_struct_literal_defaults(&mut p)?;
+        p.stmts = crate::infer::rewrite::inject(p.stmts).expect("the prelude compiles");
+        // The checker's answer is keyed by node address, so the program must
+        // outlive it; a leak keeps the test short.
+        let p: &'static _ = Box::leak(Box::new(p));
+        check_program(p)
+    }
+
+    fn ok(src: &str) -> Typed {
+        match check(src) {
+            Ok(t) => t,
+            Err(e) => panic!("expected the program to check, got: {e}\n{src}"),
+        }
+    }
+
+    fn rejects(src: &str, want: &str) {
+        match check(src) {
+            Ok(_) => panic!("expected an error containing '{want}', but it checked:\n{src}"),
+            Err(e) => {
+                let m = e.to_string();
+                assert!(m.contains(want), "expected '{want}' in the error, got: {m}");
+            }
+        }
+    }
+
+    fn global(t: &Typed, name: &str) -> Ty {
+        t.globals.get(name).cloned().unwrap_or_else(|| panic!("no global {name}"))
+    }
+
+    fn stream(t: Ty) -> Ty {
+        Ty::Stream(Box::new(t))
+    }
+
+    // ── Literals ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn literals_have_their_types() {
+        assert_eq!(global(&ok("let x = 42"), "x"), Ty::Int);
+        assert_eq!(global(&ok("let x = 3.14"), "x"), Ty::Float);
+        assert_eq!(global(&ok("let x = true"), "x"), Ty::Bool);
+        assert_eq!(global(&ok(r#"let x = "hello""#), "x"), Ty::Str);
+    }
+
+    /// `null` and `None` are spellings of nil alongside `nil`.
+    #[test]
+    fn every_spelling_of_nil_is_nil() {
+        for src in ["let x = null", "let x = None", "let x = nil"] {
+            assert_eq!(global(&ok(src), "x"), Ty::Nil, "failed for: {src}");
+        }
+    }
+
+    /// `bool` checks a value is a bool and never converts, so `bool(nil)` is
+    /// refused with the converter that would.
+    #[test]
+    fn a_type_function_on_nil_names_the_converter() {
+        rejects("let x = bool(nil)\nprint(x)", "toBool()");
+    }
+
+    // ── Arithmetic ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn arithmetic_has_the_operands_type() {
+        assert_eq!(global(&ok("let x = 1 + 2"), "x"), Ty::Int);
+        assert_eq!(global(&ok("let x = 1.0 + 2.0"), "x"), Ty::Float);
+        assert_eq!(global(&ok(r#"let x = "a" + "b""#), "x"), Ty::Str);
+    }
+
+    /// A literal takes the type it meets, so `1 + 2.0` is a float sum.
+    #[test]
+    fn an_int_literal_meeting_a_float_is_a_float() {
+        assert_eq!(global(&ok("let x = 1 + 2.0"), "x"), Ty::Float);
+    }
+
+    #[test]
+    fn an_int_plus_a_str_is_an_error() {
+        rejects(r#"let x = 1 + "a""#, "'+' cannot combine int and str");
+    }
+
+    // ── Logical and comparison ────────────────────────────────────────────────
+
+    #[test]
+    fn logic_and_comparison_give_bools() {
+        assert_eq!(global(&ok("let x = true && false"), "x"), Ty::Bool);
+        assert_eq!(global(&ok("let x = 1 < 2"), "x"), Ty::Bool);
+    }
+
+    #[test]
+    fn and_on_ints_is_an_error() {
+        rejects("let x = 1 && 0", "&&");
+    }
+
+    /// Strict equality: both sides must be one type.
+    #[test]
+    fn equality_across_types_is_an_error() {
+        rejects("let x = 1 == 1.0", "both sides must be the same type");
+    }
+
+    // ── Unary operators ───────────────────────────────────────────────────────
+
+    #[test]
+    fn unary_operators_keep_their_types() {
+        assert_eq!(global(&ok("let x = -5"), "x"), Ty::Int);
+        assert_eq!(global(&ok("let x = !true"), "x"), Ty::Bool);
+    }
+
+    #[test]
+    fn not_on_an_int_is_an_error() {
+        rejects("let x = !1", "'!'");
+    }
+
+    /// `!x`, `x && y` and `x || y` give a bool whatever the function is
+    /// called with, since a parameter's type comes from the call.
+    #[test]
+    fn logic_on_parameters_gives_a_bool() {
+        for src in [
+            "fn f(x) {\n return !x\n}\nlet r = f(true)",
+            "fn f(x, y) {\n return x && y\n}\nlet r = f(true, false)",
+            "fn f(x, y) {\n return x || y\n}\nlet r = f(true, false)",
+        ] {
+            assert_eq!(global(&ok(src), "r"), Ty::Bool, "failed for: {src}");
+        }
+    }
+
+    // ── Arrays ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_array_has_its_elements_type() {
+        assert_eq!(global(&ok("let a = [1, 2, 3]"), "a"), Ty::Array(Box::new(Ty::Int)));
+        assert_eq!(global(&ok(r#"let a = ["x", "y"]"#), "a"), Ty::Array(Box::new(Ty::Str)));
+    }
+
+    /// An empty array nothing fills holds nil.
+    #[test]
+    fn an_empty_array_nothing_fills_holds_nil() {
+        assert_eq!(global(&ok("let a = []"), "a"), Ty::Array(Box::new(Ty::Nil)));
+    }
+
+    /// An array holds one kind of value, so a mixed literal is refused, mixed
+    /// numbers included: `[1, 2.0]` names the conversion.
+    #[test]
+    fn a_mixed_array_is_an_error() {
+        rejects(r#"let a = [1, "hello"]"#, "the elements of an array");
+        rejects("let a = [1, 2.0]", "convert one");
+    }
+
+    /// An element worked out by a call joins the others like any value.
+    #[test]
+    fn an_element_from_a_call_joins_the_rest() {
+        let t = ok("fn f() { return 1 }\nlet a = [1, f(), 3]");
+        assert_eq!(global(&t, "a"), Ty::Array(Box::new(Ty::Int)));
+    }
+
+    /// A store of another type into an array is refused rather than widening
+    /// the element type; a store of the same type keeps it.
+    #[test]
+    fn storing_another_type_into_an_array_is_an_error() {
+        rejects("let a = [1, 2]\na[0] = \"s\"\nlet b = a[0]", "an element of 'a'");
+        assert_eq!(global(&ok("let a = [1, 2]\na[0] = 3\nlet b = a[0]"), "b"), Ty::Int);
+    }
+
+    // ── Control flow ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_bool_condition_checks() {
+        ok("if true {\n let x = 1\n}");
+        ok("while false {\n let x = 1\n}");
+    }
+
+    #[test]
+    fn an_int_condition_is_an_error() {
+        rejects("if 1 {\n let x = 2\n}", "an if condition");
+        rejects("while 1 {\n let x = 2\n}", "a while condition");
+    }
+
+    /// A `let` inside a block binds a name for that block, in the checker and
+    /// in MIR alike, so the outer binding keeps its type after it.
+    #[test]
+    fn a_let_inside_a_block_shadows_for_the_block() {
+        let t = ok("fn f() { let x = 1\n if true { let x = \"s\" }\n return x + 1 }\nlet r = f()");
+        assert_eq!(global(&t, "r"), Ty::Int);
+    }
+
+    // ── Functions ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_call_has_the_functions_return_type() {
+        assert_eq!(global(&ok("fn add(x, y) {\n return 42\n}\nlet r = add(1, 2)"), "r"), Ty::Int);
+        assert_eq!(global(&ok("fn id(x) {\n return 1\n}\nlet r = id(99)"), "r"), Ty::Int);
+    }
+
+    #[test]
+    fn a_function_with_no_return_gives_nil() {
+        assert_eq!(global(&ok("fn noop(x) {\n let y = 1\n}\nlet r = noop(1)"), "r"), Ty::Nil);
+    }
+
+    #[test]
+    fn len_gives_an_int() {
+        assert_eq!(global(&ok("let n = len([1, 2])"), "n"), Ty::Int);
+    }
+
+    /// A function's parameter types come from each call, so its result does.
+    #[test]
+    fn a_functions_type_follows_its_arguments() {
+        let t = ok("fn add(x, y) {\n return x + y\n}\nlet i = add(1, 2)\nlet f = add(1.5, 2.0)");
+        assert_eq!(global(&t, "i"), Ty::Int);
+        assert_eq!(global(&t, "f"), Ty::Float);
+    }
+
+    /// Two return types on two paths are refused, rather than typed as the
+    /// first one found, which is what v1 once did.
+    #[test]
+    fn a_function_returning_two_types_is_an_error() {
+        rejects(
+            "fn f(c) { if c { return \"s\" }  return 1 }\nprint(f(true))",
+            "this function's return values",
+        );
+    }
+
+    /// A body that returns on only some paths answers nil on the others, so
+    /// its result may be nil.
+    #[test]
+    fn a_conditional_return_joins_the_fall_through() {
+        let t = ok("fn f(c) { if c { return 1 } }\nlet r = f(true)");
+        assert_eq!(global(&t, "r"), Ty::opt(Ty::Int));
+    }
+
+    #[test]
+    fn a_function_returning_one_type_everywhere_keeps_it() {
+        let t = ok("fn f(c) { if c { return 1 }  return 2 }\nlet r = f(true)");
+        assert_eq!(global(&t, "r"), Ty::Int);
+    }
+
+    /// A trailing bare expression is a return.
+    #[test]
+    fn an_implicit_return_is_typed() {
+        let t = ok("fn double(x) { x * 2 }\nlet y = double(5) + 1");
+        assert_eq!(global(&t, "y"), Ty::Int);
+    }
+
+    // ── Classes ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_literal_has_its_class() {
+        let t = ok("class Point {\n @public x,\n @public y\n}\nlet p = Point { x: 1, y: 2 }");
+        assert_eq!(global(&t, "p"), Ty::Struct("Point".to_string()));
+        let t = ok("class Unit {}\nlet u = Unit {}");
+        assert_eq!(global(&t, "u"), Ty::Struct("Unit".to_string()));
+    }
+
+    /// Reading or setting a field the class lacks is refused once the value's
+    /// class is known.
+    #[test]
+    fn a_field_the_class_lacks_is_an_error() {
+        let class = "class P {\n @public x\n}\nlet p = P { x: 1 }\n";
+        rejects(&format!("{class}print(p.z)"), "class 'P' has no field 'z'");
+        rejects(&format!("{class}p.z = 3"), "class 'P' has no field 'z'");
+    }
+
+    /// A prompt field holds text.
+    #[test]
+    fn a_prompt_field_must_be_a_str() {
+        let class = "class A {\n @public prompt q = \"x\"\n}\n";
+        rejects(&format!("{class}let a = A {{ q: 5 }}"), "a prompt field must be a str");
+    }
+
+    /// A copy-with literal reads each field it leaves out from the base when
+    /// the base's class has it, and takes the field's default when it does
+    /// not, wherever the base comes from.
+    #[test]
+    fn a_copy_takes_a_default_its_base_lacks() {
+        let classes = "class Bare {\n @public name\n}\n\
+                       class Full {\n @public name,\n @public let rank = 7\n}\n\
+                       fn make() { return Bare { name: \"n\" } }\n";
+        ok(&format!("{classes}let a = Full {{ ...Bare {{ name: \"n\" }} }}\nprint(a.rank)"));
+        ok(&format!("{classes}let b = Full {{ ...make() }}\nprint(b.rank)"));
+        rejects(
+            "class Bare {\n @public name\n}\nclass Full {\n @public name,\n @public id\n}\n\
+             let f = Full { ...Bare { name: \"n\" } }",
+            "set it in the literal",
+        );
+    }
+
+    // ── Prompts ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_prompts_text_must_be_a_str() {
+        rejects("prompt p = 42", "a prompt's text must be a str");
+    }
+
+    #[test]
+    fn a_dereference_gives_a_str_or_the_type_asked_for() {
+        assert_eq!(global(&ok("prompt p = \"hi\"\nlet r = ?p"), "r"), Ty::Str);
+        assert_eq!(global(&ok("prompt p = \"hi\"\nlet r = toInt(?p)"), "r"), Ty::Int);
+        for (conv, want) in [("toChar", Ty::Char), ("toBool", Ty::Bool)] {
+            let t = ok(&format!("prompt p = \"x\"\nlet n = {conv}(?p)"));
+            assert_eq!(global(&t, "n"), want, "for {conv}");
+        }
+    }
+
+    #[test]
+    fn a_grammar_constrained_dereference_gives_a_str() {
+        let t = ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = g(?p)");
+        assert_eq!(global(&t, "r"), Ty::Str);
+    }
+
+    // ── Dicts ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn indexing_a_dict_gives_its_value_type() {
+        assert_eq!(global(&ok("let d = {\"ok\": true}\nlet r = d[\"ok\"]"), "r"), Ty::Bool);
+        assert_eq!(global(&ok("let d = {\"a\": 1, \"b\": 2}\nlet r = d[\"a\"]"), "r"), Ty::Int);
+    }
+
+    /// A dict holds one kind of value, however the mix arrives: a literal, a
+    /// reassignment, or a store.
+    #[test]
+    fn a_dict_of_mixed_values_is_an_error() {
+        rejects("let d = {\"name\": \"jade\", \"version\": 1}", "the values of a dict");
+        rejects("let d = {\"ok\": true}\nd = {\"a\": 1, \"b\": \"x\"}", "the values of a dict");
+        rejects("let d = {\"a\": true}\nd[\"b\"] = 5", "a value of 'd'");
+    }
+
+    // ── Pipes ─────────────────────────────────────────────────────────────────
+
+    /// A function after a dereference runs on each piece of the reply, a str,
+    /// and the pipe is a stream of what it gives.
+    #[test]
+    fn a_pipe_after_a_deref_is_a_stream() {
+        let t = ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
+        assert_eq!(global(&t, "r"), stream(Ty::Str));
+    }
+
+    /// A typed dereference is one piece, so the stage gets the int.
+    #[test]
+    fn a_pipe_after_a_typed_deref_gets_the_converted_value() {
+        let t = ok("fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = toInt(?p) |> double");
+        assert_eq!(global(&t, "n"), Ty::Int);
+    }
+
+    /// A plain value is one piece, and the pipe gives back the stage's result.
+    #[test]
+    fn a_pipe_over_a_plain_value_is_not_a_stream() {
+        assert_eq!(global(&ok("fn double(x) { return x * 2 }\nlet n = 5 |> double"), "n"), Ty::Int);
+    }
+
+    #[test]
+    fn a_pipe_over_a_stream_gives_a_stream() {
+        let t =
+            ok("fn g() {\n    yield 1\n}\nfn double(x) { return x * 2 }\nlet s = g() |> double");
+        assert_eq!(global(&t, "s"), stream(Ty::Int));
+    }
+
+    /// A stage bound to a value that is not a function is refused once its
+    /// type is known, in the pipe's words.
+    #[test]
+    fn a_stage_holding_an_int_is_an_error() {
+        rejects("let n = 1\nlet x = 5 |> n", "'|>' needs a function on its right");
+    }
+
     // ── char ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn indexing_a_string_infers_char() {
-        let tp = infer_ok("let s = \"hi\"\nlet c = s[0]");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert_eq!(value.ty, JadeType::Char);
+    fn indexing_a_string_gives_a_char() {
+        assert_eq!(global(&ok("let s = \"hi\"\nlet c = s[0]"), "c"), Ty::Char);
     }
 
     #[test]
     fn iterating_a_string_binds_a_char() {
-        // The loop variable's type shows up on a use of it inside the body.
-        let tp = infer_ok("for c in \"hi\" {\n    let x = c\n}");
-        let TStmt::For { body, .. } = &tp.stmts[0] else { panic!("expected For") };
-        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
-        assert_eq!(value.ty, JadeType::Char);
+        let t = ok("let s = \"hi\"\nlet last = s[0]\nfor c in s {\n    last = c\n}");
+        assert_eq!(global(&t, "last"), Ty::Char);
     }
 
     /// The documented exception to "`==` refuses to compare across types". It
@@ -785,22 +889,18 @@ mod type_infer {
             "let s = \"hi\"\nlet b = \"h\" == s[0]",
             "let s = \"hi\"\nlet b = s[0] < s[1]",
         ] {
-            let tp = infer_ok(src);
-            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-            assert_eq!(value.ty, JadeType::Bool, "for {src}");
+            assert_eq!(global(&ok(src), "b"), Ty::Bool, "for {src}");
         }
     }
 
     #[test]
-    fn concatenating_a_char_with_a_str_yields_a_str() {
+    fn concatenating_a_char_with_a_str_gives_a_str() {
         for src in [
             "let s = \"hi\"\nlet r = s[0] + \"x\"",
             "let s = \"hi\"\nlet r = \"x\" + s[0]",
             "let s = \"hi\"\nlet r = s[0] + s[1]",
         ] {
-            let tp = infer_ok(src);
-            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-            assert_eq!(value.ty, JadeType::Str, "for {src}");
+            assert_eq!(global(&ok(src), "r"), Ty::Str, "for {src}");
         }
     }
 
@@ -808,209 +908,71 @@ mod type_infer {
 
     #[test]
     fn a_function_that_yields_returns_a_stream() {
-        let tp = infer_ok("fn g() {\n    yield 1\n}\nlet s = g()");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Int)));
+        assert_eq!(global(&ok("fn g() {\n    yield 1\n}\nlet s = g()"), "s"), stream(Ty::Int));
     }
 
     /// A `yield` anywhere in the body counts, not just at the top level.
     #[test]
     fn a_yield_inside_a_loop_still_makes_a_generator() {
-        let tp = infer_ok("fn g(n) {\n    while n > 0 {\n        yield n\n    }\n}\nlet s = g(3)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+        let t = ok("fn g(n) {\n    while n > 0 {\n        yield n\n    }\n}\nlet s = g(3)");
+        assert_eq!(global(&t, "s"), stream(Ty::Int));
     }
 
-    /// The same widening rule a mixed array literal follows: disagreement is not
-    /// an error, it just stops being specific.
+    /// A stream holds one kind of value, as an array does.
     #[test]
-    fn yielded_types_that_disagree_widen_to_unknown() {
-        let tp = infer_ok("fn g() {\n    yield 1\n    yield \"two\"\n}\nlet s = g()");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Unknown)));
+    fn yielded_types_that_disagree_are_an_error() {
+        rejects("fn g() {\n    yield 1\n    yield \"two\"\n}\nprint(g())", "do not mix");
     }
 
     #[test]
     fn iterating_a_stream_binds_its_element_type() {
-        let tp = infer_ok("fn g() {\n    yield 1\n}\nfor x in g() {\n    let y = x\n}");
-        let TStmt::For { body, .. } = &tp.stmts[1] else { panic!("expected For") };
-        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    /// A generator produces a stream, so returning a value as well asks it to be
-    /// two things. A *bare* return is fine — it stops the generator early.
-    #[test]
-    fn a_generator_cannot_also_return_a_value() {
-        let err = infer_err("fn g() {\n    yield 1\n    return 2\n}");
-        assert!(matches!(err, JadeError::YieldAndReturn { .. }), "got {err:?}");
+        let t = ok("fn g() {\n    yield 1\n}\nlet last = 0\nfor x in g() {\n    last = x\n}");
+        assert_eq!(global(&t, "last"), Ty::Int);
     }
 
     #[test]
     fn a_generator_may_return_bare_to_stop_early() {
-        let tp = infer_ok(
+        let t = ok(
             "fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)",
         );
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+        assert_eq!(global(&t, "s"), stream(Ty::Int));
     }
 
-    /// The checker used to take the type of the *first* `return` it found and
-    /// stop, so a function returning different types on different paths was
-    /// typed as whichever came first. A caller then got a typed opcode for the
-    /// wrong type — the interpreter raised at run time for a program
-    /// `jade check` had passed, and compiled code, whose typed opcodes trust
-    /// the checker rather than re-testing the tag, read the value as the type
-    /// it was told.
-    #[test]
-    fn a_function_returning_two_types_is_unknown_not_the_first_one() {
-        let p = infer_ok("fn f(c) { if c { return \"s\" }  return 1 }");
-        assert_eq!(fn_ret(&p, "f"), JadeType::Unknown);
-    }
+    // ── Internal errors ───────────────────────────────────────────────────────
 
-    /// A body that returns on only some paths answers nil on the others, so the
-    /// fall-through joins in too. This was typed `Int`.
+    /// A parser-only pipe that skipped the per-file pass is reported as an
+    /// internal error at its span, not a panic.
     #[test]
-    fn a_conditional_return_joins_the_fall_through() {
-        let p = infer_ok("fn f(c) { if c { return 1 } }");
-        assert_eq!(fn_ret(&p, "f"), JadeType::Unknown);
-    }
-
-    /// Every path agreeing still gives a precise type — the join must not
-    /// throw away what the checker could pin down.
-    #[test]
-    fn a_function_returning_one_type_everywhere_keeps_it() {
-        let p = infer_ok("fn f(c) { if c { return 1 }  return 2 }");
-        assert_eq!(fn_ret(&p, "f"), JadeType::Int);
-    }
-
-    /// A trailing bare expression is a return: the emitter turns it into
-    /// `Return(Some(..))` and `docs/docs/functions.md` documents it. The
-    /// checker did not look at it, so `fn double(x) { x * 2 }` was typed `Nil`
-    /// and `double(5) + 1` was rejected with "got nil + int" for a program that
-    /// runs correctly.
-    #[test]
-    fn an_implicit_return_is_typed() {
-        let p = infer_ok("fn double(x) { x * 2 }");
-        assert_ne!(fn_ret(&p, "double"), JadeType::Nil);
-        infer_ok("fn double(x) { x * 2 }\nlet y = double(5) + 1");
-    }
-
-    /// The emitter has no block scoping — a `let` inside a block rebinds the
-    /// name for the rest of the function, which is what the docs describe. The
-    /// checker treated it as a shadow that ended with the block, so it went on
-    /// typing the outer binding while the slot held the inner value.
-    #[test]
-    fn a_let_inside_a_block_rebinds_for_the_checker_too() {
-        assert!(
-            infer_src("fn f() { let x = 1\n if true { let x = \"s\" }\n return x + 1 }").is_err(),
-            "the checker must see the rebinding the emitter performs"
-        );
-        // A block that does not shadow anything leaves the outer binding alone.
-        infer_ok("fn f() { let x = 1\n if true { let y = \"s\" }\n return x + 1 }");
-    }
-
-    /// Storing another type into an array makes it heterogeneous, so the
-    /// tracked element type is no longer true. It used to stay, and `a[0] + 1`
-    /// reached the backends as a typed `AddInt` over a string.
-    #[test]
-    fn storing_a_different_type_widens_the_array_element_type() {
-        // The read after the store is `Unknown`, not the stale `Int`, so the
-        // operation goes through the tag-dispatching path and raises properly
-        // rather than being trusted. A mixed array is a legal Jade value, so
-        // widening is the fix and rejecting would not be.
-        let p = infer_ok("let a = [1, 2]\na[0] = \"s\"\nlet b = a[0]");
-        assert_eq!(global_ty(&p, "b"), Some(JadeType::Unknown));
-
-        // A store of the tracked type keeps the tracking, so ordinary code
-        // does not lose its precise element type.
-        let p = infer_ok("let a = [1, 2]\na[0] = 3\nlet b = a[0]");
-        assert_eq!(global_ty(&p, "b"), Some(JadeType::Int));
+    fn a_raw_pipe_reaching_the_checker_is_an_internal_error() {
+        let tokens = crate::frontend::lexer::tokenize("fn d(x) { return x }\nlet n = 5 |> d")
+            .expect("lexes");
+        let program = crate::frontend::parser::parse(tokens).expect("parses");
+        let err = check_program(&program).expect_err("the checker refuses a raw pipe");
+        assert!(err.to_string().contains("internal compiler error"), "got {err}");
+        assert!(err.to_string().starts_with("[2:"), "carries the span: {err}");
     }
 }
 
-mod tir {
+mod tree {
+    use crate::frontend::ast::{Expr, ExprKind, Program, Stmt};
     use crate::frontend::error::Span;
-    use crate::typechecker::tir::{JadeType, TExpr, TExprKind, TProgram, TStmt};
 
     fn sp() -> Span {
         Span { line: 1, col: 1 }
     }
 
     #[test]
-    fn jadetype_equality_and_clone() {
-        assert_eq!(JadeType::Int, JadeType::Int);
-        assert_ne!(JadeType::Int, JadeType::Float);
-        let t = JadeType::Array(Box::new(JadeType::Str));
-        assert_eq!(t.clone(), JadeType::Array(Box::new(JadeType::Str)));
-        assert_ne!(t, JadeType::Array(Box::new(JadeType::Int)));
-    }
-
-    #[test]
-    fn nested_array_type_equality() {
-        let a = JadeType::Array(Box::new(JadeType::Array(Box::new(JadeType::Int))));
-        let b = JadeType::Array(Box::new(JadeType::Array(Box::new(JadeType::Int))));
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn struct_type_carries_name() {
-        assert_eq!(JadeType::Struct("Point".into()), JadeType::Struct("Point".into()));
-        assert_ne!(JadeType::Struct("Point".into()), JadeType::Struct("Line".into()));
-    }
-
-    #[test]
-    fn fn_type_compares_params_and_ret() {
-        let f1 = JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Bool) };
-        let f2 = JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Bool) };
-        let f3 = JadeType::Fn { params: vec![JadeType::Float], ret: Box::new(JadeType::Bool) };
-        assert_eq!(f1, f2);
-        assert_ne!(f1, f3);
-    }
-
-    #[test]
-    fn future_wraps_inner_type() {
-        let fut = JadeType::Future(Box::new(JadeType::Int));
-        assert_eq!(fut, JadeType::Future(Box::new(JadeType::Int)));
-        assert_ne!(fut, JadeType::Int);
-    }
-
-    #[test]
-    fn jadetype_serde_roundtrip_preserves_variant() {
-        for t in [
-            JadeType::Int,
-            JadeType::Float,
-            JadeType::Bool,
-            JadeType::Str,
-            JadeType::Nil,
-            JadeType::Prompt,
-            JadeType::Grammar,
-            JadeType::Dict,
-            JadeType::Unknown,
-            JadeType::Array(Box::new(JadeType::Int)),
-            JadeType::Struct("Foo".into()),
-            JadeType::Future(Box::new(JadeType::Str)),
-        ] {
-            let json = serde_json::to_string(&t).expect("serialize");
-            let back: JadeType = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(t, back, "roundtrip must preserve the type");
-        }
-    }
-
-    #[test]
-    fn texpr_and_program_serde_roundtrip() {
-        let expr = TExpr { kind: TExprKind::Integer(42), ty: JadeType::Int, span: sp() };
-        let prog =
-            TProgram { stmts: vec![TStmt::Let { name: "x".into(), value: expr, span: sp() }] };
+    fn a_program_round_trips_through_serde() {
+        let expr = Expr::new(ExprKind::Integer(42), sp());
+        let prog = Program { stmts: vec![Stmt::Let { name: "x".into(), value: expr, span: sp() }] };
         let json = serde_json::to_string(&prog).expect("serialize program");
-        let back: TProgram = serde_json::from_str(&json).expect("deserialize program");
+        let back: Program = serde_json::from_str(&json).expect("deserialize program");
         assert_eq!(back.stmts.len(), 1);
         match &back.stmts[0] {
-            TStmt::Let { name, value, .. } => {
+            Stmt::Let { name, value, .. } => {
                 assert_eq!(name, "x");
-                assert_eq!(value.ty, JadeType::Int);
                 match value.kind {
-                    TExprKind::Integer(n) => assert_eq!(n, 42),
+                    ExprKind::Integer(n) => assert_eq!(n, 42),
                     ref other => panic!("expected Integer, got {:?}", other),
                 }
             }
@@ -1019,14 +981,24 @@ mod tir {
     }
 
     #[test]
-    fn texpr_carries_type_and_span() {
-        let e = TExpr {
-            kind: TExprKind::Bool(true),
-            ty: JadeType::Bool,
-            span: Span { line: 4, col: 9 },
-        };
-        assert_eq!(e.ty, JadeType::Bool);
+    fn an_expression_carries_its_span() {
+        let e = Expr::new(ExprKind::Bool(true), Span { line: 4, col: 9 });
+        assert!(matches!(e.kind, ExprKind::Bool(true)));
         assert_eq!(e.span.line, 4);
         assert_eq!(e.span.col, 9);
+    }
+
+    /// Every expression kind round-trips through bincode, which is what the
+    /// cache writes, the per-file pass's shapes included.
+    #[test]
+    fn a_resolved_tree_round_trips_through_bincode() {
+        let src = "fn double(x) { return x * 2 }\nprompt p = \"x\"\n\
+                   let n = toInt(?p) |> double |> double\nlet s = f\"{n}!\"";
+        let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
+        let program = crate::frontend::parser::parse(tokens).expect("parses");
+        let resolved = crate::typechecker::resolve::resolve(program).expect("resolves");
+        let bytes = bincode::serialize(&resolved).expect("serialize");
+        let back: Program = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(format!("{back:?}"), format!("{resolved:?}"));
     }
 }

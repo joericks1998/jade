@@ -7,43 +7,50 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::frontend::ast::Program;
-use crate::typechecker::tir::TProgram;
 
 /// Jade version baked in at compile time — used to invalidate cached artifacts
-/// when the AST format changes between releases.
+/// when the tree's format changes between releases.
 pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Independent format version for cached AST/TIR/bytecode schemas.
+/// Independent format version for the cached tree.
 /// Increment this whenever the shape of any serialized type changes so that
 /// caches from prior builds are unconditionally rejected without needing a
-/// version bump in Cargo.toml.
-/// v3: async migration added JadeType::AsyncFn/Future, TStmt::AsyncFnDef,
-///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
+/// version bump in Cargo.toml. Until 2.0.6 the cache held two trees per file,
+/// the parser's AST and the typed tree (TIR), and the history below names both.
+/// v3: async migration added the typed tree's async function and future types,
+///     its AsyncFnDef statement and Await expression, and Instr::Spawn/Await/Join
+///     — all serde-serialized.
 /// v4: Expr::PromptDeref gained a `style` field recording whether the source
 ///     spelled it `?p`, `x.(?f)`, or `x~>f`.
 /// v5: `|>` survives parsing as `Expr::Pipe` instead of being desugared into
 ///     `Expr::Call` or stored on `PromptDeref.constraint`. A v4 cache holds the
 ///     old shape, which infers to the same thing but cannot express a chain.
-/// v6: the 1.2.x types. `JadeType` gained `Char` (1.2.1), `Bytes` (1.2.2), and
-///     `Stream` (1.2.3); `Stmt`/`TStmt` gained `Yield`. Adding a variant in the
-///     middle of a serde enum renumbers every variant after it, so a v5 cache
-///     deserializes into the *wrong* types rather than failing loudly — which
-///     showed up as an imported struct losing its field defaults.
-/// v7: `JadeType` gained `Handle` (1.3.0), inserted after `Struct` and so ahead
-///     of `Fn`/`AsyncFn`/`Future`/`Unknown` — the same mid-enum renumbering that
-///     made v6 necessary, with the same silent-misread failure if not bumped.
+/// v6: the 1.2.x types. The typed tree's type enum gained `Char` (1.2.1),
+///     `Bytes` (1.2.2), and `Stream` (1.2.3); both trees gained `Yield`. Adding
+///     a variant in the middle of a serde enum renumbers every variant after
+///     it, so a v5 cache deserializes into the *wrong* types rather than failing
+///     loudly — which showed up as an imported struct losing its field defaults.
+/// v7: the typed tree's type enum gained `Handle` (1.3.0), inserted after
+///     `Struct` and so ahead of the function and future types — the same
+///     mid-enum renumbering that made v6 necessary, with the same silent-misread
+///     failure if not bumped.
 /// v17: no shape changed, but what the parser and the type pass build did. In
 ///     2.0.4 a converter such as `toInt` folds into a dereference and `int`
 ///     does not, and a class field's default passes through its type
 ///     decorators. A v16 cache holds `?p |> int` folded in, which would let a
 ///     program the checker now refuses through.
-/// v18: `Expr::PromptDeref` lost its `constraint` field and `TExprKind` gained
-///     `Pipe` (2.0.4), when a pipe began calling its stages once per piece and
-///     a typed dereference became a call around the reply, `toInt(?p)`. A v17
-///     cache holds pipes as calls and `?p |> toInt` folded in.
-/// v19: `JadeType::Handle` was removed (2.0.5), with the C foreign function
-///     interface, renumbering every variant after it.
-pub const CACHE_FORMAT_VERSION: u32 = 19;
+/// v18: `Expr::PromptDeref` lost its `constraint` field and the typed tree
+///     gained `Pipe` (2.0.4), when a pipe began calling its stages once per
+///     piece and a typed dereference became a call around the reply,
+///     `toInt(?p)`. A v17 cache holds pipes as calls and `?p |> toInt` folded in.
+/// v19: the typed tree's `Handle` type was removed (2.0.5), with the C foreign
+///     function interface, renumbering every variant after it.
+/// v20: the typed tree was removed (2.0.6). The cache holds one tree per file,
+///     what the per-file pass in `typechecker/resolve.rs` gives back, in
+///     `ast.bin`; `Expr` became a node of `kind` and `span`, with the typed
+///     tree's expression shapes and a parser-only `RawPipe`. `tir.bin` is no
+///     longer read or written.
+pub const CACHE_FORMAT_VERSION: u32 = 20;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -126,11 +133,12 @@ fn cache_dir(hash: &[u8; 32]) -> PathBuf {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Try to load a cached AST for the given content hash.
+/// Try to load a cached tree for the given content hash: the file after the
+/// per-file pass, which a hit means lexed, parsed and passed that pass.
 ///
 /// Returns `None` on any cache miss — file not found, version mismatch,
 /// or corrupt data — so callers can unconditionally fall through to a
-/// full lex + parse.
+/// full lex, parse and per-file pass.
 pub fn read_ast_cache(hash: &[u8; 32]) -> Option<Program> {
     let dir = cache_dir(hash);
 
@@ -145,10 +153,11 @@ pub fn read_ast_cache(hash: &[u8; 32]) -> Option<Program> {
     bincode::deserialize(&ast_bytes).ok()
 }
 
-/// Persist a parsed `Program` to the cache keyed by content hash.
+/// Persist a file's tree, after the per-file pass, to the cache keyed by
+/// content hash.
 ///
 /// All I/O errors are silently swallowed — a cache write failure must never
-/// cause `jade run` to error out.
+/// cause `jade check` to error out.
 pub fn write_ast_cache(hash: &[u8; 32], source_path: &str, program: &Program) {
     let dir = cache_dir(hash);
 
@@ -180,28 +189,10 @@ pub fn write_ast_cache(hash: &[u8; 32], source_path: &str, program: &Program) {
             }
         }
         #[cfg(debug_assertions)]
-        Err(e) => eprintln!("jade cache: failed to serialize AST: {e}"),
+        Err(e) => eprintln!("jade cache: failed to serialize the tree: {e}"),
         #[cfg(not(debug_assertions))]
         Err(_) => {}
     }
-}
-
-/// Try to load a cached `TProgram` for the given content hash.
-///
-/// Returns `None` on any miss (file absent, version mismatch, corrupt data).
-/// The TIR cache is only written on a successful type-check run, so a hit
-/// guarantees the source previously passed `jade check`.
-pub fn read_tir_cache(hash: &[u8; 32]) -> Option<TProgram> {
-    let dir = cache_dir(hash);
-
-    let meta_bytes = fs::read(dir.join("meta.json")).ok()?;
-    let meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
-    if meta.version != JADE_VERSION || meta.format_version != CACHE_FORMAT_VERSION {
-        return None;
-    }
-
-    let tir_bytes = fs::read(dir.join("tir.bin")).ok()?;
-    bincode::deserialize(&tir_bytes).ok()
 }
 
 // ── Cache introspection ───────────────────────────────────────────────────────
@@ -287,46 +278,6 @@ where
         }
     }
     (count, bytes)
-}
-
-/// Persist a `TProgram` to `~/.jade/cache/<prefix>/<hash>/tir.bin`.
-///
-/// All I/O errors are silently swallowed — a cache write failure must never
-/// cause `jade check` to error out.
-pub fn write_tir_cache(hash: &[u8; 32], source_path: &str, tprogram: &TProgram) {
-    let dir = cache_dir(hash);
-
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-
-    let meta = CacheMeta {
-        version: JADE_VERSION.to_string(),
-        source_path: source_path.to_string(),
-        hash: hex(hash),
-        format_version: CACHE_FORMAT_VERSION,
-    };
-    if let Ok(meta_json) = serde_json::to_vec(&meta)
-        && let Err(e) = fs::write(dir.join("meta.json"), meta_json)
-    {
-        #[cfg(debug_assertions)]
-        eprintln!("jade cache: failed to write meta.json: {e}");
-        let _ = e;
-    }
-
-    match bincode::serialize(tprogram) {
-        Ok(tir_bytes) => {
-            if let Err(e) = fs::write(dir.join("tir.bin"), tir_bytes) {
-                #[cfg(debug_assertions)]
-                eprintln!("jade cache: failed to write tir.bin: {e}");
-                let _ = e;
-            }
-        }
-        #[cfg(debug_assertions)]
-        Err(e) => eprintln!("jade cache: failed to serialize TIR: {e}"),
-        #[cfg(not(debug_assertions))]
-        Err(_) => {}
-    }
 }
 
 #[cfg(test)]

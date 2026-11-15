@@ -2,12 +2,12 @@
 
 ## What this subtree is
 
-This is the front half of the Jade compiler. It takes raw `.jde` source text and turns it into a `Program`, the untyped abstract syntax tree every later stage builds on. Nothing here knows about types, MIR, or LLVM. Its whole job is working out what the programmer wrote.
+This is the front half of the Jade compiler. It takes raw `.jde` source text and turns it into a `Program`, the abstract syntax tree every later stage reads. Since 2.0.6 it is the only tree: the per-file pass rewrites a few of its shapes in place, and the import pass, the checker and MIR read the result. No node carries a type; the checker keeps types in its own table. Nothing here knows about MIR or LLVM. Its whole job is working out what the programmer wrote.
 
 It is the first link in the one-way chain that defines the toolchain:
 
 ```
-source text → frontend → compiler (TIR, static types) → mir → backend
+source text → frontend → typechecker (per-file pass, then static types) → mir → backend
 ```
 
 No stage reaches backwards, so a change here ripples forward and never the other way.
@@ -26,14 +26,14 @@ A third choice is worth knowing before you add syntax: *prefer desugaring*. If t
 
 The parser used to rewrite `x |> f` straight into a call. Doing that meant deciding that `f` was a function, which is a question about what a name refers to, and the parser cannot answer it. So a second rule grew for `?p |> int`, where the stage is a type rather than a function. Then a `Parser::in_print_call` flag grew on top of that, to ban the one combination the two rules could not express together. The result was one operator with two parse paths, and a grammar whose legality depended on the name of the enclosing call.
 
-In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_infer::infer_pipe` lowers it. That deleted both extra paths and the flag. In 2.0.4 a pipe stopped being a call at all: it calls its stages once per piece of its source as each piece arrives, and a typed dereference is a call around the reply, `toInt(?p)`. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
+In v1.2.0, `|>` became an ordinary pipe node, and the per-file pass lowers it. That deleted both extra paths and the flag. In 2.0.4 a pipe stopped being a call at all: it calls its stages once per piece of its source as each piece arrives, and a typed dereference is a call around the reply, `toInt(?p)`. Today the parser builds `ExprKind::RawPipe`, one stage at a time, and `typechecker::resolve::resolve_pipe` replaces each chain with the flat `ExprKind::Pipe`. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
 
 ## What each file does
 
 - *`lexer.rs`* turns source text into a `Vec<Token>`. It handles Jade's string forms, meaning plain, single-quoted, triple-quoted, and f-strings, plus numeric literals, decimal and `0x` hex, with overflow detection, and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
 - *`parser.rs`* turns tokens into a `Program`. It is the largest file here. Operator precedence lives in its call chain, which runs `parse_or`, then `parse_and`, and on down to `parse_primary`. Add a precedence level by inserting a function at the right point in that chain, rather than special-casing inside an existing one.
-- *`ast.rs`* holds the AST node types, plus the small enums shared with later stages: `BinOpKind`, `UnaryOpKind`, `StructFieldDef`, and `FStrPart`. All of them are serde-serializable, because the on-disk cache stores them.
-- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here, beside the `UndefinedVariable` message it extends. Until phase 6 v1's backend also reported undefined names, for programs type inference had to let through, and it shared the hint so the two worded it the same way.
+- *`ast.rs`* holds the tree: `Program`, `Stmt`, and `Expr`, a node of an `ExprKind` and a `Span`, plus the small types shared with later stages: `BinOpKind`, `UnaryOpKind`, `StructFieldDef`, `FStrPart`, `CatchArm` and `DecoratorList`. `ExprKind` has the shapes the per-file pass fills in: `Pipe` with its hoisted arguments and piece name, `StructLiteral` with `(name, value, is_prompt)` fields and `given`, and `PromptDeref` with its `output_type` and `grammar_expr`. The parser leaves those empty or false, and builds `RawPipe`, which only the per-file pass sees. All of it is serde-serializable, because the on-disk cache stores it.
+- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here, beside the `UndefinedVariable` message it extends. Until phase 6 v1's backend also reported undefined names, for programs the per-file pass had to let through, and it shared the hint so the two worded it the same way.
 
   It also holds two limits. `MAX_NESTING_DEPTH` is how deeply the parser descends before refusing the source. `COMPILER_STACK_SIZE` is the stack `main.rs` runs the whole CLI on, 3 GiB in a debug build and 256 MiB in a release build, because every compiler stage recurses over the source. It replaced the VM's `VM_STACK_SIZE` in v2.
 - *`mod.rs`* holds module declarations only.
@@ -43,15 +43,15 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_inf
 
 *Depends on:* nothing else in the crate. This is the bottom of the stack.
 
-*Used by:* nearly everything. `typechecker/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
+*Used by:* nearly everything. `typechecker/resolve.rs` rewrites the `Program`, `aot/`, `typechecker/infer/`, `infer/rewrite.rs` and `mir/` read it, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
 
 ## Gotchas
 
-*Bump `CACHE_FORMAT_VERSION`* in `src/cache/mod.rs` whenever you change the shape of an AST node. The AST is serde-serialized into the on-disk cache, so a new field means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. If it fails after your change, that is the test doing its job.
+*Bump `CACHE_FORMAT_VERSION`* in `src/cache/mod.rs` whenever you change the shape of a node. The AST is serde-serialized into the on-disk cache, so a new field means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. If it fails after your change, that is the test doing its job.
 
 *Error messages should name the fix.* A message reading `prefix '?' cannot be applied to a field — write 'obj.(?p)' or 'obj~>p' instead` is worth far more than `unexpected token`.
 
-*Structural rules that need a counter are enforced here, not in the type checker.* `return` and `yield` need an enclosing function. `break` and `continue` need an enclosing loop. Two depth counters on the parser settle all four: `fn_depth` and `loop_depth`. The answer depends only on where the statement sits, and by the time type inference runs, the nesting has been flattened into a tree that no longer records it.
+*Structural rules that need a counter are enforced here, not in the type checker.* `return` and `yield` need an enclosing function. `break` and `continue` need an enclosing loop. Two depth counters on the parser settle all four: `fn_depth` and `loop_depth`. The answer depends only on where the statement sits, and the later passes walk a tree that no longer records the nesting they would need.
 
 *A class becomes several statements.* Since 2.0.1 a `class` body holds fields, methods, and methods declared without a body, each with optional decorators such as `@public`. The parser splits it into the shapes the later stages already know: a `StructDef` carrying the fields and a `ClassMembers` record of each member's decorators and declarations, an `ExtendBlock` of the methods written in the body, and a top-level `FnDef` named `Name::new` for a constructor. Every method gets `self` as its first parameter, since `self` is implicit; writing it is refused with `SelfIsImplicit`. A method defined outside its class, `fn Name::m(…)` or `fn module.Name::m(…)`, becomes an `ExtendBlock` marked `outside`. Because a class yields several statements, `parse_program` parses it rather than `parse_stmt`, which refuses a class anywhere but the top level. `struct` and `extend` are refused with messages naming the replacement, and `Name::member` in an expression is read as one identifier: a constructor call, or a parent call such as `Dog::speak()`. `x is Class` is a comparison-level expression, `Expr::Is`. `@public` outside a class body is refused, since a top-level name is already visible to importers.
 

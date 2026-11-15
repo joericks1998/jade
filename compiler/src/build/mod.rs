@@ -1,4 +1,4 @@
-//! Native compilation: TIR → LLVM → object → linked artifact.
+//! Native compilation: the per-file pass's tree → LLVM → object → linked artifact.
 //!
 //! This used to be a client for a build daemon listening on
 //! `$HOME/.jade/build.sock`, because code generation and the C runtime lived in
@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use crate::typechecker::tir::TProgram;
+use crate::frontend::ast::Program;
 
 pub use crate::aot::Emit;
 
@@ -26,7 +26,7 @@ pub use crate::aot::Emit;
 /// `source_path` anchors import resolution: imports resolve relative to the file
 /// being compiled, not the working directory. An IR or MIR emit is written to
 /// stdout.
-pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
+pub fn build(program: &Program, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
     let outcome = crate::aot::compile(program.clone(), Some(source_path), out, emit)?;
     if let Some(text) = outcome.ir {
         crate::stdio::write_str(&text);

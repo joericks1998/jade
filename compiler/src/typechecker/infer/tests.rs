@@ -12,10 +12,11 @@ use super::*;
 fn check(src: &str) -> Result<Typed, JadeError> {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
     let program = crate::frontend::parser::parse(tokens).expect("parses");
-    let mut tp = crate::typechecker::type_infer::infer(program).expect("v1 checker accepts it");
-    check_members(&tp)?;
-    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tp).expect("defaults fill");
-    check_program(&tp)
+    let mut program =
+        crate::typechecker::resolve::resolve(program).expect("the per-file pass accepts it");
+    check_members(&program)?;
+    crate::typechecker::resolve::fill_struct_literal_defaults(&mut program).expect("defaults fill");
+    check_program(&program)
 }
 
 /// Purpose: This function asserts a program checks.
@@ -465,10 +466,10 @@ fn refused(src: &str, want: &str) {
             return;
         }
     };
-    let result = crate::typechecker::type_infer::infer(program).and_then(|mut tp| {
-        check_members(&tp)?;
-        crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tp)?;
-        check_program(&tp).map(|_| ())
+    let result = crate::typechecker::resolve::resolve(program).and_then(|mut program| {
+        check_members(&program)?;
+        crate::typechecker::resolve::fill_struct_literal_defaults(&mut program)?;
+        check_program(&program).map(|_| ())
     });
     match result {
         Ok(()) => panic!("expected an error containing '{want}', but it compiled:\n{src}"),

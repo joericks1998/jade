@@ -144,10 +144,10 @@ pub fn program_import_paths(program: &Program) -> Vec<(String, Span)> {
 /// Check that every import reachable from these paths resolves to something
 /// that exists, following Jade modules transitively.
 ///
-/// Takes the entry file's import paths rather than its AST so a caller holding
-/// only typed IR can use it too — `jade check` reaches this from its TIR cache
-/// hit, where no AST was ever built. Imported modules are parsed as it descends,
-/// so their paths come from an AST regardless.
+/// Takes the entry file's import paths rather than its tree, so a caller that
+/// holds only the paths can use it, and `jade check` passes those of the tree
+/// it read from its cache or built. Imported modules are parsed as it
+/// descends, so their paths come from their own trees.
 ///
 /// Returns the first unresolvable import as a [`JadeError`] carrying its span,
 /// so `jade check` reports it the way `jade run` would. A module that fails to

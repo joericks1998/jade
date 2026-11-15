@@ -2,13 +2,15 @@
 
 ## What this subtree is
 
-This is the driver every command that compiles goes through: `jade build`, `jade run`, `jade test` and `jade check`. It takes one file's typed tree, merges in everything the file imports, and runs the steps that turn it into a program:
+This is the driver every command that compiles goes through: `jade build`, `jade run`, `jade test` and `jade check`. It takes one file's tree, after the per-file pass in `typechecker/resolve.rs`, merges in everything the file imports, and runs the steps that turn it into a program:
 
 ```
-TProgram → imports merged → class rules → struct defaults
-         → typechecker::infer (static types) → mir (typed functions)
-         → mir::taskcheck → backend (LLVM IR → object → linked binary)
+Program → imports merged → class rules → struct defaults → prompts rewritten
+        → typechecker::infer (static types) → mir (typed functions)
+        → mir::taskcheck → backend (LLVM IR → object → linked binary)
 ```
+
+The tree is the parser's, `frontend::ast`, all the way through; no step adds a type to a node.
 
 This directory owns the first steps and the order of the rest. Each step after the merge lives in its own directory: the checker in [`src/typechecker/infer/`](../typechecker/infer/README.md), the typed middle layer and the task check in [`src/mir/`](../mir/README.md), and code generation and linking in [`src/backend/`](../backend/README.md).
 
@@ -22,13 +24,13 @@ Until phase 6 of `design/v2-static-values.md` this directory also drove v1's bac
 
 ## What each file does
 
-- *`mod.rs`* is the driver. `merge` resolves imports, runs `typechecker::infer::check_members`, the class rules that need what a literal wrote rather than what the compiler filled in, and then fills struct defaults. `lower` runs the checker, lowers its answer to MIR, and runs `mir::taskcheck`. `compile` adds the backend: `Emit` picks a binary, the LLVM IR, or the MIR as text. The Rust packages' staticlib, when a program calls one, rides along to MIR and the backend, which links it in; the binary needs nothing beside it. `would_build` runs everything short of LLVM, for `jade check`, which builds the Rust packages too, since their signatures come from the built library.
-- *`imports.rs`* handles import resolution and module namespacing. Jade gives every imported file its own namespace, while a program has one symbol table. So this file mangles imported symbols to keep two modules that both define `greet` distinct. A `use` naming a Rust package builds the project's Rust packages the first time (`rustpkg::build`): each exported struct becomes a class with public, required fields, and each function's signature is recorded for the checker; a name the package does not export is refused, which the gotcha below explains. A file inside a source package resolves its imports against the package's own `jade.toml` first, and `[package] exports` limits what an importing project can name.
+- *`mod.rs`* is the driver. `merge` resolves imports, runs `typechecker::infer::check_members`, the class rules that need what a literal wrote rather than what the compiler filled in, then fills struct defaults with `typechecker::resolve::fill_struct_literal_defaults`, and adds the inference prelude when the program dereferences a prompt. `lower` runs the checker, lowers its answer to MIR, and runs `mir::taskcheck`. `compile` adds the backend: `Emit` picks a binary, the LLVM IR, or the MIR as text. The Rust packages' staticlib, when a program calls one, rides along to MIR and the backend, which links it in; the binary needs nothing beside it. `would_build` runs everything short of LLVM, for `jade check`, which builds the Rust packages too, since their signatures come from the built library.
+- *`imports.rs`* handles import resolution and module namespacing. Each imported file is parsed and run through the per-file pass, as the entry file was. Jade gives every imported file its own namespace, while a program has one symbol table. So this file mangles imported symbols to keep two modules that both define `greet` distinct. One renamer walks every expression, a class field's default included, since a default is the same tree as any other expression; a `RawPipe`, which the per-file pass never leaves behind, is reported as an internal error. A `use` naming a Rust package builds the project's Rust packages the first time (`rustpkg::build`): each exported struct becomes a class with public, required fields, and each function's signature is recorded for the checker; a name the package does not export is refused, which the gotcha below explains. A file inside a source package resolves its imports against the package's own `jade.toml` first, and `[package] exports` limits what an importing project can name.
 - *`tests.rs`* holds the driver tests.
 
 ## Who uses it
 
-*Depends on:* `typechecker/` for the typed tree and the checker, `mir/` and `backend/` for everything after it, `project/` and `pkg/` for library resolution.
+*Depends on:* `frontend/` for the tree, `typechecker/` for the per-file pass, the default fill and the checker, `mir/` and `backend/` for everything after it, `project/` and `pkg/` for library resolution.
 
 *Used by:* `src/build/`, which is the thin layer `cli/build.rs`, `cli/run.rs` and `cli/test.rs` call, and `cli/check.rs`, which calls `would_build`.
 

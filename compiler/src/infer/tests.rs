@@ -56,9 +56,9 @@ fn run(tag: &str, src: &str) -> String {
     std::fs::write(&file, src).unwrap();
     let tokens = crate::frontend::lexer::tokenize(src).unwrap();
     let ast = crate::frontend::parser::parse(tokens).unwrap();
-    let tp = crate::typechecker::type_infer::infer(ast).unwrap();
+    let program = crate::typechecker::resolve::resolve(ast).unwrap();
     let bin = dir.join("main");
-    crate::aot::compile(tp, Some(&file), &bin, crate::aot::Emit::Binary).unwrap();
+    crate::aot::compile(program, Some(&file), &bin, crate::aot::Emit::Binary).unwrap();
     let out = Command::new(&bin).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

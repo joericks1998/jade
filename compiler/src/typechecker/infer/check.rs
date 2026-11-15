@@ -11,9 +11,8 @@ use std::collections::HashMap;
 
 use super::ty::{FuncRef, SizedNum, Ty, with_article};
 use super::{Checker, FnKey, InstKey, Target, addr, is_nil_literal};
-use crate::frontend::ast::{BinOpKind, UnaryOpKind};
+use crate::frontend::ast::{BinOpKind, Expr, ExprKind, FStrPart, Stmt, UnaryOpKind};
 use crate::frontend::error::Span;
-use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TStmt};
 
 /// Purpose: This struct holds the state of checking one instance's body.
 pub(super) struct Frame {
@@ -49,7 +48,7 @@ impl<'a> Checker<'a> {
             elem,
             is_main: key.func == FnKey::Main,
         };
-        let body: &'a [TStmt] = match &key.func {
+        let body: &'a [Stmt] = match &key.func {
             FnKey::Main => self.top,
             FnKey::Named(n) => {
                 let info = self.fns[n].clone();
@@ -69,7 +68,7 @@ impl<'a> Checker<'a> {
         // A function's trailing bare expression is its return value:
         // `fn double(x) { x * 2 }` returns `x * 2`.
         let trailing = match body.last() {
-            Some(TStmt::Expr(e)) if !frame.is_main && frame.elem.is_none() => Some(e),
+            Some(Stmt::Expr(e)) if !frame.is_main && frame.elem.is_none() => Some(e),
             _ => None,
         };
         match trailing {
@@ -151,7 +150,7 @@ impl<'a> Checker<'a> {
     ///   already has one.
     ///
     /// Outputs: none.
-    fn check_block(&mut self, body: &'a [TStmt], f: &mut Frame, scoped: bool) {
+    fn check_block(&mut self, body: &'a [Stmt], f: &mut Frame, scoped: bool) {
         if scoped {
             f.scopes.push(HashMap::new());
             f.narrowed.push(HashMap::new());
@@ -191,9 +190,9 @@ impl<'a> Checker<'a> {
     /// - `f`: the frame.
     ///
     /// Outputs: none.
-    fn check_stmt(&mut self, s: &'a TStmt, f: &mut Frame) {
+    fn check_stmt(&mut self, s: &'a Stmt, f: &mut Frame) {
         match s {
-            TStmt::Let { name, value, span } => {
+            Stmt::Let { name, value, span } => {
                 let t = self.check_expr(value, f);
                 let slot = if f.is_main && f.scopes.len() == 1 {
                     self.globals[name].clone()
@@ -205,7 +204,7 @@ impl<'a> Checker<'a> {
                 self.clear_narrowing(f, name);
                 self.unify(&slot, &t, *span, &format!("'{name}'"));
             }
-            TStmt::Assign { name, value, span } => {
+            Stmt::Assign { name, value, span } => {
                 let t = self.check_expr(value, f);
                 let slot = match self.lookup_var(f, name) {
                     Some(slot) => slot,
@@ -218,7 +217,7 @@ impl<'a> Checker<'a> {
                 self.clear_narrowing(f, name);
                 self.accept(&slot, value, &t, *span, &format!("assigning to '{name}'"));
             }
-            TStmt::PromptDecl { name, body, span } => {
+            Stmt::PromptDecl { name, body, span } => {
                 let t = self.check_expr(body, f);
                 self.expect_text(&t, *span, "a prompt's text");
                 let slot = if f.is_main && f.scopes.len() == 1 {
@@ -230,8 +229,8 @@ impl<'a> Checker<'a> {
                 };
                 self.unify(&slot, &Ty::Prompt, *span, &format!("'{name}'"));
             }
-            TStmt::FnDef { name, decorators, span, .. }
-            | TStmt::AsyncFnDef { name, decorators, span, .. } => {
+            Stmt::FnDef { name, decorators, span, .. }
+            | Stmt::AsyncFnDef { name, decorators, span, .. } => {
                 if !f.is_main || f.scopes.len() > 1 {
                     self.report(
                         *span,
@@ -257,7 +256,7 @@ impl<'a> Checker<'a> {
                     self.unify(&slot, &cur, *span, &format!("decorated '{name}'"));
                 }
             }
-            TStmt::Return { value, span } => {
+            Stmt::Return { value, span } => {
                 let t = match value {
                     Some(v) => self.check_expr(v, f),
                     None => Ty::Nil,
@@ -274,7 +273,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            TStmt::Yield { value, span } => {
+            Stmt::Yield { value, span } => {
                 let t = self.check_expr(value, f);
                 match f.elem.clone() {
                     Some(e) => {
@@ -283,7 +282,7 @@ impl<'a> Checker<'a> {
                     None => self.report(*span, "'yield' outside a function".to_string()),
                 }
             }
-            TStmt::If { condition, then_body, else_body, span } => {
+            Stmt::If { condition, then_body, else_body, span } => {
                 let c = self.check_expr(condition, f);
                 self.unify(&c, &Ty::Bool, *span, "an if condition");
                 let (then_narrow, else_narrow) = self.narrowing_of(condition, f);
@@ -299,13 +298,13 @@ impl<'a> Checker<'a> {
                     None => {}
                 }
             }
-            TStmt::While { condition, body, span } => {
+            Stmt::While { condition, body, span } => {
                 let c = self.check_expr(condition, f);
                 self.unify(&c, &Ty::Bool, *span, "a while condition");
                 let (narrow, _) = self.narrowing_of(condition, f);
                 self.check_narrowed_block(body, f, narrow);
             }
-            TStmt::For { var, iterable, body, span } => {
+            Stmt::For { var, iterable, body, span } => {
                 let it = self.check_expr(iterable, f);
                 let elem = self.element_of(&it, *span, f, addr(s));
                 f.scopes.push(HashMap::new());
@@ -317,9 +316,9 @@ impl<'a> Checker<'a> {
                 f.scopes.pop();
                 f.narrowed.pop();
             }
-            TStmt::Break { .. } | TStmt::Continue { .. } => {}
-            TStmt::StructDef { .. } | TStmt::ExtendBlock { .. } => {}
-            TStmt::FieldAssign { object, field, value, span } => {
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::StructDef { .. } | Stmt::ExtendBlock { .. } => {}
+            Stmt::FieldAssign { object, field, value, span } => {
                 let v = self.check_expr(value, f);
                 let Some(obj) = self.lookup_var(f, object) else {
                     self.report(*span, format!("undefined variable '{object}'"));
@@ -363,7 +362,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            TStmt::IndexAssign { name, index, value, span } => {
+            Stmt::IndexAssign { name, index, value, span } => {
                 let i = self.check_expr(index, f);
                 let v = self.check_expr(value, f);
                 let Some(target) = self.lookup_var(f, name) else {
@@ -391,8 +390,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            TStmt::Use { .. } | TStmt::FromUse { .. } => {}
-            TStmt::Raise { value, span } => {
+            Stmt::Use { .. } | Stmt::FromUse { .. } => {}
+            Stmt::Raise { value, span } => {
                 let t = self.check_expr(value, f);
                 match self.store.shallow(&t) {
                     Ty::Struct(_) | Ty::Str | Ty::Error | Ty::Var(_) => {}
@@ -408,7 +407,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            TStmt::TryCatch { body, arms, span } => {
+            Stmt::TryCatch { body, arms, span } => {
                 self.check_block(body, f, true);
                 for arm in arms {
                     f.scopes.push(HashMap::new());
@@ -428,7 +427,7 @@ impl<'a> Checker<'a> {
                     f.narrowed.pop();
                 }
             }
-            TStmt::Expr(e) => {
+            Stmt::Expr(e) => {
                 self.check_expr(e, f);
             }
         }
@@ -444,7 +443,7 @@ impl<'a> Checker<'a> {
     /// Outputs: none.
     fn check_narrowed_block(
         &mut self,
-        body: &'a [TStmt],
+        body: &'a [Stmt],
         f: &mut Frame,
         narrow: HashMap<String, Ty>,
     ) {
@@ -477,16 +476,16 @@ impl<'a> Checker<'a> {
     /// Outputs: the names narrowed when the condition is true, and when it is false.
     fn narrowing_of(
         &mut self,
-        cond: &TExpr,
+        cond: &Expr,
         f: &Frame,
     ) -> (HashMap<String, Ty>, HashMap<String, Ty>) {
         let mut yes = HashMap::new();
         let mut no = HashMap::new();
         match &cond.kind {
-            TExprKind::BinOp { op: op @ (BinOpKind::Ne | BinOpKind::Eq), left, right } => {
+            ExprKind::BinOp { op: op @ (BinOpKind::Ne | BinOpKind::Eq), left, right } => {
                 let name = match (&left.kind, &right.kind) {
-                    (TExprKind::Identifier(n), _) if is_nil_literal(right) => Some(n),
-                    (_, TExprKind::Identifier(n)) if is_nil_literal(left) => Some(n),
+                    (ExprKind::Identifier(n), _) if is_nil_literal(right) => Some(n),
+                    (_, ExprKind::Identifier(n)) if is_nil_literal(left) => Some(n),
                     _ => None,
                 };
                 if let Some(n) = name
@@ -502,8 +501,8 @@ impl<'a> Checker<'a> {
             }
             // `if a is Dog { … }` reads `a` as a Dog inside, when Dog is
             // narrower than what `a` holds.
-            TExprKind::Is { value, class } => {
-                if let TExprKind::Identifier(n) = &value.kind
+            ExprKind::Is { value, class } => {
+                if let ExprKind::Identifier(n) = &value.kind
                     && let Some(slot) = self.read_var(f, n)
                     && let Ty::Struct(s) = self.store.shallow(&slot)
                     && s != *class
@@ -512,7 +511,7 @@ impl<'a> Checker<'a> {
                     yes.insert(n.clone(), Ty::Struct(class.clone()));
                 }
             }
-            TExprKind::BinOp { op: BinOpKind::And, left, right } => {
+            ExprKind::BinOp { op: BinOpKind::And, left, right } => {
                 let (l, _) = self.narrowing_of(left, f);
                 let (r, _) = self.narrowing_of(right, f);
                 yes.extend(l);
@@ -593,7 +592,7 @@ impl<'a> Checker<'a> {
     /// - `f`: the frame.
     ///
     /// Outputs: its type.
-    pub(super) fn check_expr(&mut self, e: &'a TExpr, f: &mut Frame) -> Ty {
+    pub(super) fn check_expr(&mut self, e: &'a Expr, f: &mut Frame) -> Ty {
         let t = self.check_expr_inner(e, f);
         if self.final_pass {
             let r = self.store.resolve(&t);
@@ -609,10 +608,10 @@ impl<'a> Checker<'a> {
     /// - `f`: the frame.
     ///
     /// Outputs: its type.
-    fn check_expr_inner(&mut self, e: &'a TExpr, f: &mut Frame) -> Ty {
+    fn check_expr_inner(&mut self, e: &'a Expr, f: &mut Frame) -> Ty {
         let span = e.span;
         match &e.kind {
-            TExprKind::Is { value, class } => {
+            ExprKind::Is { value, class } => {
                 let t = self.check_expr(value, f);
                 let c = super::ty::display_name(class).to_string();
                 if !self.structs.contains_key(class.as_str()) {
@@ -642,14 +641,14 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Bool
             }
-            TExprKind::Integer(_) => Ty::Int,
-            TExprKind::Float(_) => Ty::Float,
-            TExprKind::Bool(_) => Ty::Bool,
-            TExprKind::Str(_) => Ty::Str,
-            TExprKind::Identifier(name) => self.check_identifier(name, span, f, addr(e)),
-            TExprKind::Call { callee, args, kwargs } => self.check_call(e, callee, args, kwargs, f),
-            TExprKind::BinOp { op, left, right } => self.check_binop(op, left, right, span, f),
-            TExprKind::UnaryOp { op, operand } => {
+            ExprKind::Integer(_) => Ty::Int,
+            ExprKind::Float(_) => Ty::Float,
+            ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::Str(_) => Ty::Str,
+            ExprKind::Identifier(name) => self.check_identifier(name, span, f, addr(e)),
+            ExprKind::Call { callee, args, kwargs } => self.check_call(e, callee, args, kwargs, f),
+            ExprKind::BinOp { op, left, right } => self.check_binop(op, left, right, span, f),
+            ExprKind::UnaryOp { op, operand } => {
                 let t = self.check_expr(operand, f);
                 match op {
                     UnaryOpKind::Not => self.unify(&t, &Ty::Bool, span, "'!'"),
@@ -675,14 +674,14 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
-            TExprKind::StructLiteral { type_name, base, fields, .. } => {
+            ExprKind::StructLiteral { type_name, base, fields, .. } => {
                 self.check_struct_literal(type_name, base.as_deref(), fields, span, f)
             }
-            TExprKind::FieldAccess { object, field } => {
+            ExprKind::FieldAccess { object, field } => {
                 self.check_field(object, field, span, f, addr(e))
             }
-            TExprKind::Index { object, index } => self.check_index(object, index, span, f, addr(e)),
-            TExprKind::Array { elements } => {
+            ExprKind::Index { object, index } => self.check_index(object, index, span, f, addr(e)),
+            ExprKind::Array { elements } => {
                 let elem = self.slot(f, addr(e));
                 // The other elements first, so a literal meets their type: in
                 // `[b, 1]` with `b` a byte, the 1 is a byte.
@@ -702,7 +701,7 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Array(Box::new(elem))
             }
-            TExprKind::Dict { entries } => {
+            ExprKind::Dict { entries } => {
                 let val = self.slot(f, addr(e));
                 for (k, v) in entries {
                     let kt = self.check_expr(k, f);
@@ -714,20 +713,20 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Map(Box::new(val))
             }
-            TExprKind::FStr { parts } => {
+            ExprKind::FStr { parts } => {
                 for p in parts {
-                    if let TFStrPart::Expr(x) = p {
+                    if let FStrPart::Expr(x) = p {
                         self.check_expr(x, f);
                     }
                 }
                 Ty::Str
             }
-            TExprKind::PromptLiteral { body } => {
+            ExprKind::PromptLiteral { body } => {
                 let t = self.check_expr(body, f);
                 self.expect_text(&t, span, "a prompt's text");
                 Ty::Prompt
             }
-            TExprKind::PromptDeref { expr, output_type, grammar_expr } => {
+            ExprKind::PromptDeref { expr, output_type, grammar_expr, .. } => {
                 let t = self.check_expr(expr, f);
                 match self.store.shallow(&t) {
                     Ty::Prompt | Ty::Str | Ty::Var(_) => {}
@@ -749,7 +748,7 @@ impl<'a> Checker<'a> {
             // stream's element, or to the whole source when that is one piece.
             // Its value keeps the source's shape. A source whose type no pass
             // has settled yet waits for one that has.
-            TExprKind::Pipe { source, hoisted, piece, body } => {
+            ExprKind::Pipe { source, hoisted, piece, body } => {
                 let st = self.check_expr(source, f);
                 let mut scope = HashMap::new();
                 for (name, v) in hoisted {
@@ -774,6 +773,7 @@ impl<'a> Checker<'a> {
                 scope.insert(piece.clone(), pslot);
                 f.scopes.push(scope);
                 f.narrowed.push(HashMap::new());
+                self.mark_stage_calls(body, piece);
                 let bt = self.check_expr(body, f);
                 f.scopes.pop();
                 f.narrowed.pop();
@@ -785,7 +785,17 @@ impl<'a> Checker<'a> {
                     None => result,
                 }
             }
-            TExprKind::Await { expr } => {
+            // The per-file pass replaces every raw pipe with a `Pipe`.
+            ExprKind::RawPipe { .. } => {
+                self.report(
+                    span,
+                    "internal compiler error: a pipe reached the checker before the per-file \
+                     pass flattened it"
+                        .to_string(),
+                );
+                self.slot(f, addr(e))
+            }
+            ExprKind::Await { expr } => {
                 let t = self.check_expr(expr, f);
                 match self.store.shallow(&t) {
                     Ty::Future(inner) => *inner,
@@ -876,17 +886,17 @@ impl<'a> Checker<'a> {
     /// Outputs: the call's type.
     fn check_call(
         &mut self,
-        e: &'a TExpr,
-        callee: &'a TExpr,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        e: &'a Expr,
+        callee: &'a Expr,
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         f: &mut Frame,
     ) -> Ty {
         let span = e.span;
         let node = addr(e);
         // A package function: `math.floor(x)`.
-        if let TExprKind::FieldAccess { object, field } = &callee.kind
-            && let TExprKind::Identifier(pkg) = &object.kind
+        if let ExprKind::FieldAccess { object, field } = &callee.kind
+            && let ExprKind::Identifier(pkg) = &object.kind
             && self.read_var(f, pkg).is_none()
             && !self.fns.contains_key(pkg.as_str())
             && (self.packages.contains(pkg.as_str()) || pkg == "Grammar")
@@ -894,7 +904,7 @@ impl<'a> Checker<'a> {
             return self.package_call(pkg, field, args, kwargs, span, f, node);
         }
         // A method call: `obj.m(args)`.
-        if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if let ExprKind::FieldAccess { object, field } = &callee.kind {
             let recv = self.check_expr(object, f);
             let mut tys = Vec::new();
             for a in args {
@@ -906,7 +916,7 @@ impl<'a> Checker<'a> {
             return self.method_call(&recv, field, tys, args, span, f, node);
         }
         // A call by name.
-        if let TExprKind::Identifier(name) = &callee.kind
+        if let ExprKind::Identifier(name) = &callee.kind
             && self.read_var(f, name).is_none()
         {
             if name == "join" {
@@ -1001,7 +1011,7 @@ impl<'a> Checker<'a> {
     fn class_view(
         &mut self,
         class: &str,
-        arg: &'a TExpr,
+        arg: &'a Expr,
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -1046,8 +1056,8 @@ impl<'a> Checker<'a> {
         &mut self,
         class: &str,
         m: &str,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -1124,9 +1134,9 @@ impl<'a> Checker<'a> {
     fn bind_args(
         &mut self,
         name: &str,
-        params: &'a [(String, Option<TExpr>)],
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        params: &'a [(String, Option<Expr>)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
         f: &mut Frame,
     ) -> Option<Vec<Ty>> {
@@ -1227,8 +1237,36 @@ impl<'a> Checker<'a> {
             Ty::Var(_) => self.slot(f, node),
             other => {
                 let other = self.store.resolve(&other);
-                self.report(span, format!("{other} is not callable"));
+                if self.stage_calls.contains(&node) {
+                    self.report(
+                        span,
+                        format!("'|>' needs a function on its right, to call once per piece; got {other}"),
+                    );
+                } else {
+                    self.report(span, format!("{other} is not callable"));
+                }
                 self.slot(f, node)
+            }
+        }
+    }
+
+    /// Purpose: This function records the calls a pipe's body makes to its
+    /// stages: `g(f(piece), a)` calls `g` and `f`, each with the value so far
+    /// as its first argument and the piece innermost.
+    ///
+    /// Inputs:
+    /// - `body`: the stages applied to the piece.
+    /// - `piece`: the name of the piece.
+    ///
+    /// Outputs: none.
+    fn mark_stage_calls(&mut self, body: &Expr, piece: &str) {
+        let mut cur = body;
+        while let ExprKind::Call { args, .. } = &cur.kind {
+            self.stage_calls.insert(addr(cur));
+            match args.first() {
+                Some(Expr { kind: ExprKind::Identifier(n), .. }) if n == piece => break,
+                Some(inner) => cur = inner,
+                None => break,
             }
         }
     }
@@ -1283,7 +1321,7 @@ impl<'a> Checker<'a> {
     fn fill_defaults(
         &mut self,
         name: &str,
-        params: &'a [(String, Option<TExpr>)],
+        params: &'a [(String, Option<Expr>)],
         mut tys: Vec<Ty>,
         span: Span,
     ) -> Option<Vec<Ty>> {
@@ -1371,7 +1409,7 @@ impl<'a> Checker<'a> {
     /// - `what`: what the slot is, for a mismatch.
     ///
     /// Outputs: none.
-    pub(super) fn accept(&mut self, slot: &Ty, value: &TExpr, t: &Ty, span: Span, what: &str) {
+    pub(super) fn accept(&mut self, slot: &Ty, value: &Expr, t: &Ty, span: Span, what: &str) {
         if let Some(lit) = num_literal(value) {
             match self.store.shallow(slot) {
                 Ty::Sized(s) => {
@@ -1453,8 +1491,8 @@ impl<'a> Checker<'a> {
     fn check_sized_binop(
         &mut self,
         op: &BinOpKind,
-        left: &TExpr,
-        right: &TExpr,
+        left: &Expr,
+        right: &Expr,
         l: &Ty,
         r: &Ty,
         span: Span,
@@ -1552,8 +1590,8 @@ impl<'a> Checker<'a> {
     fn check_binop(
         &mut self,
         op: &BinOpKind,
-        left: &'a TExpr,
-        right: &'a TExpr,
+        left: &'a Expr,
+        right: &'a Expr,
         span: Span,
         f: &mut Frame,
     ) -> Ty {
@@ -1708,8 +1746,8 @@ impl<'a> Checker<'a> {
     fn check_struct_literal(
         &mut self,
         type_name: &str,
-        base: Option<&'a TExpr>,
-        fields: &'a [(String, TExpr, bool)],
+        base: Option<&'a Expr>,
+        fields: &'a [(String, Expr, bool)],
         span: Span,
         f: &mut Frame,
     ) -> Ty {
@@ -1749,14 +1787,38 @@ impl<'a> Checker<'a> {
                                 &format!("field '{field}' copied from the base"),
                             );
                         }
-                        (Some(_), None) => self.report(
-                            span,
-                            format!(
-                                "the base value, a {}, has no field '{field}' to copy into {}",
-                                super::ty::display_name(&bn),
-                                super::ty::display_name(type_name)
+                        // The base's class lacks the field, so the field
+                        // takes its declared default, as with no base.
+                        (Some(dst), None) => match self
+                            .default_exprs
+                            .get(&(type_name.to_string(), field.clone()))
+                            .copied()
+                        {
+                            Some(default) => {
+                                let t = self.check_expr(default, f);
+                                if self.structs[type_name].prompt_fields.contains(field) {
+                                    self.expect_text(&t, default.span, "a prompt field");
+                                } else {
+                                    self.accept(
+                                        &dst,
+                                        default,
+                                        &t,
+                                        span,
+                                        &format!("field '{field}'"),
+                                    );
+                                }
+                            }
+                            None => self.report(
+                                span,
+                                format!(
+                                    "the base value, a {}, has no field '{field}' to copy into {}, \
+                                     and the field has no default; set it in the literal, \
+                                     `{field}: …`",
+                                    super::ty::display_name(&bn),
+                                    super::ty::display_name(type_name)
+                                ),
                             ),
-                        ),
+                        },
                         _ => {}
                     }
                 }
@@ -1780,13 +1842,13 @@ impl<'a> Checker<'a> {
     /// Outputs: the field's type.
     fn check_field(
         &mut self,
-        object: &'a TExpr,
+        object: &'a Expr,
         field: &str,
         span: Span,
         f: &mut Frame,
         node: usize,
     ) -> Ty {
-        if let TExprKind::Identifier(pkg) = &object.kind
+        if let ExprKind::Identifier(pkg) = &object.kind
             && self.read_var(f, pkg).is_none()
             && self.packages.contains(pkg.as_str())
         {
@@ -1890,8 +1952,8 @@ impl<'a> Checker<'a> {
     /// Outputs: the element's type.
     fn check_index(
         &mut self,
-        object: &'a TExpr,
-        index: &'a TExpr,
+        object: &'a Expr,
+        index: &'a Expr,
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -1931,7 +1993,7 @@ impl<'a> Checker<'a> {
             Ty::Struct(_) | Ty::Error => match &index.kind {
                 // `r["status"]` on a struct reads the field, so a std result that
                 // used to be a dict reads the same either way.
-                TExprKind::Str(field) => self.field_of(&ot, field, span, f, node),
+                ExprKind::Str(field) => self.field_of(&ot, field, span, f, node),
                 _ => {
                     self.report(
                         span,
@@ -2044,7 +2106,7 @@ impl<'a> Checker<'a> {
         recv: &Ty,
         name: &str,
         tys: Vec<Ty>,
-        args: &'a [TExpr],
+        args: &'a [Expr],
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -2161,8 +2223,8 @@ impl<'a> Checker<'a> {
     /// Outputs: an array of the results.
     fn check_join(
         &mut self,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -2180,7 +2242,7 @@ impl<'a> Checker<'a> {
                 self.unify(&t, &Ty::Bool, v.span, "join's settle");
                 // The result's type depends on it, so it has to be written out.
                 match v.kind {
-                    TExprKind::Bool(b) => settle = b,
+                    ExprKind::Bool(b) => settle = b,
                     _ => self.report(
                         v.span,
                         "join's settle changes what join returns, so write `settle = true` or `settle = false`".into(),
@@ -2210,7 +2272,7 @@ impl<'a> Checker<'a> {
     /// - `node`: the call's address.
     ///
     /// Outputs: `int`.
-    fn check_wait(&mut self, args: &'a [TExpr], span: Span, f: &mut Frame, node: usize) -> Ty {
+    fn check_wait(&mut self, args: &'a [Expr], span: Span, f: &mut Frame, node: usize) -> Ty {
         self.record_target(f, node, Target::Builtin("wait".to_string()));
         if args.len() != 1 {
             self.report(
@@ -2219,7 +2281,7 @@ impl<'a> Checker<'a> {
             );
             return Ty::Int;
         }
-        if let TExprKind::Array { elements } = &args[0].kind {
+        if let ExprKind::Array { elements } = &args[0].kind {
             for el in elements {
                 let t = self.check_expr(el, f);
                 match self.store.shallow(&t) {
@@ -2254,7 +2316,7 @@ impl<'a> Checker<'a> {
     fn native_call(
         &mut self,
         name: &str,
-        args: &'a [TExpr],
+        args: &'a [Expr],
         tys: Vec<Ty>,
         span: Span,
         f: &mut Frame,
@@ -2291,19 +2353,19 @@ impl<'a> Checker<'a> {
 /// - `body`: the statements.
 ///
 /// Outputs: true when the body may finish without a `return` or `raise`.
-fn falls_off(body: &[TStmt]) -> bool {
+fn falls_off(body: &[Stmt]) -> bool {
     match body.last() {
         None => true,
-        Some(TStmt::Return { .. }) | Some(TStmt::Raise { .. }) => false,
-        Some(TStmt::If { then_body, else_body: Some(e), .. }) => {
+        Some(Stmt::Return { .. }) | Some(Stmt::Raise { .. }) => false,
+        Some(Stmt::If { then_body, else_body: Some(e), .. }) => {
             falls_off(then_body) || falls_off(e)
         }
-        Some(TStmt::TryCatch { body, arms, .. }) => {
+        Some(Stmt::TryCatch { body, arms, .. }) => {
             falls_off(body) || arms.iter().any(|a| falls_off(&a.body))
         }
-        Some(TStmt::While { condition, body, .. }) => {
+        Some(Stmt::While { condition, body, .. }) => {
             // `while true { … }` with no break never falls off.
-            !(matches!(condition.kind, TExprKind::Bool(true)) && !has_break(body))
+            !(matches!(condition.kind, ExprKind::Bool(true)) && !has_break(body))
         }
         _ => true,
     }
@@ -2316,15 +2378,12 @@ fn falls_off(body: &[TStmt]) -> bool {
 /// - `body`: the statements.
 ///
 /// Outputs: true when control never reaches the end of the block.
-fn exits(body: &[TStmt]) -> bool {
+fn exits(body: &[Stmt]) -> bool {
     match body.last() {
         Some(
-            TStmt::Return { .. }
-            | TStmt::Raise { .. }
-            | TStmt::Break { .. }
-            | TStmt::Continue { .. },
+            Stmt::Return { .. } | Stmt::Raise { .. } | Stmt::Break { .. } | Stmt::Continue { .. },
         ) => true,
-        Some(TStmt::If { then_body, else_body: Some(e), .. }) => exits(then_body) && exits(e),
+        Some(Stmt::If { then_body, else_body: Some(e), .. }) => exits(then_body) && exits(e),
         _ => false,
     }
 }
@@ -2335,13 +2394,13 @@ fn exits(body: &[TStmt]) -> bool {
 /// - `body`: the loop's statements.
 ///
 /// Outputs: true when a `break` reaches this loop.
-fn has_break(body: &[TStmt]) -> bool {
+fn has_break(body: &[Stmt]) -> bool {
     body.iter().any(|s| match s {
-        TStmt::Break { .. } => true,
-        TStmt::If { then_body, else_body, .. } => {
+        Stmt::Break { .. } => true,
+        Stmt::If { then_body, else_body, .. } => {
             has_break(then_body) || else_body.as_deref().is_some_and(has_break)
         }
-        TStmt::TryCatch { body, arms, .. } => {
+        Stmt::TryCatch { body, arms, .. } => {
             has_break(body) || arms.iter().any(|a| has_break(&a.body))
         }
         _ => false,
@@ -2354,12 +2413,12 @@ fn has_break(body: &[TStmt]) -> bool {
 /// - `e`: the default.
 ///
 /// Outputs: its type.
-fn literal_type(e: &TExpr) -> Ty {
+fn literal_type(e: &Expr) -> Ty {
     match &e.kind {
-        TExprKind::Integer(_) => Ty::Int,
-        TExprKind::Float(_) => Ty::Float,
-        TExprKind::Bool(_) => Ty::Bool,
-        TExprKind::Str(_) => Ty::Str,
+        ExprKind::Integer(_) => Ty::Int,
+        ExprKind::Float(_) => Ty::Float,
+        ExprKind::Bool(_) => Ty::Bool,
+        ExprKind::Str(_) => Ty::Str,
         _ => Ty::Nil,
     }
 }
@@ -2384,13 +2443,13 @@ pub(super) enum NumLit {
 /// - `e`: an expression.
 ///
 /// Outputs: the literal's value, or `None` when `e` is not a number literal.
-pub(super) fn num_literal(e: &TExpr) -> Option<NumLit> {
+pub(super) fn num_literal(e: &Expr) -> Option<NumLit> {
     match &e.kind {
-        TExprKind::Integer(v) => Some(NumLit::Int(*v as i128)),
-        TExprKind::Float(x) => Some(NumLit::Float(*x)),
-        TExprKind::UnaryOp { op: UnaryOpKind::Neg, operand } => match &operand.kind {
-            TExprKind::Integer(v) => Some(NumLit::Int(-(*v as i128))),
-            TExprKind::Float(x) => Some(NumLit::Float(-*x)),
+        ExprKind::Integer(v) => Some(NumLit::Int(*v as i128)),
+        ExprKind::Float(x) => Some(NumLit::Float(*x)),
+        ExprKind::UnaryOp { op: UnaryOpKind::Neg, operand } => match &operand.kind {
+            ExprKind::Integer(v) => Some(NumLit::Int(-(*v as i128))),
+            ExprKind::Float(x) => Some(NumLit::Float(-*x)),
             _ => None,
         },
         _ => None,

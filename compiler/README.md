@@ -11,7 +11,7 @@ The commands below run from the repo root, where the workspace, `target/` and `e
 Every directory under `src/` has its own `README.md`. Read them in the order the compiler runs, because almost every change makes more sense once you know which stage it belongs to.
 
 1. [`src/frontend/`](src/frontend/README.md) turns source text into tokens and then an AST. Start here if you are touching syntax.
-2. [`src/typechecker/`](src/typechecker/README.md) infers types and produces TIR, and its `infer/` gives every value one static type. Start here if you are touching types.
+2. [`src/typechecker/`](src/typechecker/README.md) rewrites each file's tree in a per-file pass, and its `infer/` gives every value one static type. Start here if you are touching types.
 3. [`src/mir/`](src/mir/README.md) lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
 4. [`src/backend/`](src/backend/README.md) turns MIR into LLVM IR and links a binary against the C library alone. What v1 called the runtime is support code here, emitted into each program only where it is used.
 5. [`examples/`](../examples/README.md), at the repo root, is the fixture suite. A language change starts here.
@@ -82,8 +82,8 @@ Data flows one way through the compiler, and no stage reaches backwards:
 source text
   → frontend/lexer.rs         → Vec<Token>
   → frontend/parser.rs        → Program (AST)
-  → typechecker/type_infer.rs → TProgram (TIR), per file
-  → aot/imports.rs            → one merged TProgram
+  → typechecker/resolve.rs    → Program (AST, rewritten), per file
+  → aot/imports.rs            → one merged Program
   → typechecker/infer/        → Typed: one static type for every value
   → mir/                      → MIR, checked by mir/taskcheck.rs
   → backend/                  → LLVM IR → object → binary, linked by LLD
@@ -108,7 +108,7 @@ Follow the pipeline in order:
 1. Token or tokens in `frontend/lexer.rs`
 2. AST node or nodes in `frontend/ast.rs`
 3. Parse rule or rules in `frontend/parser.rs`
-4. Lowering in `typechecker/type_infer.rs`
+4. Rewriting in `typechecker/resolve.rs`, when it needs to know what a name is
 5. Static types in `typechecker/infer/`
 6. Lowering to MIR in `mir/`
 7. LLVM code in `backend/`
@@ -120,7 +120,7 @@ Operator precedence lives in the parser's call chain, which runs `parse_or` then
 
 ### Adding a built-in
 
-A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs` and its type in `register_types`; give it a static type in `typechecker/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
+A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs`; give it a static type in `typechecker/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
 
 A whole new package also needs `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`.
 
@@ -130,7 +130,7 @@ Every failure returns a `JadeError`, and every variant carries a `Span`.
 
 *No panics in the compiler.* That includes `unwrap()` on anything derived from user input.
 
-Type errors belong in `typechecker/type_infer.rs` and `typechecker/infer/`, not in MIR or the backend. By the time MIR is lowered, types are already settled.
+Errors one file can settle without types, such as an undefined name, belong in `typechecker/resolve.rs`; type errors belong in `typechecker/infer/`; neither belongs in MIR or the backend. By the time MIR is lowered, types are already settled.
 
 Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be applied to a field, write 'obj.(?p)' or 'obj~>p' instead` over `unexpected token`.
 
@@ -157,4 +157,4 @@ Both have already caused real bugs, so they are worth knowing before you hit the
 
 *Do not mutate process-global state in tests.* `cargo test` is heavily parallel, so `std::env::set_var` races against every other thread calling `getenv`. That is a genuine data race, and it is why `set_var` is `unsafe` as of the 2024 edition. It made the cache tests fail intermittently for a while. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard so cleanup survives a failing assertion.
 
-*Bump `CACHE_FORMAT_VERSION` when you change a serialized shape.* The AST and TIR are serialized with serde into the on-disk cache in `src/cache/mod.rs`. Adding a field to either one means a stale cache would deserialize into the wrong struct. A tripwire test pins the constant. If that test fails after your change, it is doing its job, not flaking.
+*Bump `CACHE_FORMAT_VERSION` when you change a serialized shape.* Each file's tree, after the per-file pass, is serialized with serde into the on-disk cache in `src/cache/mod.rs`. Adding a field to any type in it means a stale cache would deserialize into the wrong struct. A tripwire test pins the constant. If that test fails after your change, it is doing its job, not flaking.
