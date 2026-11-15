@@ -72,6 +72,37 @@ pub fn checked_div(a: i64, b: i64) -> Option<i64> {
     a.checked_div(b)
 }
 
+/// A struct whose fields are themselves arrays, optionals and structs.
+#[jade::export]
+pub struct Shape {
+    pub name: String,
+    pub corners: Vec<Point>,
+    pub tags: Option<Vec<String>>,
+    pub closed: bool,
+}
+
+#[jade::export]
+pub fn polygon(name: &str, corners: Vec<Point>) -> Shape {
+    let closed = corners.len() > 2;
+    let tags = closed.then(|| vec![format!("{} corners", corners.len())]);
+    Shape { name: name.to_string(), corners, tags, closed }
+}
+
+#[jade::export]
+pub fn perimeter_names(shape: &Shape) -> Vec<String> {
+    shape.corners.iter().map(|p| p.name.clone()).collect()
+}
+
+#[jade::export]
+pub fn double_or_zero(x: Option<i64>) -> i64 {
+    x.map_or(0, |v| v * 2)
+}
+
+#[jade::export]
+pub fn marks(bits: Vec<bool>) -> Vec<char> {
+    bits.iter().map(|b| if *b { '✓' } else { '·' }).collect()
+}
+
 /// An `Err` raises its text in the Jade program.
 #[jade::export]
 pub fn parse_port(s: &str) -> Result<u16, String> {

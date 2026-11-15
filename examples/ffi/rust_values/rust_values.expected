@@ -10,6 +10,16 @@ cba
 1.0
 2.0
 a-b
+tri
+3
+c
+[3 corners]
+true
+[a, b, c]
+nil
+42
+0
+[✓, ·, ✓]
 banana
 nil
 3

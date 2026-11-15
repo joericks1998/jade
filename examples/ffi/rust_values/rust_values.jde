@@ -34,6 +34,22 @@ print(m.x)
 print(m.y)
 print(m.name)
 
+// Arrays of structs, and a struct holding arrays, an optional and a bool, both
+// ways.
+let tri = values.polygon("tri", [a, b, values.Point { x: 4.0, y: 0.0, name: "c" }])
+print(tri.name)
+print(len(tri.corners))
+print(tri.corners[2].name)
+print(tri.tags)
+print(tri.closed)
+print(values.perimeter_names(tri))
+print(values.polygon("line", [a, b]).tags)
+
+// Optional arguments, and arrays of bools and chars.
+print(values.double_or_zero(21))
+print(values.double_or_zero(nil))
+print(values.marks([true, false, true]))
+
 // An optional comes back as nil or a value.
 let found = values.find(["apple", "banana"], "ban")
 if found != nil {
