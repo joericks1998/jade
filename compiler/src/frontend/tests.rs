@@ -626,7 +626,7 @@ mod lexer {
 mod parser {
     use crate::frontend::parser::*;
     use crate::frontend::{
-        ast::{BinOpKind, DerefStyle, Expr, Program, Stmt, StructFieldDef, UnaryOpKind},
+        ast::{BinOpKind, DerefStyle, Expr, ExprKind, Program, Stmt, StructFieldDef, UnaryOpKind},
         error::JadeError,
         lexer,
     };
@@ -660,98 +660,101 @@ mod parser {
         let p = parse_src("let x = 5");
         let Stmt::Let { name, value, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "x");
-        assert!(matches!(value, Expr::Integer { value: 5, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Integer(5), .. }));
     }
 
     #[test]
     fn test_parse_let_float() {
         let p = parse_src("let x = 1.5");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::Float { .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Float(_), .. }));
     }
 
     #[test]
     fn test_parse_addition() {
         let p = parse_src("let x = 1 + 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Add, .. }, .. }));
     }
 
     #[test]
     fn test_parse_subtraction() {
         let p = parse_src("let x = 5 - 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Sub, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Sub, .. }, .. }));
     }
 
     #[test]
     fn test_parse_multiplication() {
         let p = parse_src("let x = 2 * 4");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Mul, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Mul, .. }, .. }));
     }
 
     #[test]
     fn test_parse_division() {
         let p = parse_src("let x = 8 / 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Div, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Div, .. }, .. }));
     }
 
     #[test]
     fn test_parse_modulo() {
         let p = parse_src("let x = 7 % 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Mod, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Mod, .. }, .. }));
     }
 
     #[test]
     fn test_parse_bitwise_and() {
         let p = parse_src("let x = 6 & 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::BitAnd, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::BitAnd, .. }, .. }));
     }
 
     #[test]
     fn test_parse_bitwise_or() {
         let p = parse_src("let x = 6 | 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::BitOr, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::BitOr, .. }, .. }));
     }
 
     #[test]
     fn test_parse_bitwise_xor() {
         let p = parse_src("let x = 6 ^ 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::BitXor, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::BitXor, .. }, .. }));
     }
 
     #[test]
     fn test_parse_shl() {
         let p = parse_src("let x = 1 << 3");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Shl, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Shl, .. }, .. }));
     }
 
     #[test]
     fn test_parse_shr() {
         let p = parse_src("let x = 16 >> 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Shr, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Shr, .. }, .. }));
     }
 
     #[test]
     fn test_parse_bitnot() {
         let p = parse_src("let x = ~5");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::UnaryOp { op: UnaryOpKind::BitNot, .. }));
+        assert!(matches!(
+            value,
+            Expr { kind: ExprKind::UnaryOp { op: UnaryOpKind::BitNot, .. }, .. }
+        ));
     }
 
     #[test]
     fn test_parse_neg() {
         let p = parse_src("let x = -5");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::UnaryOp { op: UnaryOpKind::Neg, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::UnaryOp { op: UnaryOpKind::Neg, .. }, .. }));
     }
 
     #[test]
@@ -759,23 +762,33 @@ mod parser {
         let p = parse_src("let a = 1\nlet b = a");
         assert_eq!(p.stmts.len(), 2);
         let Stmt::Let { value, .. } = &p.stmts[1] else { panic!() };
-        assert!(matches!(value, Expr::Identifier { .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Identifier(_), .. }));
     }
 
     #[test]
     fn test_parse_precedence_mul_before_add() {
         let p = parse_src("let x = 2 + 3 * 4");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::BinOp { op: BinOpKind::Add, right, .. } = value else { panic!("expected Add") };
-        assert!(matches!(right.as_ref(), Expr::BinOp { op: BinOpKind::Mul, .. }));
+        let Expr { kind: ExprKind::BinOp { op: BinOpKind::Add, right, .. }, .. } = value else {
+            panic!("expected Add")
+        };
+        assert!(matches!(
+            right.as_ref(),
+            Expr { kind: ExprKind::BinOp { op: BinOpKind::Mul, .. }, .. }
+        ));
     }
 
     #[test]
     fn test_parse_precedence_grouped_overrides() {
         let p = parse_src("let x = (2 + 3) * 4");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::BinOp { op: BinOpKind::Mul, left, .. } = value else { panic!("expected Mul") };
-        assert!(matches!(left.as_ref(), Expr::BinOp { op: BinOpKind::Add, .. }));
+        let Expr { kind: ExprKind::BinOp { op: BinOpKind::Mul, left, .. }, .. } = value else {
+            panic!("expected Mul")
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expr { kind: ExprKind::BinOp { op: BinOpKind::Add, .. }, .. }
+        ));
     }
 
     #[test]
@@ -796,88 +809,95 @@ mod parser {
     fn test_parse_bool_literal_true() {
         let p = parse_src("let x = true");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::Bool { value: true, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Bool(true), .. }));
     }
 
     #[test]
     fn test_parse_bool_literal_false() {
         let p = parse_src("let x = false");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::Bool { value: false, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Bool(false), .. }));
     }
 
     #[test]
     fn test_parse_logical_and() {
         let p = parse_src("let x = true && false");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::And, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::And, .. }, .. }));
     }
 
     #[test]
     fn test_parse_logical_or() {
         let p = parse_src("let x = true || false");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Or, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Or, .. }, .. }));
     }
 
     #[test]
     fn test_parse_logical_not() {
         let p = parse_src("let x = !true");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::UnaryOp { op: UnaryOpKind::Not, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::UnaryOp { op: UnaryOpKind::Not, .. }, .. }));
     }
 
     #[test]
     fn test_parse_eq() {
         let p = parse_src("let x = 1 == 1");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Eq, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Eq, .. }, .. }));
     }
 
     #[test]
     fn test_parse_ne() {
         let p = parse_src("let x = 1 != 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Ne, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Ne, .. }, .. }));
     }
 
     #[test]
     fn test_parse_lt() {
         let p = parse_src("let x = 1 < 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Lt, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, .. }, .. }));
     }
 
     #[test]
     fn test_parse_gt() {
         let p = parse_src("let x = 2 > 1");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Gt, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Gt, .. }, .. }));
     }
 
     #[test]
     fn test_parse_le() {
         let p = parse_src("let x = 1 <= 2");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Le, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Le, .. }, .. }));
     }
 
     #[test]
     fn test_parse_ge() {
         let p = parse_src("let x = 2 >= 1");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Ge, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Ge, .. }, .. }));
     }
 
     #[test]
     fn test_parse_precedence_compare_before_and() {
         let p = parse_src("let x = 1 < 2 && 3 > 0");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::BinOp { op: BinOpKind::And, left, right, .. } = value else {
+        let Expr { kind: ExprKind::BinOp { op: BinOpKind::And, left, right, .. }, .. } = value
+        else {
             panic!("expected And")
         };
-        assert!(matches!(left.as_ref(), Expr::BinOp { op: BinOpKind::Lt, .. }));
-        assert!(matches!(right.as_ref(), Expr::BinOp { op: BinOpKind::Gt, .. }));
+        assert!(matches!(
+            left.as_ref(),
+            Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, .. }, .. }
+        ));
+        assert!(matches!(
+            right.as_ref(),
+            Expr { kind: ExprKind::BinOp { op: BinOpKind::Gt, .. }, .. }
+        ));
     }
 
     // ── function / control flow parsing ──────────────────────────────────────
@@ -906,7 +926,7 @@ mod parser {
         let p = parse_src("fn f(x) {\n    return x\n}");
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         let Stmt::Return { value, .. } = &body[0] else { panic!() };
-        assert!(matches!(value, Some(Expr::Identifier { .. })));
+        assert!(matches!(value, Some(Expr { kind: ExprKind::Identifier(_), .. })));
     }
 
     #[test]
@@ -932,7 +952,7 @@ mod parser {
     fn test_parse_call_no_args() {
         let p = parse_src("let x = f()");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { args, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::Call { args, .. }, .. } = value else { panic!() };
         assert!(args.is_empty());
     }
 
@@ -940,7 +960,7 @@ mod parser {
     fn test_parse_call_with_args() {
         let p = parse_src("let x = add(1, 2)");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { args, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::Call { args, .. }, .. } = value else { panic!() };
         assert_eq!(args.len(), 2);
     }
 
@@ -948,8 +968,8 @@ mod parser {
     fn test_parse_nested_call_as_arg() {
         let p = parse_src("let x = f(g(1))");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { args, .. } = value else { panic!() };
-        assert!(matches!(args[0], Expr::Call { .. }));
+        let Expr { kind: ExprKind::Call { args, .. }, .. } = value else { panic!() };
+        assert!(matches!(args[0], Expr { kind: ExprKind::Call { .. }, .. }));
     }
 
     #[test]
@@ -957,7 +977,7 @@ mod parser {
         let p = parse_src("fn double(x) {\n    return x\n}\nlet f = double");
         assert_eq!(p.stmts.len(), 2);
         let Stmt::Let { value, .. } = &p.stmts[1] else { panic!() };
-        assert!(matches!(value, Expr::Identifier { .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Identifier(_), .. }));
     }
 
     #[test]
@@ -1006,7 +1026,7 @@ mod parser {
         let p = parse_src("let i = 0\nwhile i < 5 {\n    let i = i + 1\n}");
         assert_eq!(p.stmts.len(), 2);
         let Stmt::While { condition, body, .. } = &p.stmts[1] else { panic!() };
-        assert!(matches!(condition, Expr::BinOp { op: BinOpKind::Lt, .. }));
+        assert!(matches!(condition, Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, .. }, .. }));
         assert_eq!(body.len(), 1);
     }
 
@@ -1085,7 +1105,7 @@ mod parser {
         let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(fields.len(), 1);
         assert!(
-            matches!(&fields[0], StructFieldDef::Let { name, default: Expr::StructLiteral { .. }, .. } if name == "inner")
+            matches!(&fields[0], StructFieldDef::Let { name, default: Expr { kind: ExprKind::StructLiteral { .. }, .. }, .. } if name == "inner")
         );
     }
 
@@ -1139,7 +1159,9 @@ mod parser {
     fn test_parse_struct_literal() {
         let p = parse_src("let p = Point { x: 1, y: 2 }");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::StructLiteral { type_name, fields, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::StructLiteral { type_name, fields, .. }, .. } = value else {
+            panic!()
+        };
         assert_eq!(type_name, "Point");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].0, "x");
@@ -1151,10 +1173,13 @@ mod parser {
     fn a_struct_literal_parses_a_copy_with_base() {
         let p = parse_src("let q = Point { ...p, x: 99 }");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::StructLiteral { type_name, base, fields, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::StructLiteral { type_name, base, fields, .. }, .. } = value
+        else {
+            panic!()
+        };
         assert_eq!(type_name, "Point");
         let Some(b) = base else { panic!("no base") };
-        assert!(matches!(b.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert!(matches!(b.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "p"));
         // Only the named field is carried; the rest are gathered when it runs.
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "x");
@@ -1165,7 +1190,9 @@ mod parser {
     fn a_plain_struct_literal_has_no_base() {
         let p = parse_src("let p = Point { x: 1, y: 2 }");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::StructLiteral { base, fields, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::StructLiteral { base, fields, .. }, .. } = value else {
+            panic!()
+        };
         assert!(base.is_none());
         assert_eq!(fields.len(), 2);
     }
@@ -1192,14 +1219,16 @@ mod parser {
     fn three_dots_lex_as_one_token_and_one_dot_still_works() {
         let p = parse_src("let v = p.x");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::FieldAccess { field, .. } if field == "x"));
+        assert!(
+            matches!(value, Expr { kind: ExprKind::FieldAccess { field, .. }, .. } if field == "x")
+        );
     }
 
     #[test]
     fn test_parse_field_access() {
         let p = parse_src("let v = p.x");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::FieldAccess { field, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::FieldAccess { field, .. }, .. } = value else { panic!() };
         assert_eq!(field, "x");
     }
 
@@ -1214,15 +1243,15 @@ mod parser {
     /// A stage that cannot be applied is rejected, but no longer by the parser.
     /// It used to match on the shape of the right-hand side, so the message
     /// talked about tokens ("expected function or call"). The stage now survives
-    /// into the AST and type inference rejects it, which lets the error name
-    /// what the stage actually turned out to be. See the `pipe_stage` tests in
-    /// `typechecker/tests.rs` for the rejection itself.
+    /// into the tree and the per-file pass or the checker rejects it, which
+    /// lets the error name what the stage actually turned out to be. See the
+    /// pipe stage tests in `typechecker/tests.rs` for the rejection itself.
     #[test]
     fn test_parse_pipe_invalid_rhs_parses_and_defers_to_inference() {
         let tokens = lexer::tokenize("5 |> (1 + 2)").unwrap();
         let p = parse(tokens).expect("parses; inference rejects it");
         let Stmt::Expr(expr) = &p.stmts[0] else { panic!("expected an expression stmt") };
-        assert!(matches!(expr, Expr::Pipe { .. }));
+        assert!(matches!(expr, Expr { kind: ExprKind::RawPipe { .. }, .. }));
     }
 
     // ── arrays ───────────────────────────────────────────────────────────────
@@ -1231,23 +1260,25 @@ mod parser {
     fn test_parse_array_literal_empty() {
         let p = parse_src("let a = []");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::Array { elements, .. } if elements.is_empty()));
+        assert!(
+            matches!(value, Expr { kind: ExprKind::Array { elements, .. }, .. } if elements.is_empty())
+        );
     }
 
     #[test]
     fn test_parse_array_literal_ints() {
         let p = parse_src("let a = [1, 2, 3]");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Array { elements, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::Array { elements, .. }, .. } = value else { panic!() };
         assert_eq!(elements.len(), 3);
-        assert!(matches!(elements[0], Expr::Integer { value: 1, .. }));
+        assert!(matches!(elements[0], Expr { kind: ExprKind::Integer(1), .. }));
     }
 
     #[test]
     fn test_parse_array_trailing_comma() {
         let p = parse_src("let a = [1, 2,]");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Array { elements, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::Array { elements, .. }, .. } = value else { panic!() };
         assert_eq!(elements.len(), 2);
     }
 
@@ -1255,7 +1286,7 @@ mod parser {
     fn test_parse_array_index() {
         let p = parse_src("let x = a[0]");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(value, Expr::Index { .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Index { .. }, .. }));
     }
 
     #[test]
@@ -1315,10 +1346,14 @@ mod parser {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::PromptDeref { expr, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with PromptDeref")
         };
-        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert!(
+            matches!(expr.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "p")
+        );
     }
 
     /// A stage after a dereference is a pipe over it, like any other pipe;
@@ -1326,14 +1361,20 @@ mod parser {
     #[test]
     fn test_parse_prompt_deref_piped() {
         let p = parse_src("let x = ?p |> clean");
-        let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::RawPipe { value, stage, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Pipe")
         };
-        let Expr::PromptDeref { expr, .. } = value.as_ref() else {
+        let Expr { kind: ExprKind::PromptDeref { expr, .. }, .. } = value.as_ref() else {
             panic!("expected the piped value to be a PromptDeref")
         };
-        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "clean"));
+        assert!(
+            matches!(expr.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "p")
+        );
+        assert!(
+            matches!(stage.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "clean")
+        );
     }
 
     #[test]
@@ -1359,10 +1400,15 @@ mod parser {
     #[test]
     fn test_prefix_deref_on_bare_prompt_still_works() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, style, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let {
+            value: Expr { kind: ExprKind::PromptDeref { expr, style, .. }, .. }, ..
+        } = &p.stmts[0]
+        else {
             panic!("expected Let with PromptDeref")
         };
-        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert!(
+            matches!(expr.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "p")
+        );
         assert_eq!(*style, DerefStyle::Prefix);
     }
 
@@ -1370,13 +1416,18 @@ mod parser {
     fn test_parse_postfix_deref() {
         for src in ["let x = obj.(?system)", "let x = obj~>system"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
+            let Stmt::Let { value: Expr { kind: ExprKind::PromptDeref { expr, .. }, .. }, .. } =
+                &p.stmts[0]
+            else {
                 panic!("expected Let with PromptDeref for {src}")
             };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+            let Expr { kind: ExprKind::FieldAccess { object, field, .. }, .. } = expr.as_ref()
+            else {
                 panic!("expected FieldAccess for {src}")
             };
-            assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
+            assert!(
+                matches!(object.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "obj")
+            );
             assert_eq!(field, "system");
         }
     }
@@ -1386,7 +1437,9 @@ mod parser {
         // `.` followed by an identifier must still be ordinary field access —
         // only `.(?` diverts into a deref.
         let p = parse_src("let x = obj.system");
-        let Stmt::Let { value: Expr::FieldAccess { field, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::FieldAccess { field, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected plain FieldAccess")
         };
         assert_eq!(field, "system");
@@ -1400,7 +1453,9 @@ mod parser {
             ("let x = obj~>p", DerefStyle::Squiggly),
         ] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { style, .. }, .. } = &p.stmts[0] else {
+            let Stmt::Let { value: Expr { kind: ExprKind::PromptDeref { style, .. }, .. }, .. } =
+                &p.stmts[0]
+            else {
                 panic!("expected Let with PromptDeref for {src}")
             };
             assert_eq!(*style, want, "wrong style for {src}");
@@ -1414,13 +1469,18 @@ mod parser {
         // the line) — the sugar is a spelling, not a semantic distinction.
         for src in ["let x = obj.(?p)", "let x = obj~>p"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
+            let Stmt::Let { value: Expr { kind: ExprKind::PromptDeref { expr, .. }, .. }, .. } =
+                &p.stmts[0]
+            else {
                 panic!("expected PromptDeref for {src}")
             };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+            let Expr { kind: ExprKind::FieldAccess { object, field, .. }, .. } = expr.as_ref()
+            else {
                 panic!("expected FieldAccess for {src}")
             };
-            assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
+            assert!(
+                matches!(object.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "obj")
+            );
             assert_eq!(field, "p");
         }
     }
@@ -1432,14 +1492,21 @@ mod parser {
     fn test_parse_postfix_deref_typed() {
         for src in ["let x = obj.(?field) |> int", "let x = obj~>field |> int"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
+            let Stmt::Let {
+                value: Expr { kind: ExprKind::RawPipe { value, stage, .. }, .. }, ..
+            } = &p.stmts[0]
+            else {
                 panic!("expected Let with Pipe for {src}")
             };
-            let Expr::PromptDeref { expr, .. } = value.as_ref() else {
+            let Expr { kind: ExprKind::PromptDeref { expr, .. }, .. } = value.as_ref() else {
                 panic!("expected a PromptDeref for {src}")
             };
-            assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-            assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
+            assert!(
+                matches!(expr.as_ref(), Expr { kind: ExprKind::FieldAccess { field, .. }, .. } if field == "field")
+            );
+            assert!(
+                matches!(stage.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "int")
+            );
         }
     }
 
@@ -1448,14 +1515,19 @@ mod parser {
         // The point of the sugar: the deref stays at the tail of a chain.
         for src in ["let x = make(1).inner.(?p)", "let x = make(1).inner~>p"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
+            let Stmt::Let { value: Expr { kind: ExprKind::PromptDeref { expr, .. }, .. }, .. } =
+                &p.stmts[0]
+            else {
                 panic!("expected Let with PromptDeref for {src}")
             };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+            let Expr { kind: ExprKind::FieldAccess { object, field, .. }, .. } = expr.as_ref()
+            else {
                 panic!("expected FieldAccess for {src}")
             };
             assert_eq!(field, "p");
-            assert!(matches!(object.as_ref(), Expr::FieldAccess { field, .. } if field == "inner"));
+            assert!(
+                matches!(object.as_ref(), Expr { kind: ExprKind::FieldAccess { field, .. }, .. } if field == "inner")
+            );
         }
     }
 
@@ -1463,7 +1535,7 @@ mod parser {
     fn test_arrow_does_not_break_bitwise_not() {
         let p = parse_src("let x = ~a > b");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Gt, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Gt, .. }, .. }));
     }
 
     /// Until v1.2.0 these three were parse errors (`StreamingWithType`): the
@@ -1486,8 +1558,10 @@ mod parser {
     fn a_deref_stage_parses_as_a_pipe() {
         let p = parse_src("let x = ?p |> int");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
-        let Expr::Pipe { value: piped, .. } = value else { panic!("expected Pipe, got {value:?}") };
-        assert!(matches!(piped.as_ref(), Expr::PromptDeref { .. }));
+        let Expr { kind: ExprKind::RawPipe { value: piped, .. }, .. } = value else {
+            panic!("expected Pipe, got {value:?}")
+        };
+        assert!(matches!(piped.as_ref(), Expr { kind: ExprKind::PromptDeref { .. }, .. }));
     }
 
     #[test]
@@ -1495,9 +1569,16 @@ mod parser {
         let p = parse_src("let x = ?p |> int |> double");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
         // Outer stage is `double`; its value is the `?p |> int` pipe.
-        let Expr::Pipe { value: inner, stage, .. } = value else { panic!("expected Pipe") };
-        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "double"));
-        assert!(matches!(inner.as_ref(), Expr::Pipe { .. }), "left-associative");
+        let Expr { kind: ExprKind::RawPipe { value: inner, stage, .. }, .. } = value else {
+            panic!("expected Pipe")
+        };
+        assert!(
+            matches!(stage.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "double")
+        );
+        assert!(
+            matches!(inner.as_ref(), Expr { kind: ExprKind::RawPipe { .. }, .. }),
+            "left-associative"
+        );
     }
 
     // ── dict literal tests ────────────────────────────────────────────────────
@@ -1505,7 +1586,9 @@ mod parser {
     #[test]
     fn test_parse_dict_empty() {
         let p = parse_src("let d = {}");
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::Dict { entries, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Dict")
         };
         assert!(entries.is_empty());
@@ -1514,18 +1597,22 @@ mod parser {
     #[test]
     fn test_parse_dict_single_entry() {
         let p = parse_src(r#"let d = {"key": 1}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::Dict { entries, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Dict")
         };
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0].0, Expr::Str { value, .. } if value == "key"));
-        assert!(matches!(&entries[0].1, Expr::Integer { value: 1, .. }));
+        assert!(matches!(&entries[0].0, Expr { kind: ExprKind::Str(value), .. } if value == "key"));
+        assert!(matches!(&entries[0].1, Expr { kind: ExprKind::Integer(1), .. }));
     }
 
     #[test]
     fn test_parse_dict_multiple_entries() {
         let p = parse_src(r#"let d = {"a": 1, "b": 2}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::Dict { entries, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Dict")
         };
         assert_eq!(entries.len(), 2);
@@ -1534,7 +1621,9 @@ mod parser {
     #[test]
     fn test_parse_dict_trailing_comma() {
         let p = parse_src(r#"let d = {"a": 1,}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::Dict { entries, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Dict")
         };
         assert_eq!(entries.len(), 1);
@@ -1544,11 +1633,15 @@ mod parser {
     fn test_parse_dict_identifier_key() {
         // Variable key: the key expression is an identifier
         let p = parse_src("let d = {k: 1}");
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+        let Stmt::Let { value: Expr { kind: ExprKind::Dict { entries, .. }, .. }, .. } =
+            &p.stmts[0]
+        else {
             panic!("expected Let with Dict")
         };
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0].0, Expr::Identifier { name, .. } if name == "k"));
+        assert!(
+            matches!(&entries[0].0, Expr { kind: ExprKind::Identifier(name), .. } if name == "k")
+        );
     }
 
     // ── default parameter values ──────────────────────────────────────────────
@@ -1559,28 +1652,32 @@ mod parser {
         let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(params.len(), 2);
         assert!(params[0].1.is_none());
-        assert!(matches!(params[1].1, Some(Expr::Integer { value: 42, .. })));
+        assert!(matches!(params[1].1, Some(Expr { kind: ExprKind::Integer(42), .. })));
     }
 
     #[test]
     fn test_parse_fn_default_param_str() {
         let p = parse_src("fn f(x, label = \"hello\") {}");
         let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(&params[1].1, Some(Expr::Str { value, .. }) if value == "hello"));
+        assert!(
+            matches!(&params[1].1, Some(Expr { kind: ExprKind::Str(value), .. }) if value == "hello")
+        );
     }
 
     #[test]
     fn test_parse_fn_default_param_nil() {
         let p = parse_src("fn f(x, on = nil) {}");
         let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(&params[1].1, Some(Expr::Identifier { name, .. }) if name == "nil"));
+        assert!(
+            matches!(&params[1].1, Some(Expr { kind: ExprKind::Identifier(name), .. }) if name == "nil")
+        );
     }
 
     #[test]
     fn test_parse_fn_default_param_bool() {
         let p = parse_src("fn f(a, flag = false) {}");
         let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
-        assert!(matches!(params[1].1, Some(Expr::Bool { value: false, .. })));
+        assert!(matches!(params[1].1, Some(Expr { kind: ExprKind::Bool(false), .. })));
     }
 
     #[test]
@@ -1597,7 +1694,7 @@ mod parser {
         let Stmt::AsyncFnDef { params, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(params.len(), 2);
         assert!(params[0].1.is_none());
-        assert!(matches!(params[1].1, Some(Expr::Integer { value: 0, .. })));
+        assert!(matches!(params[1].1, Some(Expr { kind: ExprKind::Integer(0), .. })));
     }
 
     // ── decorator argument parsing ────────────────────────────────────────────
@@ -1617,7 +1714,7 @@ mod parser {
         let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
         let (kw, expr) = &decorators[0].1[0];
         assert!(kw.is_none());
-        assert!(matches!(expr, Expr::Str { value, .. } if value == "hello"));
+        assert!(matches!(expr, Expr { kind: ExprKind::Str(value), .. } if value == "hello"));
     }
 
     #[test]
@@ -1626,7 +1723,7 @@ mod parser {
         let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
         let (kw, expr) = &decorators[0].1[0];
         assert!(kw.is_none());
-        assert!(matches!(expr, Expr::Integer { value: 3, .. }));
+        assert!(matches!(expr, Expr { kind: ExprKind::Integer(3), .. }));
     }
 
     #[test]
@@ -1635,7 +1732,7 @@ mod parser {
         let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
         let (kw, expr) = &decorators[0].1[0];
         assert_eq!(kw.as_deref(), Some("on"));
-        assert!(matches!(expr, Expr::Str { value, .. } if value == "action"));
+        assert!(matches!(expr, Expr { kind: ExprKind::Str(value), .. } if value == "action"));
     }
 
     #[test]
@@ -1670,10 +1767,14 @@ mod parser {
         let p = parse_src("@shout\nlet x = \"hi\"");
         let Stmt::Let { name, value, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "x");
-        let Expr::Call { callee, args, kwargs, .. } = value else { panic!("not a call") };
-        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "shout"));
+        let Expr { kind: ExprKind::Call { callee, args, kwargs, .. }, .. } = value else {
+            panic!("not a call")
+        };
+        assert!(
+            matches!(&**callee, Expr { kind: ExprKind::Identifier(name), .. } if name == "shout")
+        );
         assert_eq!(args.len(), 1);
-        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "hi"));
+        assert!(matches!(&args[0], Expr { kind: ExprKind::Str(value), .. } if value == "hi"));
         assert!(kwargs.is_empty());
     }
 
@@ -1682,21 +1783,25 @@ mod parser {
         let p = parse_src("@tagged\nprompt p = \"ask\"");
         let Stmt::PromptDecl { name, body, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "p");
-        let Expr::Call { callee, args, .. } = body else { panic!("not a call") };
-        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "tagged"));
-        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "ask"));
+        let Expr { kind: ExprKind::Call { callee, args, .. }, .. } = body else {
+            panic!("not a call")
+        };
+        assert!(
+            matches!(&**callee, Expr { kind: ExprKind::Identifier(name), .. } if name == "tagged")
+        );
+        assert!(matches!(&args[0], Expr { kind: ExprKind::Str(value), .. } if value == "ask"));
     }
 
     #[test]
     fn decorator_arguments_follow_the_decorated_value() {
         let p = parse_src("@fence(\"p\", cls = \"lead\")\nlet x = \"hi\"");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { args, kwargs, .. } = value else { panic!() };
+        let Expr { kind: ExprKind::Call { args, kwargs, .. }, .. } = value else { panic!() };
         // The decorated value is first; the decorator's own arguments follow,
         // with keyword arguments kept apart from positional ones.
         assert_eq!(args.len(), 2);
-        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "hi"));
-        assert!(matches!(&args[1], Expr::Str { value, .. } if value == "p"));
+        assert!(matches!(&args[0], Expr { kind: ExprKind::Str(value), .. } if value == "hi"));
+        assert!(matches!(&args[1], Expr { kind: ExprKind::Str(value), .. } if value == "p"));
         assert_eq!(kwargs.len(), 1);
         assert_eq!(kwargs[0].0, "cls");
     }
@@ -1708,22 +1813,26 @@ mod parser {
         // they agree with anything else.
         let p = parse_src("@a\n@b\nlet x = 1");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { callee, args, .. } = value else { panic!() };
-        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "b"));
-        let Expr::Call { callee: inner, .. } = &args[0] else { panic!("b's arg is not a call") };
-        assert!(matches!(&**inner, Expr::Identifier { name, .. } if name == "a"));
+        let Expr { kind: ExprKind::Call { callee, args, .. }, .. } = value else { panic!() };
+        assert!(matches!(&**callee, Expr { kind: ExprKind::Identifier(name), .. } if name == "b"));
+        let Expr { kind: ExprKind::Call { callee: inner, .. }, .. } = &args[0] else {
+            panic!("b's arg is not a call")
+        };
+        assert!(matches!(&**inner, Expr { kind: ExprKind::Identifier(name), .. } if name == "a"));
     }
 
     #[test]
     fn a_namespaced_decorator_becomes_a_field_access() {
         let p = parse_src("@style::tagged\nprompt p = \"ask\"");
         let Stmt::PromptDecl { body, .. } = &p.stmts[0] else { panic!() };
-        let Expr::Call { callee, .. } = body else { panic!() };
-        let Expr::FieldAccess { object, field, .. } = &**callee else {
+        let Expr { kind: ExprKind::Call { callee, .. }, .. } = body else { panic!() };
+        let Expr { kind: ExprKind::FieldAccess { object, field, .. }, .. } = &**callee else {
             panic!("not a field access")
         };
         assert_eq!(field, "tagged");
-        assert!(matches!(&**object, Expr::Identifier { name, .. } if name == "style"));
+        assert!(
+            matches!(&**object, Expr { kind: ExprKind::Identifier(name), .. } if name == "style")
+        );
     }
 
     #[test]
@@ -1745,7 +1854,7 @@ mod parser {
         let p = parse_src("fn f() {\n    @shout\n    let x = \"hi\"\n    return x\n}");
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         let Stmt::Let { value, .. } = &body[0] else { panic!("not a let") };
-        assert!(matches!(value, Expr::Call { .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::Call { .. }, .. }));
     }
 
     /// `struct` and `extend` were replaced by `class` in 2.0.1, and a class takes
@@ -1798,8 +1907,8 @@ mod parser {
         let Stmt::FnDef { body, .. } = &methods[0] else { panic!() };
         let Stmt::Return { value: Some(ret), .. } = &body[0] else { panic!() };
         assert!(matches!(ret,
-            Expr::FieldAccess { object, field, .. }
-            if field == "name" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "self")
+            Expr { kind: ExprKind::FieldAccess { object, field, .. }, .. }
+            if field == "name" && matches!(object.as_ref(), Expr { kind: ExprKind::Identifier(name), .. } if name == "self")
         ));
     }
 
@@ -1915,7 +2024,7 @@ mod parser {
         assert_eq!(p.stmts.len(), 1);
         assert!(matches!(
             &p.stmts[0],
-            Stmt::Let { value: Expr::Integer { value: i64::MIN, .. }, .. }
+            Stmt::Let { value: Expr { kind: ExprKind::Integer(i64::MIN), .. }, .. }
         ));
         // The largest is written as it is.
         parse_src("let x = 9223372036854775807");
@@ -1950,7 +2059,7 @@ mod ast {
     fn test_struct_field_def_name_let() {
         let f = StructFieldDef::Let {
             name: "count".into(),
-            default: Expr::Integer { value: 0, span: span() },
+            default: Expr::new(ExprKind::Integer(0), span()),
         };
         assert_eq!(f.name(), "count");
     }
@@ -1959,7 +2068,7 @@ mod ast {
     fn test_struct_field_def_name_prompt() {
         let f = StructFieldDef::Prompt {
             name: "system".into(),
-            default: Expr::Str { value: "hi".into(), span: span() },
+            default: Expr::new(ExprKind::Str("hi".into()), span()),
         };
         assert_eq!(f.name(), "system");
     }
@@ -1968,8 +2077,8 @@ mod ast {
 
     #[test]
     fn test_span_carried_on_expr() {
-        let e = Expr::Integer { value: 7, span: Span { line: 12, col: 4 } };
-        let Expr::Integer { span, .. } = e else { panic!() };
+        let e = Expr::new(ExprKind::Integer(7), Span { line: 12, col: 4 });
+        let Expr { kind: ExprKind::Integer(_), span } = e else { panic!() };
         assert_eq!(span.line, 12);
         assert_eq!(span.col, 4);
     }
@@ -1978,7 +2087,7 @@ mod ast {
     fn test_span_carried_on_stmt() {
         let s = Stmt::Let {
             name: "a".into(),
-            value: Expr::Bool { value: true, span: span() },
+            value: Expr::new(ExprKind::Bool(true), span()),
             span: Span { line: 9, col: 2 },
         };
         let Stmt::Let { span, .. } = s else { panic!() };
@@ -1991,39 +2100,52 @@ mod ast {
     #[test]
     fn test_binop_construction_nesting() {
         // Build `1 + (2 * 3)` by hand and read it back through the shape.
-        let inner = Expr::BinOp {
-            op: BinOpKind::Mul,
-            left: Box::new(Expr::Integer { value: 2, span: span() }),
-            right: Box::new(Expr::Integer { value: 3, span: span() }),
-            span: span(),
+        let inner = Expr::new(
+            ExprKind::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::new(ExprKind::Integer(2), span())),
+                right: Box::new(Expr::new(ExprKind::Integer(3), span())),
+            },
+            span(),
+        );
+        let outer = Expr::new(
+            ExprKind::BinOp {
+                op: BinOpKind::Add,
+                left: Box::new(Expr::new(ExprKind::Integer(1), span())),
+                right: Box::new(inner),
+            },
+            span(),
+        );
+        let Expr { kind: ExprKind::BinOp { op: BinOpKind::Add, right, .. }, .. } = outer else {
+            panic!()
         };
-        let outer = Expr::BinOp {
-            op: BinOpKind::Add,
-            left: Box::new(Expr::Integer { value: 1, span: span() }),
-            right: Box::new(inner),
-            span: span(),
-        };
-        let Expr::BinOp { op: BinOpKind::Add, right, .. } = outer else { panic!() };
-        assert!(matches!(right.as_ref(), Expr::BinOp { op: BinOpKind::Mul, .. }));
+        assert!(matches!(
+            right.as_ref(),
+            Expr { kind: ExprKind::BinOp { op: BinOpKind::Mul, .. }, .. }
+        ));
     }
 
     #[test]
     fn test_unaryop_construction() {
-        let e = Expr::UnaryOp {
-            op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Integer { value: 5, span: span() }),
-            span: span(),
+        let e = Expr::new(
+            ExprKind::UnaryOp {
+                op: UnaryOpKind::Neg,
+                operand: Box::new(Expr::new(ExprKind::Integer(5), span())),
+            },
+            span(),
+        );
+        let Expr { kind: ExprKind::UnaryOp { op: UnaryOpKind::Neg, operand, .. }, .. } = e else {
+            panic!()
         };
-        let Expr::UnaryOp { op: UnaryOpKind::Neg, operand, .. } = e else { panic!() };
-        assert!(matches!(operand.as_ref(), Expr::Integer { value: 5, .. }));
+        assert!(matches!(operand.as_ref(), Expr { kind: ExprKind::Integer(5), .. }));
     }
 
     #[test]
     fn test_program_holds_stmts() {
         let p = Program {
             stmts: vec![
-                Stmt::Expr(Expr::Integer { value: 1, span: span() }),
-                Stmt::Expr(Expr::Integer { value: 2, span: span() }),
+                Stmt::Expr(Expr::new(ExprKind::Integer(1), span())),
+                Stmt::Expr(Expr::new(ExprKind::Integer(2), span())),
             ],
         };
         assert_eq!(p.stmts.len(), 2);
@@ -2032,9 +2154,11 @@ mod ast {
     #[test]
     fn test_fstr_part_variants() {
         let lit = FStrPart::Literal("hi ".into());
-        let ex = FStrPart::Expr(Expr::Identifier { name: "name".into(), span: span() });
+        let ex = FStrPart::Expr(Expr::new(ExprKind::Identifier("name".into()), span()));
         assert!(matches!(lit, FStrPart::Literal(s) if s == "hi "));
-        assert!(matches!(ex, FStrPart::Expr(Expr::Identifier { name, .. }) if name == "name"));
+        assert!(
+            matches!(ex, FStrPart::Expr(Expr { kind: ExprKind::Identifier(name), .. }) if name == "name")
+        );
     }
 
     #[test]
@@ -2060,12 +2184,12 @@ mod ast {
 
     #[test]
     fn test_expr_clone_is_independent() {
-        let orig = Expr::Str { value: "keep".into(), span: span() };
+        let orig = Expr::new(ExprKind::Str("keep".into()), span());
         let cloned = orig.clone();
-        let Expr::Str { value, .. } = cloned else { panic!() };
+        let Expr { kind: ExprKind::Str(value), .. } = cloned else { panic!() };
         assert_eq!(value, "keep");
         // original still usable
-        assert!(matches!(orig, Expr::Str { .. }));
+        assert!(matches!(orig, Expr { kind: ExprKind::Str(_), .. }));
     }
 
     #[test]
@@ -2081,12 +2205,14 @@ mod ast {
         let p = Program {
             stmts: vec![Stmt::Let {
                 name: "x".into(),
-                value: Expr::BinOp {
-                    op: BinOpKind::Add,
-                    left: Box::new(Expr::Integer { value: 1, span: span() }),
-                    right: Box::new(Expr::Integer { value: 2, span: span() }),
-                    span: span(),
-                },
+                value: Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::Add,
+                        left: Box::new(Expr::new(ExprKind::Integer(1), span())),
+                        right: Box::new(Expr::new(ExprKind::Integer(2), span())),
+                    },
+                    span(),
+                ),
                 span: span(),
             }],
         };
@@ -2094,22 +2220,24 @@ mod ast {
         let back: Program = serde_json::from_str(&json).unwrap();
         let Stmt::Let { name, value, .. } = &back.stmts[0] else { panic!() };
         assert_eq!(name, "x");
-        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+        assert!(matches!(value, Expr { kind: ExprKind::BinOp { op: BinOpKind::Add, .. }, .. }));
     }
 
     #[test]
     fn test_call_kwargs_default_on_deserialize() {
         // `kwargs` is `#[serde(default)]`, so a Call serialized without it
         // (or an older payload lacking the field) decodes to an empty vec.
-        let call = Expr::Call {
-            callee: Box::new(Expr::Identifier { name: "f".into(), span: span() }),
-            args: vec![],
-            kwargs: vec![],
-            span: span(),
-        };
+        let call = Expr::new(
+            ExprKind::Call {
+                callee: Box::new(Expr::new(ExprKind::Identifier("f".into()), span())),
+                args: vec![],
+                kwargs: vec![],
+            },
+            span(),
+        );
         let json = serde_json::to_string(&call).unwrap();
         let back: Expr = serde_json::from_str(&json).unwrap();
-        let Expr::Call { kwargs, .. } = back else { panic!() };
+        let Expr { kind: ExprKind::Call { kwargs, .. }, .. } = back else { panic!() };
         assert!(kwargs.is_empty());
     }
 }

@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is a thin layer between the CLI and the driver. It takes a `TProgram`, asks `src/aot/` to compile it, and prints the IR or MIR when that is what was asked for.
+This is a thin layer between the CLI and the driver. It takes a file's tree after the per-file pass, a `frontend::ast::Program`, asks `src/aot/` to compile it, and prints the IR or MIR when that is what was asked for.
 
 ## Why it exists separately
 
@@ -17,7 +17,7 @@ It stays a separate module so the CLI never reaches into `aot/` internals, and t
 
 ## Who uses it
 
-*Depends on:* `typechecker/tir` for the `TProgram` and `aot/` for the compile.
+*Depends on:* `frontend::ast` for the `Program` and `aot/` for the compile.
 
 *Used by:* `cli/build.rs`, which implements `jade build` and the builds behind `jade run` and `jade test`.
 

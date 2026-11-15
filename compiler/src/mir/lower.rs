@@ -14,29 +14,32 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
+use crate::frontend::ast::{self, Expr, ExprKind, FStrPart};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::{JadeError, Span};
 use crate::typechecker::infer::{FnKey, InstKey, Target, Typed};
-use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
 /// Purpose: This struct holds one function definition as the lowering reads it.
 #[derive(Clone, Copy)]
 pub(super) struct FnDef<'a> {
-    pub params: &'a [(String, Option<TExpr>)],
-    pub body: &'a [TStmt],
+    pub params: &'a [(String, Option<Expr>)],
+    pub body: &'a [ast::Stmt],
     pub is_async: bool,
 }
 
 /// Purpose: This struct holds what every function's lowering shares.
 pub(super) struct Lowerer<'a> {
-    top: &'a [TStmt],
+    top: &'a [ast::Stmt],
     /// What each Rust package function takes and returns, by
     /// `__native$<pkg>$<fn>`.
     native_sigs: HashMap<String, crate::typechecker::infer::native::NativeSig>,
     fns: HashMap<&'a str, FnDef<'a>>,
     methods: HashMap<(&'a str, &'a str), FnDef<'a>>,
+    /// Each class field's declared default, by class and field, for a
+    /// copy-with literal whose base's class lacks the field.
+    defaults: HashMap<(&'a str, &'a str), &'a Expr>,
     func_ids: HashMap<InstKey, FuncId>,
     /// Each instance's parameter and return types.
     sigs: HashMap<InstKey, (Vec<Ty>, Ty)>,
@@ -105,7 +108,7 @@ pub(super) struct FxSink {
 ///
 /// Outputs: the MIR program, or the first feature the static backend cannot
 /// compile yet.
-pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
+pub fn lower_program(program: &ast::Program, typed: &Typed) -> Result<Program> {
     lower_program_with(program, typed, None, &HashMap::new())
 }
 
@@ -120,7 +123,7 @@ pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
 ///
 /// Outputs: the MIR program.
 pub fn lower_program_with(
-    program: &TProgram,
+    program: &ast::Program,
     typed: &Typed,
     rust: Option<crate::rustpkg::Link>,
     sigs: &HashMap<String, crate::typechecker::infer::native::NativeSig>,
@@ -253,7 +256,7 @@ impl<'a> Lowerer<'a> {
     /// - `typed`: the checker's answer.
     ///
     /// Outputs: the lowerer.
-    fn new(top: &'a [TStmt], typed: &'a Typed) -> Self {
+    fn new(top: &'a [ast::Stmt], typed: &'a Typed) -> Self {
         let mut exprs: HashMap<InstKey, HashMap<usize, Ty>> = HashMap::new();
         for ((k, a), t) in &typed.types {
             exprs.entry(k.clone()).or_default().insert(*a, norm(t));
@@ -300,6 +303,7 @@ impl<'a> Lowerer<'a> {
             native_sigs: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
+            defaults: HashMap::new(),
             func_ids: HashMap::new(),
             sigs: HashMap::new(),
             exprs,
@@ -319,30 +323,40 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Purpose: This function records every function and method definition.
+    /// Purpose: This function records every function and method definition,
+    /// and every class field's default.
     ///
     /// Inputs:
     /// - `stmts`: the program's statements.
     ///
     /// Outputs: none.
-    fn collect(&mut self, stmts: &'a [TStmt]) {
+    fn collect(&mut self, stmts: &'a [ast::Stmt]) {
         for s in stmts {
             match s {
-                TStmt::FnDef { name, params, body, .. }
-                | TStmt::AsyncFnDef { name, params, body, .. } => {
-                    let is_async = matches!(s, TStmt::AsyncFnDef { .. });
+                ast::Stmt::FnDef { name, params, body, .. }
+                | ast::Stmt::AsyncFnDef { name, params, body, .. } => {
+                    let is_async = matches!(s, ast::Stmt::AsyncFnDef { .. });
                     self.fns.insert(name, FnDef { params, body, is_async });
                 }
-                TStmt::ExtendBlock { type_name, methods, .. } => {
+                ast::Stmt::ExtendBlock { type_name, methods, .. } => {
                     for m in methods {
-                        if let TStmt::FnDef { name, params, body, .. }
-                        | TStmt::AsyncFnDef { name, params, body, .. } = m
+                        if let ast::Stmt::FnDef { name, params, body, .. }
+                        | ast::Stmt::AsyncFnDef { name, params, body, .. } = m
                         {
-                            let is_async = matches!(m, TStmt::AsyncFnDef { .. });
+                            let is_async = matches!(m, ast::Stmt::AsyncFnDef { .. });
                             self.methods.insert(
                                 (type_name.as_str(), name.as_str()),
                                 FnDef { params, body, is_async },
                             );
+                        }
+                    }
+                }
+                ast::Stmt::StructDef { name, fields, .. } => {
+                    for f in fields {
+                        if let ast::StructFieldDef::Let { name: field, default }
+                        | ast::StructFieldDef::Prompt { name: field, default } = f
+                        {
+                            self.defaults.insert((name.as_str(), field.as_str()), default);
                         }
                     }
                 }
@@ -388,10 +402,10 @@ impl<'a> Lowerer<'a> {
         let mut defaults = Vec::new();
         for (_, d) in &def.params[args.len().min(def.params.len())..] {
             let c = match d.as_ref().map(|d| &d.kind) {
-                Some(TExprKind::Integer(i)) => (Const::Int(*i), Ty::Int),
-                Some(TExprKind::Float(x)) => (Const::Float(*x), Ty::Float),
-                Some(TExprKind::Bool(b)) => (Const::Bool(*b), Ty::Bool),
-                Some(TExprKind::Str(s)) => (Const::Str(s.clone()), Ty::Str),
+                Some(ExprKind::Integer(i)) => (Const::Int(*i), Ty::Int),
+                Some(ExprKind::Float(x)) => (Const::Float(*x), Ty::Float),
+                Some(ExprKind::Bool(b)) => (Const::Bool(*b), Ty::Bool),
+                Some(ExprKind::Str(s)) => (Const::Str(s.clone()), Ty::Str),
                 _ => (Const::Nil(Ty::Nil), Ty::Nil),
             };
             args.push(c.1.clone());
@@ -502,9 +516,9 @@ impl<'a> Lowerer<'a> {
         let mut out = Vec::new();
         for s in self.top {
             let name = match s {
-                TStmt::Let { name, .. }
-                | TStmt::Assign { name, .. }
-                | TStmt::PromptDecl { name, .. } => name,
+                ast::Stmt::Let { name, .. }
+                | ast::Stmt::Assign { name, .. }
+                | ast::Stmt::PromptDecl { name, .. } => name,
                 _ => continue,
             };
             if let Some((g, _)) = self.globals.get(name)
@@ -719,29 +733,29 @@ impl<'a> Lowerer<'a> {
 /// - `s`: the statement.
 ///
 /// Outputs: its span, or `None` for one that carries none.
-fn stmt_span(s: &TStmt) -> Option<Span> {
+fn stmt_span(s: &ast::Stmt) -> Option<Span> {
     Some(match s {
-        TStmt::Let { span, .. }
-        | TStmt::Assign { span, .. }
-        | TStmt::FnDef { span, .. }
-        | TStmt::Return { span, .. }
-        | TStmt::Yield { span, .. }
-        | TStmt::If { span, .. }
-        | TStmt::While { span, .. }
-        | TStmt::For { span, .. }
-        | TStmt::Break { span, .. }
-        | TStmt::Continue { span, .. }
-        | TStmt::StructDef { span, .. }
-        | TStmt::ExtendBlock { span, .. }
-        | TStmt::FieldAssign { span, .. }
-        | TStmt::IndexAssign { span, .. }
-        | TStmt::PromptDecl { span, .. }
-        | TStmt::Use { span, .. }
-        | TStmt::FromUse { span, .. }
-        | TStmt::Raise { span, .. }
-        | TStmt::TryCatch { span, .. }
-        | TStmt::AsyncFnDef { span, .. } => *span,
-        TStmt::Expr(e) => e.span,
+        ast::Stmt::Let { span, .. }
+        | ast::Stmt::Assign { span, .. }
+        | ast::Stmt::FnDef { span, .. }
+        | ast::Stmt::Return { span, .. }
+        | ast::Stmt::Yield { span, .. }
+        | ast::Stmt::If { span, .. }
+        | ast::Stmt::While { span, .. }
+        | ast::Stmt::For { span, .. }
+        | ast::Stmt::Break { span, .. }
+        | ast::Stmt::Continue { span, .. }
+        | ast::Stmt::StructDef { span, .. }
+        | ast::Stmt::ExtendBlock { span, .. }
+        | ast::Stmt::FieldAssign { span, .. }
+        | ast::Stmt::IndexAssign { span, .. }
+        | ast::Stmt::PromptDecl { span, .. }
+        | ast::Stmt::Use { span, .. }
+        | ast::Stmt::FromUse { span, .. }
+        | ast::Stmt::Raise { span, .. }
+        | ast::Stmt::TryCatch { span, .. }
+        | ast::Stmt::AsyncFnDef { span, .. } => *span,
+        ast::Stmt::Expr(e) => e.span,
     })
 }
 
@@ -978,7 +992,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `e`: the expression.
     ///
     /// Outputs: its type.
-    pub(super) fn ty(&self, e: &TExpr) -> Result<Ty> {
+    pub(super) fn ty(&self, e: &Expr) -> Result<Ty> {
         self.types
             .get(&addr(e))
             .cloned()
@@ -1113,11 +1127,11 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `body`: the statements.
     ///
     /// Outputs: `Ok(())` or the first error.
-    fn lower_body(&mut self, body: &'a [TStmt]) -> Result<()> {
+    fn lower_body(&mut self, body: &'a [ast::Stmt]) -> Result<()> {
         // A function's trailing bare expression is its return value.
         if !self.is_main
             && self.stream.is_none()
-            && let Some(TStmt::Expr(e)) = body.last()
+            && let Some(ast::Stmt::Expr(e)) = body.last()
         {
             for s in &body[..body.len() - 1] {
                 self.stmt(s)?;
@@ -1167,7 +1181,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `body`: the statements.
     ///
     /// Outputs: `Ok(())` or the first error.
-    fn block(&mut self, body: &'a [TStmt]) -> Result<()> {
+    fn block(&mut self, body: &'a [ast::Stmt]) -> Result<()> {
         self.scopes.push(HashMap::new());
         for s in body {
             self.stmt(s)?;
@@ -1190,7 +1204,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `s`: the statement.
     ///
     /// Outputs: `Ok(())` or the first error.
-    fn stmt(&mut self, s: &'a TStmt) -> Result<()> {
+    fn stmt(&mut self, s: &'a ast::Stmt) -> Result<()> {
         let outer = self.span;
         if let Some(sp) = stmt_span(s) {
             self.span = sp;
@@ -1233,9 +1247,10 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `s`: the statement.
     ///
     /// Outputs: `Ok(())` or the first error.
-    fn stmt_inner(&mut self, s: &'a TStmt) -> Result<()> {
+    fn stmt_inner(&mut self, s: &'a ast::Stmt) -> Result<()> {
         match s {
-            TStmt::Let { name, value, span } | TStmt::PromptDecl { name, body: value, span } => {
+            ast::Stmt::Let { name, value, span }
+            | ast::Stmt::PromptDecl { name, body: value, span } => {
                 let (v, vt) = self.expr(value)?;
                 let (place, pt) = if self.is_main && self.scopes.len() == 1 {
                     let (g, t) = self
@@ -1250,7 +1265,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 self.store(place, &pt, v, &vt, *span)
             }
-            TStmt::Assign { name, value, span } => {
+            ast::Stmt::Assign { name, value, span } => {
                 let (v, vt) = self.expr(value)?;
                 let (place, pt) = match self.lookup(name) {
                     Some(p) => p,
@@ -1258,22 +1273,23 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 self.store(place, &pt, v, &vt, *span)
             }
-            TStmt::FnDef { decorators, span, .. } | TStmt::AsyncFnDef { decorators, span, .. } => {
+            ast::Stmt::FnDef { decorators, span, .. }
+            | ast::Stmt::AsyncFnDef { decorators, span, .. } => {
                 if !decorators.is_empty() {
                     return Err(not_yet("decorators", *span));
                 }
                 Ok(())
             }
-            TStmt::StructDef { .. }
-            | TStmt::ExtendBlock { .. }
-            | TStmt::Use { .. }
-            | TStmt::FromUse { .. } => Ok(()),
-            TStmt::Return { span, .. } if self.stream.is_some() => {
+            ast::Stmt::StructDef { .. }
+            | ast::Stmt::ExtendBlock { .. }
+            | ast::Stmt::Use { .. }
+            | ast::Stmt::FromUse { .. } => Ok(()),
+            ast::Stmt::Return { span, .. } if self.stream.is_some() => {
                 let (s, _) = self.stream.clone().ok_or_else(|| internal("no stream", *span))?;
                 self.terminate(Term::Return(Operand::Copy(Place::Local(s))));
                 Ok(())
             }
-            TStmt::Return { value, span } => {
+            ast::Stmt::Return { value, span } => {
                 let ret = self.ret.clone();
                 let v = match value {
                     Some(e) => {
@@ -1288,7 +1304,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.terminate(Term::Return(v));
                 Ok(())
             }
-            TStmt::If { condition, then_body, else_body, .. } => {
+            ast::Stmt::If { condition, then_body, else_body, .. } => {
                 let mark = self.temps.len();
                 let (c, _) = self.expr(condition)?;
                 self.drop_temps(mark);
@@ -1307,7 +1323,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.switch_to(end);
                 Ok(())
             }
-            TStmt::While { condition, body, .. } => {
+            ast::Stmt::While { condition, body, .. } => {
                 let head = self.new_block();
                 let bb = self.new_block();
                 let exit = self.new_block();
@@ -1325,24 +1341,24 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.switch_to(exit);
                 Ok(())
             }
-            TStmt::For { var, iterable, body, span } => {
+            ast::Stmt::For { var, iterable, body, span } => {
                 self.for_loop(s, var, iterable, body, *span)
             }
-            TStmt::Break { span } => {
+            ast::Stmt::Break { span } => {
                 let (_, brk, depth) =
                     *self.loops.last().ok_or_else(|| internal("break outside a loop", *span))?;
                 self.drop_scopes_from(depth);
                 self.terminate(Term::Goto(brk));
                 Ok(())
             }
-            TStmt::Continue { span } => {
+            ast::Stmt::Continue { span } => {
                 let (cont, _, depth) =
                     *self.loops.last().ok_or_else(|| internal("continue outside a loop", *span))?;
                 self.drop_scopes_from(depth);
                 self.terminate(Term::Goto(cont));
                 Ok(())
             }
-            TStmt::FieldAssign { object, field, value, span } => {
+            ast::Stmt::FieldAssign { object, field, value, span } => {
                 let (v, vt) = self.expr(value)?;
                 let (place, ot) =
                     self.lookup(object).ok_or_else(|| internal("an unknown variable", *span))?;
@@ -1361,7 +1377,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 });
                 Ok(())
             }
-            TStmt::IndexAssign { name, index, value, span } => {
+            ast::Stmt::IndexAssign { name, index, value, span } => {
                 let (i, it) = self.expr(index)?;
                 let (v, vt) = self.expr(value)?;
                 let (place, tt) =
@@ -1395,7 +1411,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     other => Err(internal(format!("an index assignment into {other}"), *span)),
                 }
             }
-            TStmt::Yield { value, span } => {
+            ast::Stmt::Yield { value, span } => {
                 let (s, el) = self
                     .stream
                     .clone()
@@ -1412,7 +1428,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 )));
                 Ok(())
             }
-            TStmt::Raise { value, span } => {
+            ast::Stmt::Raise { value, span } => {
                 let (v, vt) = self.expr(value)?;
                 let obj = match &vt {
                     // `raise "x"` raises a RuntimeError carrying the message.
@@ -1432,8 +1448,8 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.terminate(Term::Goto(h));
                 Ok(())
             }
-            TStmt::TryCatch { body, arms, .. } => self.try_catch(body, arms),
-            TStmt::Expr(e) => {
+            ast::Stmt::TryCatch { body, arms, .. } => self.try_catch(body, arms),
+            ast::Stmt::Expr(e) => {
                 self.expr(e)?;
                 Ok(())
             }
@@ -1455,8 +1471,8 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: `Ok(())` or an error.
     fn try_catch(
         &mut self,
-        body: &'a [TStmt],
-        arms: &'a [crate::typechecker::tir::TCatchArm],
+        body: &'a [ast::Stmt],
+        arms: &'a [crate::frontend::ast::CatchArm],
     ) -> Result<()> {
         let h = self.new_block();
         let end = self.new_block();
@@ -1531,10 +1547,10 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: `Ok(())` or an error.
     fn for_loop(
         &mut self,
-        s: &'a TStmt,
+        s: &'a ast::Stmt,
         var: &str,
-        iterable: &'a TExpr,
-        body: &'a [TStmt],
+        iterable: &'a Expr,
+        body: &'a [ast::Stmt],
         span: Span,
     ) -> Result<()> {
         let (it, itt) = self.expr(iterable)?;
@@ -1647,7 +1663,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `e`: the expression.
     ///
     /// Outputs: an operand holding its value, and its type.
-    pub(super) fn expr(&mut self, e: &'a TExpr) -> Result<(Operand, Ty)> {
+    pub(super) fn expr(&mut self, e: &'a Expr) -> Result<(Operand, Ty)> {
         let outer = self.span;
         self.span = e.span;
         let r = self.expr_inner(e);
@@ -1661,15 +1677,15 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `e`: the expression.
     ///
     /// Outputs: an operand holding its value, and its type.
-    fn expr_inner(&mut self, e: &'a TExpr) -> Result<(Operand, Ty)> {
+    fn expr_inner(&mut self, e: &'a Expr) -> Result<(Operand, Ty)> {
         let span = e.span;
         let et = self.ty(e)?;
         let op = match &e.kind {
-            TExprKind::Integer(i) => Operand::Const(Const::Int(*i)),
-            TExprKind::Float(x) => Operand::Const(Const::Float(*x)),
-            TExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
-            TExprKind::Str(s) => Operand::Const(Const::Str(s.clone())),
-            TExprKind::Is { value, class } => {
+            ExprKind::Integer(i) => Operand::Const(Const::Int(*i)),
+            ExprKind::Float(x) => Operand::Const(Const::Float(*x)),
+            ExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
+            ExprKind::Str(s) => Operand::Const(Const::Str(s.clone())),
+            ExprKind::Is { value, class } => {
                 let (v, _) = self.expr(value)?;
                 let ids: Vec<i64> = self
                     .l
@@ -1681,7 +1697,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     .collect();
                 self.assign_temp(Ty::Bool, Rvalue::IsA(v, ids))
             }
-            TExprKind::Identifier(name) => {
+            ExprKind::Identifier(name) => {
                 if matches!(name.as_str(), "nil" | "None" | "null") {
                     Operand::Const(Const::Nil(et.clone()))
                 } else if let Some((place, pt)) = self.lookup(name) {
@@ -1695,11 +1711,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                     return Err(internal(format!("an unknown name '{name}'"), span));
                 }
             }
-            TExprKind::Call { callee, args, kwargs } => {
+            ExprKind::Call { callee, args, kwargs } => {
                 return self.call(e, &et, callee, args, kwargs);
             }
-            TExprKind::BinOp { op, left, right } => self.binop(op, left, right, &et, span)?,
-            TExprKind::UnaryOp { op, operand } => {
+            ExprKind::BinOp { op, left, right } => self.binop(op, left, right, &et, span)?,
+            ExprKind::UnaryOp { op, operand } => {
                 let (v, _) = self.expr(operand)?;
                 // A negated literal is a constant, so it can take the type it
                 // meets, as `@short let s = -5` needs.
@@ -1719,14 +1735,14 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 self.assign_temp(et.clone(), Rvalue::Un(u, v))
             }
-            TExprKind::StructLiteral { type_name, base, fields, .. } => {
+            ExprKind::StructLiteral { type_name, base, fields, .. } => {
                 self.struct_literal(type_name, base.as_deref(), fields, span)?
             }
-            TExprKind::FieldAccess { object, field } => {
+            ExprKind::FieldAccess { object, field } => {
                 let (o, ot) = self.expr(object)?;
                 self.read_field(o, &ot, field, &et, span)?
             }
-            TExprKind::Index { object, index } => {
+            ExprKind::Index { object, index } => {
                 let (o, ot) = self.expr(object)?;
                 match &ot {
                     Ty::Array(el) => {
@@ -1748,7 +1764,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                         )
                     }
                     Ty::Struct(_) => match &index.kind {
-                        TExprKind::Str(field) => self.read_field(o, &ot, field, &et, span)?,
+                        ExprKind::Str(field) => self.read_field(o, &ot, field, &et, span)?,
                         _ => return Err(internal("a struct indexed by a non-literal", span)),
                     },
                     Ty::Bytes => {
@@ -1764,7 +1780,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                     other => return Err(internal(format!("an index into {other}"), span)),
                 }
             }
-            TExprKind::Array { elements } => {
+            ExprKind::Array { elements } => {
                 let Ty::Array(el) = &et else {
                     return Err(internal("an array literal that is not an array", span));
                 };
@@ -1776,7 +1792,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
                 self.assign_temp(et.clone(), Rvalue::Array((**el).clone(), ops))
             }
-            TExprKind::Dict { entries } => {
+            ExprKind::Dict { entries } => {
                 let Ty::Map(vt) = &et else {
                     return Err(internal("a dict literal that is not a dict", span));
                 };
@@ -1792,16 +1808,16 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
                 self.assign_temp(et.clone(), Rvalue::Dict((**vt).clone(), ops))
             }
-            TExprKind::FStr { parts } => {
+            ExprKind::FStr { parts } => {
                 let mut ops = Vec::new();
                 for p in parts {
                     match p {
-                        TFStrPart::Literal(s) => {
+                        FStrPart::Literal(s) => {
                             if !s.is_empty() {
                                 ops.push(Operand::Const(Const::Str(s.clone())));
                             }
                         }
-                        TFStrPart::Expr(x) => {
+                        FStrPart::Expr(x) => {
                             let (v, t) = self.expr(x)?;
                             ops.push(self.text_of(v, &t));
                         }
@@ -1812,26 +1828,30 @@ impl<'a, 'l> Fx<'a, 'l> {
                     _ => self.assign_temp(Ty::Str, Rvalue::Op(Op::StrCat, ops)),
                 }
             }
-            TExprKind::Await { expr } => {
+            ExprKind::Await { expr } => {
                 let (f, _) = self.expr(expr)?;
                 self.assign_temp(et.clone(), Rvalue::Op(Op::Await(et.clone()), vec![f]))
             }
-            TExprKind::PromptLiteral { body } => {
+            ExprKind::PromptLiteral { body } => {
                 let (v, t) = self.expr(body)?;
                 self.coerce(v, &t, &Ty::Str, span)?
             }
             // `src/infer/rewrite.rs` turns every dereference it can into a call
             // into the inference prelude; what is left is a kind it cannot.
-            TExprKind::PromptDeref { grammar_expr: Some(_), .. } => {
+            ExprKind::PromptDeref { grammar_expr: Some(_), .. } => {
                 return Err(not_yet("a prompt constrained by a grammar", span));
             }
-            TExprKind::PromptDeref { output_type: Some(t), .. } => {
+            ExprKind::PromptDeref { output_type: Some(t), .. } => {
                 return Err(not_yet(format!("a prompt decoded into {t}"), span));
             }
-            TExprKind::PromptDeref { .. } => {
+            ExprKind::PromptDeref { .. } => {
                 return Err(internal("a prompt dereference the rewrite left", span));
             }
-            TExprKind::Pipe { source, hoisted, piece, body } => {
+            // The per-file pass replaces every raw pipe with a `Pipe`.
+            ExprKind::RawPipe { .. } => {
+                return Err(internal("a pipe the per-file pass did not flatten", span));
+            }
+            ExprKind::Pipe { source, hoisted, piece, body } => {
                 return self.pipe(e, &et, source, hoisted, piece, body);
             }
         };
@@ -1899,8 +1919,8 @@ impl<'a, 'l> Fx<'a, 'l> {
     fn struct_literal(
         &mut self,
         type_name: &str,
-        base: Option<&'a TExpr>,
-        fields: &'a [(String, TExpr, bool)],
+        base: Option<&'a Expr>,
+        fields: &'a [(String, Expr, bool)],
         span: Span,
     ) -> Result<Operand> {
         let def =
@@ -1932,15 +1952,27 @@ impl<'a, 'l> Fx<'a, 'l> {
                     let Ty::Struct(bn) = &bt else {
                         return Err(internal("a copy-with base that is not a struct", span));
                     };
-                    let (bi, bft) = self
-                        .l
-                        .field(bn, fname)
-                        .ok_or_else(|| internal("a base missing a field", span))?;
-                    let v = self.assign_temp(
-                        bft.clone(),
-                        Rvalue::Field { object: bo, strukt: bn.clone(), index: bi },
-                    );
-                    let v = self.coerce(v, &bft, fty, span)?;
+                    let v = match self.l.field(bn, fname) {
+                        Some((bi, bft)) => {
+                            let v = self.assign_temp(
+                                bft.clone(),
+                                Rvalue::Field { object: bo, strukt: bn.clone(), index: bi },
+                            );
+                            self.coerce(v, &bft, fty, span)?
+                        }
+                        // The base's class lacks the field, so it takes its
+                        // declared default, which the checker checked here.
+                        None => {
+                            let default = self
+                                .l
+                                .defaults
+                                .get(&(type_name, fname.as_str()))
+                                .copied()
+                                .ok_or_else(|| internal("a base missing a field", span))?;
+                            let (v, t) = self.expr(default)?;
+                            self.coerce(v, &t, fty, default.span)?
+                        }
+                    };
                     self.consume(v)
                 }
             };
@@ -1964,8 +1996,8 @@ impl<'a, 'l> Fx<'a, 'l> {
     fn binop(
         &mut self,
         op: &BinOpKind,
-        left: &'a TExpr,
-        right: &'a TExpr,
+        left: &'a Expr,
+        right: &'a Expr,
         et: &Ty,
         span: Span,
     ) -> Result<Operand> {
@@ -2138,7 +2170,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where.
     ///
     /// Outputs: the result.
-    fn native_call(&mut self, name: &str, args: &'a [TExpr], span: Span) -> Result<Operand> {
+    fn native_call(&mut self, name: &str, args: &'a [Expr], span: Span) -> Result<Operand> {
         let sig = self.l.native_sigs.get(name).cloned().ok_or_else(|| {
             internal(format!("a call to '{name}', which no Rust package exports"), span)
         })?;
@@ -2165,7 +2197,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `left`, `right`: the operands.
     ///
     /// Outputs: the result.
-    fn short_circuit(&mut self, and: bool, left: &'a TExpr, right: &'a TExpr) -> Result<Operand> {
+    fn short_circuit(&mut self, and: bool, left: &'a Expr, right: &'a Expr) -> Result<Operand> {
         let (l, _) = self.expr(left)?;
         let res = self.new_local(Ty::Bool, None);
         self.emit(Stmt::Assign(Place::Local(res), Rvalue::Use(l)));
@@ -2193,11 +2225,11 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: the result and its type.
     fn call(
         &mut self,
-        e: &'a TExpr,
+        e: &'a Expr,
         et: &Ty,
-        callee: &'a TExpr,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        callee: &'a Expr,
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
     ) -> Result<(Operand, Ty)> {
         let span = e.span;
         let target = self.targets.get(&addr(e)).cloned();
@@ -2212,7 +2244,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Ok((r, et.clone()))
             }
             Some(Target::Dispatch(kinds)) => {
-                let TExprKind::FieldAccess { object, .. } = &callee.kind else {
+                let ExprKind::FieldAccess { object, .. } = &callee.kind else {
                     return Err(internal("a dispatched call with no receiver", span));
                 };
                 let (recv, rt) = self.expr(object)?;
@@ -2269,7 +2301,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             }
             Some(Target::Builtin(name)) => self.builtin(e, et, &name, callee, args, kwargs),
             None => match &callee.kind {
-                TExprKind::Identifier(n) if n.starts_with("__native$") => {
+                ExprKind::Identifier(n) if n.starts_with("__native$") => {
                     let o = self.native_call(n, args, span)?;
                     let t = self.l.native_sigs.get(n.as_str()).map_or(et.clone(), |s| norm(&s.ret));
                     let o = self.coerce(o, &t, et, span)?;
@@ -2333,17 +2365,16 @@ impl<'a, 'l> Fx<'a, 'l> {
         &mut self,
         k: &InstKey,
         def: FnDef<'a>,
-        callee: &'a TExpr,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        callee: &'a Expr,
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
     ) -> Result<Vec<Option<(Operand, Ty, Span)>>> {
         let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
         let mut next = 0;
         // A method called on an object takes the object as its first
         // argument. `Parent::m(self, …)` already has it among the args.
-        if let (FnKey::Method(..), TExprKind::FieldAccess { object, .. }) = (&k.func, &callee.kind)
-        {
+        if let (FnKey::Method(..), ExprKind::FieldAccess { object, .. }) = (&k.func, &callee.kind) {
             let (o, t) = self.expr(object)?;
             vals[0] = Some((o, t, object.span));
             next = 1;
@@ -2410,15 +2441,15 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `d`: the default, always a literal.
     ///
     /// Outputs: its value and type.
-    fn default_arg(&mut self, d: &'a TExpr) -> Result<(Operand, Ty)> {
+    fn default_arg(&mut self, d: &'a Expr) -> Result<(Operand, Ty)> {
         if self.types.contains_key(&addr(d)) {
             return self.expr(d);
         }
         Ok(match &d.kind {
-            TExprKind::Integer(i) => (Operand::Const(Const::Int(*i)), Ty::Int),
-            TExprKind::Float(x) => (Operand::Const(Const::Float(*x)), Ty::Float),
-            TExprKind::Bool(b) => (Operand::Const(Const::Bool(*b)), Ty::Bool),
-            TExprKind::Str(s) => (Operand::Const(Const::Str(s.clone())), Ty::Str),
+            ExprKind::Integer(i) => (Operand::Const(Const::Int(*i)), Ty::Int),
+            ExprKind::Float(x) => (Operand::Const(Const::Float(*x)), Ty::Float),
+            ExprKind::Bool(b) => (Operand::Const(Const::Bool(*b)), Ty::Bool),
+            ExprKind::Str(s) => (Operand::Const(Const::Str(s.clone())), Ty::Str),
             _ => (Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil),
         })
     }
@@ -2430,6 +2461,6 @@ impl<'a, 'l> Fx<'a, 'l> {
 /// - `e`: the expression.
 ///
 /// Outputs: true for `nil`, `None` or `null`.
-fn is_nil(e: &TExpr) -> bool {
-    matches!(&e.kind, TExprKind::Identifier(n) if n == "nil" || n == "None" || n == "null")
+fn is_nil(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Identifier(n) if n == "nil" || n == "None" || n == "null")
 }

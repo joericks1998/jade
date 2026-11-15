@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This directory names the functions of `std::sh` and registers the package's type with the checker. Until v1.4.8 it also held the VM's half of the package. `std::sh` is three functions that run a command through `sh -c`.
+This directory names the functions of `std::sh`; the per-file pass binds the `sh` name when a `use` names the package. Until v1.4.8 it also held the VM's half of the package. `std::sh` is three functions that run a command through `sh -c`.
 
 | Jade | Returns | On a non-zero exit |
 |------|---------|--------------------|
@@ -28,7 +28,7 @@ There are three rather than one because a caller wants something different in ea
 
 ## Who uses it
 
-*Depends on:* `builtins::Package` to register itself, and `typechecker::type_infer` for the type registration.
+*Depends on:* `builtins::Package`, the shape of its registry entry.
 
 *Used by:* `builtins/`, which mounts `SH_PKG` under `std/sh`. The compiled backend does not go through here at all. `mir/packages.rs` lowers each call to `Op::Sh`, and `sh_fn` in `src/backend/sh.rs` builds one function per kind of call. Each one calls `refuse_tainted`, defined in `src/backend/fs.rs`, before it spawns anything.
 

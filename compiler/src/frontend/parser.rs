@@ -1,6 +1,6 @@
 use super::{
     ast::{
-        BinOpKind, CatchArm, ClassMembers, DerefStyle, Expr, FStrPart, Program, Stmt,
+        BinOpKind, CatchArm, ClassMembers, DerefStyle, Expr, ExprKind, FStrPart, Program, Stmt,
         StructFieldDef, UnaryOpKind,
     },
     error::{JadeError, Result, Span},
@@ -63,7 +63,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 /// Outputs: the default, inside one call per built-in type decorator, such as
 /// `@int` or `@byte`.
 fn type_checked_default(decorators: &Decorators, default: Expr) -> Expr {
-    let span = Parser::expr_span(&default);
+    let span = default.span;
     decorators
         .iter()
         .filter(|(n, _)| {
@@ -85,11 +85,15 @@ fn type_checked_default(decorators: &Decorators, default: Expr) -> Expr {
                     | "double"
             )
         })
-        .fold(default, |acc, (n, _)| Expr::Call {
-            callee: Box::new(Expr::Identifier { name: n.clone(), span }),
-            args: vec![acc],
-            kwargs: vec![],
-            span,
+        .fold(default, |acc, (n, _)| {
+            Expr::new(
+                ExprKind::Call {
+                    callee: Box::new(Expr::new(ExprKind::Identifier(n.clone()), span)),
+                    args: vec![acc],
+                    kwargs: vec![],
+                },
+                span,
+            )
         })
 }
 
@@ -290,7 +294,7 @@ impl Parser {
     /// `let x = b(a(v))`.
     ///
     /// This happens in the parser, so nothing downstream learns that a
-    /// declaration can carry a decorator — `type_infer`, the static checker,
+    /// declaration can carry a decorator — the per-file pass, the static checker,
     /// MIR and the backend all see an ordinary call. A `fn` decorator cannot
     /// work this way, because the value it wraps is a function the compiler has
     /// yet to build; the checker types it in `typechecker/infer/`, MIR lowering
@@ -309,10 +313,12 @@ impl Parser {
             // hand-written `tools.register(v)` would.
             let mut parts = name.split('.');
             let mut callee =
-                Expr::Identifier { name: parts.next().unwrap_or_default().to_string(), span };
+                Expr::new(ExprKind::Identifier(parts.next().unwrap_or_default().to_string()), span);
             for part in parts {
-                callee =
-                    Expr::FieldAccess { object: Box::new(callee), field: part.to_string(), span };
+                callee = Expr::new(
+                    ExprKind::FieldAccess { object: Box::new(callee), field: part.to_string() },
+                    span,
+                );
             }
             // The decorated value is the first argument; the decorator's own
             // arguments follow, keeping positional and keyword forms apart.
@@ -324,7 +330,7 @@ impl Parser {
                     None => args.push(arg),
                 }
             }
-            acc = Expr::Call { callee: Box::new(callee), args, kwargs, span };
+            acc = Expr::new(ExprKind::Call { callee: Box::new(callee), args, kwargs }, span);
         }
         acc
     }
@@ -1320,7 +1326,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBracket)?;
-        Ok(Expr::Array { elements, span })
+        Ok(Expr::new(ExprKind::Array { elements }, span))
     }
 
     /// Parse an expression used as a statement (value discarded), e.g. `obj.method(args)`.
@@ -1328,31 +1334,6 @@ impl Parser {
         let expr = self.parse_pipe()?;
         self.consume_semicolon()?;
         Ok(Stmt::Expr(expr))
-    }
-
-    /// Extract the span from any expression node.
-    fn expr_span(e: &Expr) -> Span {
-        match e {
-            Expr::Is { span, .. } => *span,
-            Expr::Integer { span, .. } => *span,
-            Expr::Float { span, .. } => *span,
-            Expr::Bool { span, .. } => *span,
-            Expr::Str { span, .. } => *span,
-            Expr::Identifier { span, .. } => *span,
-            Expr::Call { span, .. } => *span,
-            Expr::BinOp { span, .. } => *span,
-            Expr::UnaryOp { span, .. } => *span,
-            Expr::StructLiteral { span, .. } => *span,
-            Expr::FieldAccess { span, .. } => *span,
-            Expr::Index { span, .. } => *span,
-            Expr::Array { span, .. } => *span,
-            Expr::FStr { span, .. } => *span,
-            Expr::PromptLiteral { span, .. } => *span,
-            Expr::PromptDeref { span, .. } => *span,
-            Expr::Dict { span, .. } => *span,
-            Expr::Await { span, .. } => *span,
-            Expr::Pipe { span, .. } => *span,
-        }
     }
 
     /// Re-lex and re-parse the raw expression source from inside an f-string slot.
@@ -1379,13 +1360,13 @@ impl Parser {
     }
 
     /// Lowest precedence: `|>` (pipe). Left-associative, so `a |> f |> g`
-    /// nests as `Pipe(Pipe(a, f), g)`, which `type_infer::infer_pipe` flattens
-    /// into one pipe with two stages.
+    /// nests as `RawPipe(RawPipe(a, f), g)`, which `resolve::resolve_pipe`
+    /// flattens into one `Pipe` with two stages.
     ///
-    /// This is the only place `|>` is consumed. It builds an `Expr::Pipe` per
-    /// stage and decides nothing else: what a stage's name refers to, and
-    /// whether the source arrives in pieces, are questions for the type
-    /// checker. A prompt dereference chains like any other value, since
+    /// This is the only place `|>` is consumed. It builds an
+    /// `ExprKind::RawPipe` per stage and decides nothing else: what a stage's
+    /// name refers to is the per-file pass's question, and whether the source
+    /// arrives in pieces is the type checker's. A prompt dereference chains like any other value, since
     /// `parse_primary`'s `Question` arm leaves a trailing `|>` here.
     fn parse_pipe(&mut self) -> Result<Expr> {
         self.enter()?;
@@ -1397,10 +1378,13 @@ impl Parser {
     fn parse_pipe_inner(&mut self) -> Result<Expr> {
         let mut left = self.parse_or()?;
         while self.peek().kind == TokenKind::PipeGt {
-            let span = Self::expr_span(&left);
+            let span = left.span;
             self.advance(); // consume `|>`
             let stage = self.parse_or()?;
-            left = Expr::Pipe { value: Box::new(left), stage: Box::new(stage), span };
+            left = Expr::new(
+                ExprKind::RawPipe { value: Box::new(left), stage: Box::new(stage) },
+                span,
+            );
         }
         Ok(left)
     }
@@ -1410,15 +1394,17 @@ impl Parser {
         let mut left = self.parse_and()?;
         loop {
             if self.peek().kind == TokenKind::PipePipe {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance();
                 let right = self.parse_and()?;
-                left = Expr::BinOp {
-                    op: BinOpKind::Or,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                left = Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::Or,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
                     span,
-                };
+                );
             } else {
                 break;
             }
@@ -1431,15 +1417,17 @@ impl Parser {
         let mut left = self.parse_comparison()?;
         loop {
             if self.peek().kind == TokenKind::AmpAmp {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance();
                 let right = self.parse_comparison()?;
-                left = Expr::BinOp {
-                    op: BinOpKind::And,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                left = Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::And,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
                     span,
-                };
+                );
             } else {
                 break;
             }
@@ -1453,7 +1441,7 @@ impl Parser {
         loop {
             // `x is Dog`: a class test, whose right side is a class name.
             if self.peek().kind == TokenKind::Is {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance(); // consume `is`
                 let mut class = self.expect_ident("class name after `is`")?;
                 while self.peek().kind == TokenKind::Dot {
@@ -1461,7 +1449,7 @@ impl Parser {
                     let seg = self.expect_ident("class name after `.`")?;
                     class = format!("{class}.{seg}");
                 }
-                left = Expr::Is { value: Box::new(left), class, span };
+                left = Expr::new(ExprKind::Is { value: Box::new(left), class }, span);
                 continue;
             }
             // `not in` — two-token membership test
@@ -1482,10 +1470,13 @@ impl Parser {
                     _ => break,
                 }
             };
-            let span = Self::expr_span(&left);
+            let span = left.span;
             self.advance();
             let right = self.parse_bitor()?;
-            left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right), span };
+            left = Expr::new(
+                ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) },
+                span,
+            );
         }
         Ok(left)
     }
@@ -1495,15 +1486,17 @@ impl Parser {
         let mut left = self.parse_bitxor()?;
         loop {
             if self.peek().kind == TokenKind::Pipe {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance();
                 let right = self.parse_bitxor()?;
-                left = Expr::BinOp {
-                    op: BinOpKind::BitOr,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                left = Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::BitOr,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
                     span,
-                };
+                );
             } else {
                 break;
             }
@@ -1516,15 +1509,17 @@ impl Parser {
         let mut left = self.parse_bitand()?;
         loop {
             if self.peek().kind == TokenKind::Caret {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance();
                 let right = self.parse_bitand()?;
-                left = Expr::BinOp {
-                    op: BinOpKind::BitXor,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                left = Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::BitXor,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
                     span,
-                };
+                );
             } else {
                 break;
             }
@@ -1537,15 +1532,17 @@ impl Parser {
         let mut left = self.parse_shift()?;
         loop {
             if self.peek().kind == TokenKind::Ampersand {
-                let span = Self::expr_span(&left);
+                let span = left.span;
                 self.advance();
                 let right = self.parse_shift()?;
-                left = Expr::BinOp {
-                    op: BinOpKind::BitAnd,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                left = Expr::new(
+                    ExprKind::BinOp {
+                        op: BinOpKind::BitAnd,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
                     span,
-                };
+                );
             } else {
                 break;
             }
@@ -1559,26 +1556,30 @@ impl Parser {
         loop {
             match self.peek().kind {
                 TokenKind::LtLt => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_additive()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Shl,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Shl,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 TokenKind::GtGt => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_additive()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Shr,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Shr,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 _ => break,
             }
@@ -1592,26 +1593,30 @@ impl Parser {
         loop {
             match self.peek().kind {
                 TokenKind::Plus => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_term()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Add,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Add,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 TokenKind::Minus => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_term()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Sub,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Sub,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 _ => break,
             }
@@ -1625,37 +1630,43 @@ impl Parser {
         loop {
             match self.peek().kind {
                 TokenKind::Star => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Mul,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Mul,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 TokenKind::Slash => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Div,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Div,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 TokenKind::Percent => {
-                    let span = Self::expr_span(&left);
+                    let span = left.span;
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Mod,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                    left = Expr::new(
+                        ExprKind::BinOp {
+                            op: BinOpKind::Mod,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         span,
-                    };
+                    );
                 }
                 _ => break,
             }
@@ -1677,13 +1688,19 @@ impl Parser {
                 let span = self.peek().span;
                 self.advance();
                 let operand = self.parse_unary()?;
-                Ok(Expr::UnaryOp { op: UnaryOpKind::BitNot, operand: Box::new(operand), span })
+                Ok(Expr::new(
+                    ExprKind::UnaryOp { op: UnaryOpKind::BitNot, operand: Box::new(operand) },
+                    span,
+                ))
             }
             TokenKind::Bang => {
                 let span = self.peek().span;
                 self.advance();
                 let operand = self.parse_unary()?;
-                Ok(Expr::UnaryOp { op: UnaryOpKind::Not, operand: Box::new(operand), span })
+                Ok(Expr::new(
+                    ExprKind::UnaryOp { op: UnaryOpKind::Not, operand: Box::new(operand) },
+                    span,
+                ))
             }
             TokenKind::Minus => {
                 let span = self.peek().span;
@@ -1704,17 +1721,20 @@ impl Parser {
                 {
                     self.advance(); // `-`
                     self.advance(); // the magnitude
-                    return Ok(Expr::Integer { value: i64::MIN, span });
+                    return Ok(Expr::new(ExprKind::Integer(i64::MIN), span));
                 }
                 self.advance();
                 let operand = self.parse_unary()?;
-                Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
+                Ok(Expr::new(
+                    ExprKind::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand) },
+                    span,
+                ))
             }
             TokenKind::Await => {
                 let span = self.peek().span;
                 self.advance();
                 let expr = self.parse_unary()?;
-                Ok(Expr::Await { expr: Box::new(expr), span })
+                Ok(Expr::new(ExprKind::Await { expr: Box::new(expr) }, span))
             }
             _ => self.parse_call(),
         }
@@ -1746,7 +1766,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::Dict { entries, span })
+        Ok(Expr::new(ExprKind::Dict { entries }, span))
     }
 
     /// Parse the `{ field: expr, … }` body of a struct literal, given that the
@@ -1803,7 +1823,8 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::StructLiteral { type_name, base, fields, span })
+        let fields = fields.into_iter().map(|(name, value)| (name, value, false)).collect();
+        Ok(Expr::new(ExprKind::StructLiteral { type_name, base, fields, given: Vec::new() }, span))
     }
 
     /// Parse a primary expression, then handle any trailing `.field` or `(args)` postfix.
@@ -1826,15 +1847,23 @@ impl Parser {
         if style == DerefStyle::DotParen {
             self.expect(&TokenKind::RParen)?;
         }
-        let target = Expr::FieldAccess { object: Box::new(object), field, span };
-        Ok(Expr::PromptDeref { expr: Box::new(target), style, span })
+        let target = Expr::new(ExprKind::FieldAccess { object: Box::new(object), field }, span);
+        Ok(Expr::new(
+            ExprKind::PromptDeref {
+                expr: Box::new(target),
+                style,
+                output_type: None,
+                grammar_expr: None,
+            },
+            span,
+        ))
     }
 
     fn parse_call(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
             if self.peek().kind == TokenKind::LParen {
-                let span = Self::expr_span(&expr);
+                let span = expr.span;
                 self.advance(); // consume `(`
                 let mut args = Vec::new();
                 let mut kwargs = Vec::new();
@@ -1865,7 +1894,7 @@ impl Parser {
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
-                expr = Expr::Call { callee: Box::new(expr), args, kwargs, span };
+                expr = Expr::new(ExprKind::Call { callee: Box::new(expr), args, kwargs }, span);
             } else if self.peek().kind == TokenKind::Dot
                 && self.peek_ahead(1).kind == TokenKind::LParen
                 && self.peek_ahead(2).kind == TokenKind::Question
@@ -1873,13 +1902,13 @@ impl Parser {
                 // `obj.(?field)` — postfix prompt dereference. The `?` sits next to
                 // the field it actually applies to, rather than back at the head
                 // of the chain (C's `p->x` vs `(*p).x`).
-                let span = Self::expr_span(&expr);
+                let span = expr.span;
                 self.advance(); // consume `.`
                 self.advance(); // consume `(`
                 self.advance(); // consume `?`
                 expr = self.finish_postfix_deref(expr, DerefStyle::DotParen, span)?;
             } else if self.peek().kind == TokenKind::Dot {
-                let span = Self::expr_span(&expr);
+                let span = expr.span;
                 self.advance(); // consume `.`
                 let mut field = self.expect_ident("field name")?;
                 // `shapes.Account::new`: a member of an imported class.
@@ -1890,18 +1919,21 @@ impl Parser {
                     let member = self.expect_ident("class member name")?;
                     field = format!("{field}::{member}");
                 }
-                expr = Expr::FieldAccess { object: Box::new(expr), field, span };
+                expr = Expr::new(ExprKind::FieldAccess { object: Box::new(expr), field }, span);
             } else if self.peek().kind == TokenKind::TildeGt {
                 // `obj~>field` — terse spelling of `obj.?field`.
-                let span = Self::expr_span(&expr);
+                let span = expr.span;
                 self.advance(); // consume `~>`
                 expr = self.finish_postfix_deref(expr, DerefStyle::Squiggly, span)?;
             } else if self.peek().kind == TokenKind::LBracket {
-                let span = Self::expr_span(&expr);
+                let span = expr.span;
                 self.advance(); // consume `[`
                 let index = self.parse_pipe()?;
                 self.expect(&TokenKind::RBracket)?;
-                expr = Expr::Index { object: Box::new(expr), index: Box::new(index), span };
+                expr = Expr::new(
+                    ExprKind::Index { object: Box::new(expr), index: Box::new(index) },
+                    span,
+                );
             } else {
                 break;
             }
@@ -1921,24 +1953,24 @@ impl Parser {
                 if value == super::lexer::NEGATED_INT_MIN {
                     return Err(JadeError::LiteralOverflow { span: token.span });
                 }
-                Ok(Expr::Integer { value, span: token.span })
+                Ok(Expr::new(ExprKind::Integer(value), token.span))
             }
             TokenKind::Float(value) => {
                 self.advance();
-                Ok(Expr::Float { value, span: token.span })
+                Ok(Expr::new(ExprKind::Float(value), token.span))
             }
             TokenKind::True => {
                 self.advance();
-                Ok(Expr::Bool { value: true, span: token.span })
+                Ok(Expr::new(ExprKind::Bool(true), token.span))
             }
             TokenKind::False => {
                 self.advance();
-                Ok(Expr::Bool { value: false, span: token.span })
+                Ok(Expr::new(ExprKind::Bool(false), token.span))
             }
             TokenKind::Str(ref value) => {
                 let value = value.clone();
                 self.advance();
-                Ok(Expr::Str { value, span: token.span })
+                Ok(Expr::new(ExprKind::Str(value), token.span))
             }
             TokenKind::FStr(raw_parts) => {
                 let span = token.span;
@@ -1954,7 +1986,7 @@ impl Parser {
                         }
                     }
                 }
-                Ok(Expr::FStr { parts, span })
+                Ok(Expr::new(ExprKind::FStr { parts }, span))
             }
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
@@ -1985,12 +2017,12 @@ impl Parser {
                 {
                     self.advance(); // consume `::`
                     let member = self.expect_ident("class member name")?;
-                    return Ok(Expr::Identifier {
-                        name: format!("{name}::{member}"),
-                        span: token.span,
-                    });
+                    return Ok(Expr::new(
+                        ExprKind::Identifier(format!("{name}::{member}")),
+                        token.span,
+                    ));
                 }
-                Ok(Expr::Identifier { name, span: token.span })
+                Ok(Expr::new(ExprKind::Identifier(name), token.span))
             }
             TokenKind::LParen => {
                 self.advance(); // consume `(`
@@ -2016,7 +2048,7 @@ impl Parser {
                 // Field access is deliberately excluded: `?obj.field` reads as if
                 // the `?` applied to `obj`, when it actually applies to `field`.
                 // The postfix forms `obj.(?field)` / `obj~>field` say it properly.
-                if let Expr::FieldAccess { field, span: fspan, .. } = &expr {
+                if let Expr { kind: ExprKind::FieldAccess { field, .. }, span: fspan } = &expr {
                     return Err(JadeError::PrefixDerefOnField {
                         field: field.clone(),
                         span: *fspan,
@@ -2024,7 +2056,15 @@ impl Parser {
                 }
                 // A trailing `|> …` is left for `parse_pipe`, so `?p |> f`
                 // is a pipe over the reply like any other.
-                Ok(Expr::PromptDeref { expr: Box::new(expr), style: DerefStyle::Prefix, span })
+                Ok(Expr::new(
+                    ExprKind::PromptDeref {
+                        expr: Box::new(expr),
+                        style: DerefStyle::Prefix,
+                        output_type: None,
+                        grammar_expr: None,
+                    },
+                    span,
+                ))
             }
             // Closures were removed in 2.0.1; say so rather than "expected
             // expression", which would explain nothing to someone porting code.
@@ -2040,15 +2080,15 @@ impl Parser {
                 let span = token.span;
                 self.advance(); // consume `prompt`
                 let body = self.parse_or()?;
-                Ok(Expr::PromptLiteral { body: Box::new(body), span })
+                Ok(Expr::new(ExprKind::PromptLiteral { body: Box::new(body) }, span))
             }
             // Implicit self: `.field` desugars to `self.field` inside method bodies.
             TokenKind::Dot => {
                 let span = token.span;
                 self.advance(); // consume `.`
                 let field = self.expect_ident("field name")?;
-                let self_expr = Expr::Identifier { name: "self".to_string(), span };
-                Ok(Expr::FieldAccess { object: Box::new(self_expr), field, span })
+                let self_expr = Expr::new(ExprKind::Identifier("self".to_string()), span);
+                Ok(Expr::new(ExprKind::FieldAccess { object: Box::new(self_expr), field }, span))
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {

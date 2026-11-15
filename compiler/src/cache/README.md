@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is a content-addressed store of parsed and type-checked programs. `jade check` hashes the source file first, and skips straight to the cached AST or TIR when the hash matches. That is what makes repeated checks of an unchanged file fast. Until v1.4.8 `jade run` used it the same way. Since v2 `jade run` builds through the compiled backend, which does not read the cache.
+This is a content-addressed store of each file's tree after the per-file pass. `jade check` hashes the source file first, and when the hash matches it skips lexing, parsing and the per-file pass, and runs the checks after them on the cached tree. Until 2.0.6 it held two trees per file, the parser's AST and the typed tree (TIR), which was removed. That is what makes repeated checks of an unchanged file fast. Until v1.4.8 `jade run` used it the same way. Since v2 `jade run` builds through the compiled backend, which does not read the cache.
 
 ## Why it works the way it does
 
@@ -17,18 +17,18 @@ A cache written before format versioning existed has no `format_version` field. 
 
 ## What each file does
 
-- *`mod.rs`* holds the whole cache: `file_hash`, the AST pair `read_ast_cache` and `write_ast_cache`, the TIR pair `read_tir_cache` and `write_tir_cache`, the crate-internal `cache_root`, and the maintenance API `list_entries` and `purge_entries` that `jade cache` uses.
+- *`mod.rs`* holds the whole cache: `file_hash`, the pair `read_ast_cache` and `write_ast_cache`, which read and write a file's tree in `ast.bin`, the crate-internal `cache_root`, and the maintenance API `list_entries` and `purge_entries` that `jade cache` uses.
 - *`tests.rs`* holds the cache tests.
 
 ## Who uses it
 
-*Depends on:* `frontend::ast::Program` and `typechecker::tir::TProgram`, both of which are serde-serializable, plus `sha2` and `bincode`.
+*Depends on:* `frontend::ast::Program`, which is serde-serializable, plus `sha2` and `bincode`. Its tests also run `typechecker::resolve`, to round-trip a tree that pass rewrote.
 
 *Used by:* `cli/check.rs` on the fast path, plus `cli/cache.rs` and `cli/env.rs` for statistics and cleanup.
 
 ## Gotchas
 
-*Bump `CACHE_FORMAT_VERSION` whenever you change a serialized shape.* Adding a field to any AST or TIR type means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. When that test fails after your change, it is doing its job, not flaking. The constant's doc comment records what each past bump was for, so add a line when you bump it.
+*Bump `CACHE_FORMAT_VERSION` whenever you change a serialized shape.* Adding a field to any type in the tree means stale caches would deserialize into the wrong struct. A tripwire test pins the constant. When that test fails after your change, it is doing its job, not flaking. The constant's doc comment records what each past bump was for, so add a line when you bump it.
 
 *Do not use `std::env::set_var` in these tests.* `cargo test` is heavily parallel, so setting an environment variable races against every other thread calling `getenv`. That is a real data race, and it is why `set_var` is `unsafe` as of the 2024 edition. It made the cache tests fail intermittently for a while. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard, so cleanup survives a failing assertion.
 

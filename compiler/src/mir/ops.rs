@@ -8,8 +8,8 @@
 
 use super::lower::{Fx, internal, not_yet};
 use super::*;
+use crate::frontend::ast::{self, Expr, ExprKind};
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::tir::{TExpr, TExprKind, TStmt};
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -25,19 +25,19 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: the result and its type.
     pub(super) fn builtin(
         &mut self,
-        e: &'a TExpr,
+        e: &'a Expr,
         et: &Ty,
         name: &str,
-        callee: &'a TExpr,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        callee: &'a Expr,
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
     ) -> Result<(Operand, Ty)> {
         let span = e.span;
         if let Some(m) = name.strip_prefix("method:") {
             // A method call, written on the receiver or receiver-first through
             // its package: `s.upper()` or `string.upper(s)`.
-            let (recv, rest): (&'a TExpr, &'a [TExpr]) = match &callee.kind {
-                TExprKind::FieldAccess { object, .. } if !self.is_package(object) => (object, args),
+            let (recv, rest): (&'a Expr, &'a [Expr]) = match &callee.kind {
+                ExprKind::FieldAccess { object, .. } if !self.is_package(object) => (object, args),
                 _ => match args.split_first() {
                     Some((r, rest)) => (r, rest),
                     None => return Err(internal("a method call with no receiver", span)),
@@ -67,9 +67,8 @@ impl<'a, 'l> Fx<'a, 'l> {
             let Ty::Array(el) = et else {
                 return Err(internal("join that does not make an array", span));
             };
-            let settle = kwargs
-                .iter()
-                .any(|(k, v)| k == "settle" && matches!(v.kind, TExprKind::Bool(true)));
+            let settle =
+                kwargs.iter().any(|(k, v)| k == "settle" && matches!(v.kind, ExprKind::Bool(true)));
             let mut fs = Vec::new();
             let mut inner = Ty::Nil;
             for a in args {
@@ -89,7 +88,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             let first = args.first().ok_or_else(|| internal("wait with no futures", span))?;
             // A literal list may hold futures of different result types, since
             // `wait` never reads a result; each is passed as it is.
-            if let TExprKind::Array { elements } = &first.kind {
+            if let ExprKind::Array { elements } = &first.kind {
                 let mut fs = Vec::new();
                 for x in elements {
                     let (v, _) = self.expr(x)?;
@@ -354,9 +353,9 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `e`: the expression.
     ///
     /// Outputs: true for a bare package name no variable shadows.
-    fn is_package(&self, e: &TExpr) -> bool {
+    fn is_package(&self, e: &Expr) -> bool {
         match &e.kind {
-            TExprKind::Identifier(n) => {
+            ExprKind::Identifier(n) => {
                 self.lookup(n).is_none() && (self.l.packages.contains(n) || n == "Grammar")
             }
             _ => false,
@@ -701,14 +700,14 @@ pub(super) fn one(argv: Vec<(Operand, Ty)>, span: Span) -> Result<(Operand, Ty)>
 /// - `body`: the statements.
 ///
 /// Outputs: true when the function is a generator.
-pub(super) fn body_yields(body: &[TStmt]) -> bool {
+pub(super) fn body_yields(body: &[ast::Stmt]) -> bool {
     body.iter().any(|s| match s {
-        TStmt::Yield { .. } => true,
-        TStmt::If { then_body, else_body, .. } => {
+        ast::Stmt::Yield { .. } => true,
+        ast::Stmt::If { then_body, else_body, .. } => {
             body_yields(then_body) || else_body.as_deref().is_some_and(body_yields)
         }
-        TStmt::While { body, .. } | TStmt::For { body, .. } => body_yields(body),
-        TStmt::TryCatch { body, arms, .. } => {
+        ast::Stmt::While { body, .. } | ast::Stmt::For { body, .. } => body_yields(body),
+        ast::Stmt::TryCatch { body, arms, .. } => {
             body_yields(body) || arms.iter().any(|a| body_yields(&a.body))
         }
         _ => false,

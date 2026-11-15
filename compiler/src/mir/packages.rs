@@ -10,8 +10,8 @@
 use super::lower::{Fx, internal, not_yet};
 use super::ops::one;
 use super::*;
+use crate::frontend::ast::Expr;
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::tir::TExpr;
 
 type Result<T> = std::result::Result<T, JadeError>;
 
@@ -30,8 +30,8 @@ impl<'a, 'l> Fx<'a, 'l> {
         &mut self,
         pkg: &str,
         f: &str,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         et: &Ty,
         span: Span,
     ) -> Result<(Operand, Ty)> {
@@ -255,7 +255,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where.
     ///
     /// Outputs: the result and its type.
-    fn math(&mut self, f: &str, args: &'a [TExpr], et: &Ty, span: Span) -> Result<(Operand, Ty)> {
+    fn math(&mut self, f: &str, args: &'a [Expr], et: &Ty, span: Span) -> Result<(Operand, Ty)> {
         let float = |v: f64| Ok((Operand::Const(Const::Float(v)), Ty::Float));
         match f {
             "pi" => return float(std::f64::consts::PI),
@@ -384,7 +384,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     }
 
     /// Purpose: This function lowers a number argument as a float.
-    fn float_operand(&mut self, e: &'a TExpr) -> Result<Operand> {
+    fn float_operand(&mut self, e: &'a Expr) -> Result<Operand> {
         let (v, t) = self.expr(e)?;
         Ok(self.as_float(v, &t))
     }
@@ -401,8 +401,8 @@ impl<'a, 'l> Fx<'a, 'l> {
     fn fs(
         &mut self,
         f: &str,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
     ) -> Result<(Operand, Ty)> {
         let m = match f {
@@ -442,7 +442,7 @@ impl<'a, 'l> Fx<'a, 'l> {
 
     /// Purpose: This function lowers `uhttp.stream(url, handler, headers?)`,
     /// giving the handler to the backend as a function pointer.
-    fn uhttp_stream(&mut self, args: &'a [TExpr], span: Span) -> Result<(Operand, Ty)> {
+    fn uhttp_stream(&mut self, args: &'a [Expr], span: Span) -> Result<(Operand, Ty)> {
         let [url, handler, rest @ ..] = args else {
             return Err(internal("uhttp.stream without a url and a handler", span));
         };
@@ -470,7 +470,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     }
 
     /// Purpose: This function lowers each argument in order.
-    fn operands(&mut self, args: &'a [TExpr]) -> Result<Vec<Operand>> {
+    fn operands(&mut self, args: &'a [Expr]) -> Result<Vec<Operand>> {
         let mut ops = Vec::with_capacity(args.len());
         for a in args {
             ops.push(self.expr(a)?.0);

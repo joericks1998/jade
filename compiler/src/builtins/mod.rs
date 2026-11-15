@@ -1,11 +1,12 @@
 //! The built-in registry: the `PACKAGES` table and the names every program has.
 //!
 //! Each package is a flat top-level module (`crate::array`, `crate::math`, …)
-//! that declares its function names and registers its types with the checker.
-//! Nothing here runs: `typechecker/infer/builtins.rs` types each call, `mir/`
-//! lowers it, and `src/backend/` emits the code.
+//! that declares its function names. Nothing here runs: the per-file pass in
+//! `typechecker/resolve.rs` binds a package's name where a `use` names it,
+//! `typechecker/infer/builtins.rs` types each call, `mir/` lowers it, and
+//! `src/backend/` emits the code.
 
-use crate::typechecker::type_infer::TypeContext;
+use crate::typechecker::resolve::Names;
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
@@ -16,16 +17,16 @@ use crate::{
 
 // ── Package ───────────────────────────────────────────────────────────────────
 
-/// A stdlib package injected via `use "..."`.
+/// A std package a program brings in with `use std::name`.
 ///
-/// `import_name` is the string in the `use` statement ("std/string").
-/// `global_name` is the variable name injected into scope ("string").
+/// `import_name` is the path the `use` names ("std/string").
+/// `global_name` is the name it binds in the program ("string"), which the
+/// per-file pass records as a package.
 pub struct Package {
     pub import_name: &'static str,
     pub global_name: &'static str,
     /// Every function the package has, by name.
     pub fns: &'static [&'static str],
-    pub register_types: fn(ctx: &mut TypeContext),
 }
 
 impl Package {
@@ -122,18 +123,10 @@ pub fn global_names() -> &'static [&'static str] {
     core::GLOBAL_NAMES
 }
 
-/// Register type signatures for all core built-ins into the type checker.
-pub fn register_core_types(ctx: &mut TypeContext) {
-    core::register_types(ctx);
-}
-
-/// Register primitive method type information into the type checker.
-pub fn register_primitive_method_types(ctx: &mut TypeContext) {
-    string::register_str_method_types(ctx);
-    bytes::register_bytes_method_types(ctx);
-    array::register_array_method_types(ctx);
-    dict::register_dict_method_types(ctx);
-    future::register_future_method_types(ctx);
+/// Bind every global a program has without an import in the per-file pass's
+/// name table.
+pub fn register_core_names(names: &mut Names) {
+    core::register_names(names);
 }
 
 #[cfg(test)]

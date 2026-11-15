@@ -11,8 +11,8 @@
 use super::check::Frame;
 use super::ty::{FuncRef, SizedNum, Ty, with_article};
 use super::{Checker, StructInfo, Target};
+use crate::frontend::ast::Expr;
 use crate::frontend::error::Span;
-use crate::typechecker::tir::TExpr;
 
 /// The structs every program has without declaring them, with their field types.
 fn builtin_structs() -> Vec<(&'static str, Vec<(&'static str, Ty)>)> {
@@ -439,7 +439,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         tys: Vec<Ty>,
-        args: &'a [TExpr],
+        args: &'a [Expr],
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -480,8 +480,8 @@ impl<'a> Checker<'a> {
         &mut self,
         pkg: &str,
         name: &str,
-        args: &'a [TExpr],
-        kwargs: &'a [(String, TExpr)],
+        args: &'a [Expr],
+        kwargs: &'a [(String, Expr)],
         span: Span,
         f: &mut Frame,
         node: usize,
@@ -517,7 +517,7 @@ impl<'a> Checker<'a> {
                 return Ty::Nil;
             }
             let recv = tys.remove(0);
-            let rest: &'a [TExpr] = if args.is_empty() { args } else { &args[1..] };
+            let rest: &'a [Expr] = if args.is_empty() { args } else { &args[1..] };
             return self.method_call(&recv, name, tys, rest, span, f, node);
         }
 
@@ -1009,7 +1009,7 @@ pub(super) fn primitive_method(
     recv: &Ty,
     name: &str,
     tys: Vec<Ty>,
-    args: &[TExpr],
+    args: &[Expr],
     span: Span,
     f: &mut Frame,
     node: usize,

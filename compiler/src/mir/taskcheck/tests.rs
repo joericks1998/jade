@@ -2,7 +2,7 @@
 //! parsed, checked and lowered to MIR as `jade build` does.
 
 use crate::frontend::{lexer, parser};
-use crate::typechecker::type_infer;
+use crate::typechecker::resolve;
 
 /// Purpose: This function compiles `src` to MIR and runs the task check.
 ///
@@ -11,9 +11,9 @@ use crate::typechecker::type_infer;
 fn compile(src: &str) -> Result<(), String> {
     let tokens = lexer::tokenize(src).map_err(|e| e.to_string())?;
     let program = parser::parse(tokens).map_err(|e| e.to_string())?;
-    let mut tp = type_infer::infer(program).map_err(|e| e.to_string())?;
+    let mut tp = resolve::resolve(program).map_err(|e| e.to_string())?;
     crate::typechecker::infer::check_members(&tp).map_err(|e| e.to_string())?;
-    type_infer::fill_struct_literal_defaults(&mut tp).map_err(|e| e.to_string())?;
+    resolve::fill_struct_literal_defaults(&mut tp).map_err(|e| e.to_string())?;
     let typed = crate::typechecker::infer::check_program(&tp).map_err(|e| e.to_string())?;
     let mir = crate::mir::lower_program(&tp, &typed).map_err(|e| e.to_string())?;
     super::check(&mir).map_err(|e| e.to_string())

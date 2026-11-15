@@ -34,28 +34,23 @@
 //! The mangle is scope-aware and crosses every name-bearing position:
 //!   * **values** — `let` / `fn` / `async fn` / `prompt` names, identifier refs,
 //!     `alias.foo` accesses, decorator targets, `from "x" use a` bindings.
-//!   * **types**  — `struct` / `interface` names, `StructLiteral.type_name`,
-//!     `extend` `type_name` / `interface_name`, `JadeType::Struct(_)` embedded in
-//!     every `TExpr.ty` / `ret_ty`, `?p |> Type` output types, `catch Type`.
-//!   * **AST defaults** — `StructFieldDef::Let/Prompt` defaults are raw AST `Expr`
-//!     (inlined into literals later by `fill_struct_literal_defaults`), so they get
-//!     their own walker.
+//!   * **types**  — class names, `StructLiteral.type_name`, parents, member
+//!     type decorators, `extend` `type_name`, `toT(?p)` output types, `x is C`,
+//!     `catch Type`.
+//!   * **defaults** — a class field's default is an expression like any other,
+//!     which the per-file pass already rewrote, and is renamed the same way
+//!     before `fill_struct_literal_defaults` copies it into literals.
 //!
 //! Scope-awareness: a bare identifier is only mangled when it resolves to a
 //! *module-global* and is **not shadowed** by a function param, `let`, loop var,
-//! closure param, or catch binding. Get this wrong and you clobber locals.
-//!
-//! Known gap (alpha, tune later): closures appearing *inside* a struct-field
-//! default expression have their `Vec<Stmt>` body left un-mangled — vanishingly
-//! rare and not worth an entire AST-statement walker yet.
+//! pipe piece, or catch binding. Get this wrong and you clobber locals.
 
 use crate::typechecker::infer::native::NativeSig;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::frontend::ast::{Expr, FStrPart, StructFieldDef};
+use crate::frontend::ast::{Expr, ExprKind, FStrPart, Stmt, StructFieldDef};
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
 
 /// Mangle a module-global `name` into module `id`'s namespace.
 fn mangle(name: &str, id: u32) -> String {
@@ -81,7 +76,7 @@ fn is_stdlib(path: &str) -> bool {
 /// `__native$<pkgid>$<fnname>` (see [`Renamer`]), which the checker types from
 /// the package's record and the backend lowers to a call of its wrapper.
 pub fn resolve_and_namespace(
-    stmts: Vec<TStmt>,
+    stmts: Vec<Stmt>,
     source_path: &Path,
 ) -> Result<ResolvedImports, ResolveError> {
     let main_canon =
@@ -128,10 +123,10 @@ pub fn resolve_and_namespace(
 ///
 /// Outputs: its statements, mangled, or why it does not compile. It may import
 /// `std` packages only.
-pub fn namespace_source(source: &str, label: &str, id: u32) -> Result<Vec<TStmt>, String> {
+pub fn namespace_source(source: &str, label: &str, id: u32) -> Result<Vec<Stmt>, String> {
     let tokens = crate::frontend::lexer::tokenize(source).map_err(|e| format!("{label}: {e}"))?;
     let ast = crate::frontend::parser::parse(tokens).map_err(|e| format!("{label}: {e}"))?;
-    let tp = crate::typechecker::type_infer::infer(ast).map_err(|e| format!("{label}: {e}"))?;
+    let tp = crate::typechecker::resolve::resolve(ast).map_err(|e| format!("{label}: {e}"))?;
     let (values, types) = collect_globals(&tp.stmts);
     let mut reg = Registry::new();
     let body = process_file(&mut reg, tp.stmts, Path::new("."), Some(id), values, types)
@@ -178,7 +173,7 @@ impl From<String> for ResolveError {
 
 /// What one resolution pass produced.
 pub struct ResolvedImports {
-    pub stmts: Vec<TStmt>,
+    pub stmts: Vec<Stmt>,
     /// The staticlib holding the project's Rust packages, when the program
     /// uses one, for the backend to link.
     pub rust: Option<crate::rustpkg::Link>,
@@ -198,7 +193,7 @@ struct Registry {
     types: HashMap<PathBuf, HashSet<String>>,
     loaded: HashSet<PathBuf>,
     /// Inlined, mangled statements from imported files, in dependency order.
-    out: Vec<TStmt>,
+    out: Vec<Stmt>,
     /// Project root (anchor for `[lib]` imports) and the registered libraries
     /// from `jade.toml`. Empty when the build isn't inside a project.
     lib_root: Option<PathBuf>,
@@ -223,11 +218,9 @@ struct Registry {
     native_symbols: HashMap<u32, HashSet<String>>,
 }
 
-/// One decorator on a TIR item: its name, and its positional arguments.
-///
-/// The AST spells the same shape as `ast::DecoratorList`; this is the TIR's,
-/// over `TExpr`.
-type TDecorator = (String, Vec<(Option<String>, TExpr)>);
+/// One decorator on a definition: its name, and its arguments, as one entry
+/// of `ast::DecoratorList`.
+type Decorator = (String, Vec<(Option<String>, Expr)>);
 
 impl Registry {
     fn new() -> Self {
@@ -321,30 +314,31 @@ impl Registry {
     }
 }
 
-/// Parse + type-infer an imported file, returning its TIR statements.
-fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, ResolveError> {
+/// Parse an imported file and run the per-file pass over it, returning its
+/// statements.
+fn parse_and_infer(canon: &Path) -> Result<Vec<Stmt>, ResolveError> {
     let src =
         std::fs::read_to_string(canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
     let tokens = crate::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
     let ast = crate::frontend::parser::parse(tokens).map_err(|e| e.to_string())?;
-    let tp = crate::typechecker::type_infer::infer(ast).map_err(|e| e.to_string())?;
+    let tp = crate::typechecker::resolve::resolve(ast).map_err(|e| e.to_string())?;
     Ok(tp.stmts)
 }
 
 /// Collect a file's top-level global names, split into the value namespace
 /// (let / fn / async fn / prompt) and the type namespace (struct / interface).
-fn collect_globals(stmts: &[TStmt]) -> (HashSet<String>, HashSet<String>) {
+fn collect_globals(stmts: &[Stmt]) -> (HashSet<String>, HashSet<String>) {
     let mut values = HashSet::new();
     let mut types = HashSet::new();
     for s in stmts {
         match s {
-            TStmt::Let { name, .. }
-            | TStmt::FnDef { name, .. }
-            | TStmt::AsyncFnDef { name, .. }
-            | TStmt::PromptDecl { name, .. } => {
+            Stmt::Let { name, .. }
+            | Stmt::FnDef { name, .. }
+            | Stmt::AsyncFnDef { name, .. }
+            | Stmt::PromptDecl { name, .. } => {
                 values.insert(name.clone());
             }
-            TStmt::StructDef { name, .. } => {
+            Stmt::StructDef { name, .. } => {
                 types.insert(name.clone());
             }
             _ => {}
@@ -382,12 +376,12 @@ fn load_dep(reg: &mut Registry, dep_canon: &Path) -> Result<(), ResolveError> {
 /// import-free statements (the caller decides where to splice them).
 fn process_file(
     reg: &mut Registry,
-    stmts: Vec<TStmt>,
+    stmts: Vec<Stmt>,
     dir: &Path,
     self_id: Option<u32>,
     self_values: HashSet<String>,
     self_types: HashSet<String>,
-) -> Result<Vec<TStmt>, ResolveError> {
+) -> Result<Vec<Stmt>, ResolveError> {
     let mut aliases: HashMap<String, (u32, HashSet<String>, HashSet<String>)> = HashMap::new();
     let mut from_value: HashMap<String, String> = HashMap::new();
     let mut from_type: HashMap<String, String> = HashMap::new();
@@ -398,11 +392,11 @@ fn process_file(
     let mut native_from: HashMap<String, u32> = HashMap::new();
     // Alias → the source package and the names it does not export.
     let mut hidden: HashMap<String, (String, HashSet<String>)> = HashMap::new();
-    let mut kept: Vec<TStmt> = Vec::new();
+    let mut kept: Vec<Stmt> = Vec::new();
 
     for s in stmts {
         match s {
-            TStmt::Use { path, as_name, .. } => {
+            Stmt::Use { path, as_name, .. } => {
                 // stdlib: drop the `use`; the `ns.foo` access stays qualified for
                 // stdlib dispatch.
                 if is_stdlib(&path) {
@@ -440,11 +434,11 @@ fn process_file(
                     }
                 }
             }
-            TStmt::FromUse { path, names, path_is_string, span } => {
+            Stmt::FromUse { path, names, path_is_string, span } => {
                 // stdlib from-imports are preserved verbatim for the stdlib
                 // dispatch path (parity with the prior pass).
                 if is_stdlib(&path) {
-                    kept.push(TStmt::FromUse { path, names, path_is_string, span });
+                    kept.push(Stmt::FromUse { path, names, path_is_string, span });
                     continue;
                 }
                 match resolve_use(reg, dir, &path)? {
@@ -688,10 +682,10 @@ fn class_type_text(t: &str, classes: &HashMap<String, String>) -> String {
 ///
 /// Outputs: a class whose fields are the struct's, in order, every one public,
 /// typed, and required, since Rust gives no field a default.
-fn rust_class(s: &crate::rustpkg::Struct, classes: &HashMap<String, String>) -> TStmt {
+fn rust_class(s: &crate::rustpkg::Struct, classes: &HashMap<String, String>) -> Stmt {
     use crate::frontend::ast::ClassMembers;
     let span = Span { line: 0, col: 0 };
-    TStmt::StructDef {
+    Stmt::StructDef {
         name: crate::rustpkg::class_name(&s.krate, &s.name),
         fields: s.fields.iter().map(|f| StructFieldDef::Required(f.name.clone())).collect(),
         parents: Vec::new(),
@@ -909,9 +903,9 @@ impl Renamer {
             return Some(mangle(tn, id));
         }
         // Fallback: a *bare* imported type whose `alias.` qualifier was stripped by
-        // type inference. `let G = tools.ToolGroup {}` reaches codegen as a bare
-        // `StructLiteral.type_name = "ToolGroup"` / `JadeType::Struct("ToolGroup")`
-        // (see type_infer's `has_imports` StructLiteral branch), so it matches none
+        // the per-file pass. `let G = tools.ToolGroup {}` arrives here as a bare
+        // `StructLiteral.type_name = "ToolGroup"` (see the per-file pass's
+        // `resolve_struct_literal`), so it matches none
         // of the cases above. Resolve it against the unique imported module that
         // exports this type name, mangling to that module's id so it agrees with the
         // module's own (mangled) `StructDef`. If two imported modules export the
@@ -968,9 +962,9 @@ impl Renamer {
 
     /// `top` marks module-top-level statements, whose definition names are
     /// globals (mangled). Inside bodies, definitions are locals (bound, not mangled).
-    fn rename_stmt(&mut self, s: &mut TStmt, top: bool) {
+    fn rename_stmt(&mut self, s: &mut Stmt, top: bool) {
         match s {
-            TStmt::Let { name, value, .. } => {
+            Stmt::Let { name, value, .. } => {
                 self.rename_expr(value);
                 if top {
                     if let Some(m) = self.def_value(name) {
@@ -980,16 +974,15 @@ impl Renamer {
                     self.bind_local(name);
                 }
             }
-            TStmt::Assign { name, value, .. } => {
+            Stmt::Assign { name, value, .. } => {
                 self.rename_expr(value);
                 if let Some(m) = self.ref_value(name) {
                     *name = m;
                 }
             }
-            TStmt::FnDef { name, params, body, ret_ty, decorators, .. }
-            | TStmt::AsyncFnDef { name, params, body, ret_ty, decorators, .. } => {
+            Stmt::FnDef { name, params, body, decorators, .. }
+            | Stmt::AsyncFnDef { name, params, body, decorators, .. } => {
                 self.rename_decorators(decorators);
-                self.rename_type(ret_ty);
                 if top {
                     if let Some(m) = self.def_value(name) {
                         *name = m;
@@ -1009,7 +1002,7 @@ impl Renamer {
                 }
                 self.pop_scope();
             }
-            TStmt::StructDef { name, fields, parents, members, .. } => {
+            Stmt::StructDef { name, fields, parents, members, .. } => {
                 // A parent is a type *reference*, so it renames the way an
                 // `extend` target does. Left bare when `ref_type` cannot place
                 // it, which `resolve_inheritance` then reports by name.
@@ -1029,7 +1022,7 @@ impl Renamer {
                 for f in fields.iter_mut() {
                     match f {
                         StructFieldDef::Let { default, .. }
-                        | StructFieldDef::Prompt { default, .. } => self.rename_ast_expr(default),
+                        | StructFieldDef::Prompt { default, .. } => self.rename_expr(default),
                         StructFieldDef::Required(_) => {}
                     }
                 }
@@ -1037,7 +1030,7 @@ impl Renamer {
                     *name = m;
                 }
             }
-            TStmt::ExtendBlock { type_name, methods, decorators, .. } => {
+            Stmt::ExtendBlock { type_name, methods, decorators, .. } => {
                 self.rename_decorators(decorators);
                 if let Some(m) = self.ref_type(type_name) {
                     *type_name = m;
@@ -1045,11 +1038,10 @@ impl Renamer {
                 // Methods are FnDefs; their names are NOT globals (they key as
                 // `Type$id__method` off the already-mangled type_name).
                 for meth in methods.iter_mut() {
-                    if let TStmt::FnDef { params, body, ret_ty, decorators, .. }
-                    | TStmt::AsyncFnDef { params, body, ret_ty, decorators, .. } = meth
+                    if let Stmt::FnDef { params, body, decorators, .. }
+                    | Stmt::AsyncFnDef { params, body, decorators, .. } = meth
                     {
                         self.rename_decorators(decorators);
-                        self.rename_type(ret_ty);
                         self.push_scope();
                         for (pname, default) in params.iter_mut() {
                             if let Some(d) = default {
@@ -1066,20 +1058,20 @@ impl Renamer {
                     }
                 }
             }
-            TStmt::FieldAssign { object, value, .. } => {
+            Stmt::FieldAssign { object, value, .. } => {
                 self.rename_expr(value);
                 if let Some(m) = self.ref_value(object) {
                     *object = m;
                 }
             }
-            TStmt::IndexAssign { name, index, value, .. } => {
+            Stmt::IndexAssign { name, index, value, .. } => {
                 self.rename_expr(index);
                 self.rename_expr(value);
                 if let Some(m) = self.ref_value(name) {
                     *name = m;
                 }
             }
-            TStmt::PromptDecl { name, body, .. } => {
+            Stmt::PromptDecl { name, body, .. } => {
                 self.rename_expr(body);
                 if top {
                     if let Some(m) = self.def_value(name) {
@@ -1089,24 +1081,24 @@ impl Renamer {
                     self.bind_local(name);
                 }
             }
-            TStmt::Return { value, .. } => {
+            Stmt::Return { value, .. } => {
                 if let Some(e) = value {
                     self.rename_expr(e);
                 }
             }
-            TStmt::Yield { value, .. } => self.rename_expr(value),
-            TStmt::If { condition, then_body, else_body, .. } => {
+            Stmt::Yield { value, .. } => self.rename_expr(value),
+            Stmt::If { condition, then_body, else_body, .. } => {
                 self.rename_expr(condition);
                 self.block(then_body);
                 if let Some(eb) = else_body {
                     self.block(eb);
                 }
             }
-            TStmt::While { condition, body, .. } => {
+            Stmt::While { condition, body, .. } => {
                 self.rename_expr(condition);
                 self.block(body);
             }
-            TStmt::For { var, iterable, body, .. } => {
+            Stmt::For { var, iterable, body, .. } => {
                 self.rename_expr(iterable);
                 self.push_scope();
                 self.bind_local(var);
@@ -1115,7 +1107,7 @@ impl Renamer {
                 }
                 self.pop_scope();
             }
-            TStmt::TryCatch { body, arms, .. } => {
+            Stmt::TryCatch { body, arms, .. } => {
                 self.block(body);
                 for arm in arms.iter_mut() {
                     if let Some(ct) = arm.catch_type.as_mut()
@@ -1131,17 +1123,17 @@ impl Renamer {
                     self.pop_scope();
                 }
             }
-            TStmt::Raise { value, .. } => self.rename_expr(value),
-            TStmt::Expr(e) => self.rename_expr(e),
+            Stmt::Raise { value, .. } => self.rename_expr(value),
+            Stmt::Expr(e) => self.rename_expr(e),
             // Control flow, naming nothing to rename.
-            TStmt::Break { .. } | TStmt::Continue { .. } => {}
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             // Imports were stripped in process_file (except preserved stdlib
             // from-uses, which carry nothing to rename).
-            TStmt::Use { .. } | TStmt::FromUse { .. } => {}
+            Stmt::Use { .. } | Stmt::FromUse { .. } => {}
         }
     }
 
-    fn block(&mut self, stmts: &mut [TStmt]) {
+    fn block(&mut self, stmts: &mut [Stmt]) {
         self.push_scope();
         for s in stmts.iter_mut() {
             self.rename_stmt(s, false);
@@ -1149,7 +1141,7 @@ impl Renamer {
         self.pop_scope();
     }
 
-    fn rename_decorators(&mut self, decorators: &mut [TDecorator]) {
+    fn rename_decorators(&mut self, decorators: &mut [Decorator]) {
         for (dname, dargs) in decorators.iter_mut() {
             if let Some(m) = self.ref_decorator(dname) {
                 *dname = m;
@@ -1160,18 +1152,16 @@ impl Renamer {
         }
     }
 
-    // ── TIR expressions ───────────────────────────────────────────────────────
+    // ── Expressions ───────────────────────────────────────────────────────────
 
-    fn rename_expr(&mut self, e: &mut TExpr) {
-        self.rename_type(&mut e.ty);
-
+    fn rename_expr(&mut self, e: &mut Expr) {
         // `alias.foo` → `foo$<id>` (.jde) or `__native$<pkgid>$foo` (native),
         // before walking children so the bare alias isn't independently rewritten.
         // Cloned rather than borrowed: the native arm reports an undeclared
         // symbol, so it needs `&mut self` while `e.kind` is still in hand.
         let qualified = match &e.kind {
-            TExprKind::FieldAccess { object, field } => match &object.kind {
-                TExprKind::Identifier(alias) => Some((alias.clone(), field.clone())),
+            ExprKind::FieldAccess { object, field } => match &object.kind {
+                ExprKind::Identifier(alias) => Some((alias.clone(), field.clone())),
                 _ => None,
             },
             _ => None,
@@ -1189,18 +1179,18 @@ impl Renamer {
                 })
         });
         if let Some(m) = collapse {
-            e.kind = TExprKind::Identifier(m);
+            e.kind = ExprKind::Identifier(m);
             return;
         }
 
         match &mut e.kind {
-            TExprKind::Is { value, class } => {
+            ExprKind::Is { value, class } => {
                 self.rename_expr(value);
                 if let Some(m) = self.ref_type(class) {
                     *class = m;
                 }
             }
-            TExprKind::Identifier(n) => {
+            ExprKind::Identifier(n) => {
                 if let Some(m) = self.ref_native_value(n) {
                     *n = m;
                 } else if let Some(m) = self.ref_value(n) {
@@ -1215,7 +1205,7 @@ impl Renamer {
                     *n = m;
                 }
             }
-            TExprKind::Call { callee, args, kwargs } => {
+            ExprKind::Call { callee, args, kwargs } => {
                 self.rename_expr(callee);
                 for a in args.iter_mut() {
                     self.rename_expr(a);
@@ -1224,12 +1214,12 @@ impl Renamer {
                     self.rename_expr(v);
                 }
             }
-            TExprKind::BinOp { left, right, .. } => {
+            ExprKind::BinOp { left, right, .. } => {
                 self.rename_expr(left);
                 self.rename_expr(right);
             }
-            TExprKind::UnaryOp { operand, .. } => self.rename_expr(operand),
-            TExprKind::StructLiteral { type_name, base, fields, .. } => {
+            ExprKind::UnaryOp { operand, .. } => self.rename_expr(operand),
+            ExprKind::StructLiteral { type_name, base, fields, .. } => {
                 if let Some(m) = self.ref_type(type_name) {
                     *type_name = m;
                 }
@@ -1240,24 +1230,24 @@ impl Renamer {
                     self.rename_expr(v);
                 }
             }
-            TExprKind::FieldAccess { object, .. } => self.rename_expr(object),
-            TExprKind::Index { object, index } => {
+            ExprKind::FieldAccess { object, .. } => self.rename_expr(object),
+            ExprKind::Index { object, index } => {
                 self.rename_expr(object);
                 self.rename_expr(index);
             }
-            TExprKind::Array { elements } => {
+            ExprKind::Array { elements } => {
                 for el in elements.iter_mut() {
                     self.rename_expr(el);
                 }
             }
-            TExprKind::FStr { parts } => {
+            ExprKind::FStr { parts } => {
                 for p in parts.iter_mut() {
-                    if let TFStrPart::Expr(inner) = p {
+                    if let FStrPart::Expr(inner) = p {
                         self.rename_expr(inner);
                     }
                 }
             }
-            TExprKind::PromptDeref { expr, output_type, grammar_expr } => {
+            ExprKind::PromptDeref { expr, output_type, grammar_expr, .. } => {
                 self.rename_expr(expr);
                 if let Some(ot) = output_type.as_mut()
                     && let Some(m) = self.ref_type(ot)
@@ -1268,17 +1258,17 @@ impl Renamer {
                     self.rename_expr(g);
                 }
             }
-            TExprKind::Dict { entries } => {
+            ExprKind::Dict { entries } => {
                 for (k, v) in entries.iter_mut() {
                     self.rename_expr(k);
                     self.rename_expr(v);
                 }
             }
-            TExprKind::Await { expr } => self.rename_expr(expr),
-            TExprKind::PromptLiteral { body } => self.rename_expr(body),
+            ExprKind::Await { expr } => self.rename_expr(expr),
+            ExprKind::PromptLiteral { body } => self.rename_expr(body),
             // The piece and the hoisted arguments are names the pipe binds, so
             // they shadow any top-level name inside its stages.
-            TExprKind::Pipe { source, hoisted, piece, body } => {
+            ExprKind::Pipe { source, hoisted, piece, body } => {
                 self.rename_expr(source);
                 for (_, v) in hoisted.iter_mut() {
                     self.rename_expr(v);
@@ -1291,125 +1281,18 @@ impl Renamer {
                 self.rename_expr(body);
                 self.pop_scope();
             }
-            TExprKind::Integer(_)
-            | TExprKind::Float(_)
-            | TExprKind::Bool(_)
-            | TExprKind::Str(_) => {}
-        }
-    }
-
-    fn rename_type(&mut self, t: &mut JadeType) {
-        match t {
-            JadeType::Struct(n) => {
-                if let Some(m) = self.ref_type(n) {
-                    *n = m;
+            // The per-file pass replaces every raw pipe, in an imported file
+            // as in the entry file, so meeting one here is a compiler bug.
+            ExprKind::RawPipe { .. } => self.errors.push(
+                JadeError::TypeError {
+                    message: "internal compiler error: a pipe reached the import pass \
+                              before the per-file pass flattened it"
+                        .to_string(),
+                    span: e.span,
                 }
-            }
-            JadeType::Array(inner) | JadeType::Future(inner) => self.rename_type(inner),
-            JadeType::Fn { params, ret } | JadeType::AsyncFn { params, ret } => {
-                for p in params.iter_mut() {
-                    self.rename_type(p);
-                }
-                self.rename_type(ret);
-            }
-            _ => {}
-        }
-    }
-
-    // ── AST expressions (struct-field defaults) ───────────────────────────────
-
-    fn rename_ast_expr(&mut self, e: &mut Expr) {
-        // `alias.foo` collapse (native + .jde), same as the TIR path.
-        // Cloned for the same reason as the TIR path: the native arm needs
-        // `&mut self` to report an undeclared symbol.
-        let qualified = match &*e {
-            Expr::FieldAccess { object, field, span } => match object.as_ref() {
-                Expr::Identifier { name: alias, .. } => Some((alias.clone(), field.clone(), *span)),
-                _ => None,
-            },
-            _ => None,
-        };
-        let repl = qualified.and_then(|(alias, field, span)| {
-            self.check_exported(&alias, &field, span);
-            self.ref_native_qual(&alias, &field, span)
-                .or_else(|| self.ref_value_qual(&alias, &field))
-                .map(|m| (m, span))
-        });
-        if let Some((m, span)) = repl {
-            *e = Expr::Identifier { name: m, span };
-            return;
-        }
-
-        match e {
-            Expr::Is { value, class, .. } => {
-                self.rename_ast_expr(value);
-                if let Some(m) = self.ref_type(class) {
-                    *class = m;
-                }
-            }
-            Expr::Identifier { name, .. } => {
-                if let Some(m) = self.ref_native_value(name) {
-                    *name = m;
-                } else if let Some(m) = self.ref_value(name) {
-                    *name = m;
-                }
-            }
-            Expr::Call { callee, args, kwargs, .. } => {
-                self.rename_ast_expr(callee);
-                for a in args.iter_mut() {
-                    self.rename_ast_expr(a);
-                }
-                for (_, v) in kwargs.iter_mut() {
-                    self.rename_ast_expr(v);
-                }
-            }
-            Expr::BinOp { left, right, .. } => {
-                self.rename_ast_expr(left);
-                self.rename_ast_expr(right);
-            }
-            Expr::UnaryOp { operand, .. } => self.rename_ast_expr(operand),
-            Expr::StructLiteral { type_name, fields, .. } => {
-                if let Some(m) = self.ref_type(type_name) {
-                    *type_name = m;
-                }
-                for (_, v) in fields.iter_mut() {
-                    self.rename_ast_expr(v);
-                }
-            }
-            Expr::FieldAccess { object, .. } => self.rename_ast_expr(object),
-            Expr::Index { object, index, .. } => {
-                self.rename_ast_expr(object);
-                self.rename_ast_expr(index);
-            }
-            Expr::Array { elements, .. } => {
-                for el in elements.iter_mut() {
-                    self.rename_ast_expr(el);
-                }
-            }
-            Expr::FStr { parts, .. } => {
-                for p in parts.iter_mut() {
-                    if let FStrPart::Expr(inner) = p {
-                        self.rename_ast_expr(inner);
-                    }
-                }
-            }
-            Expr::PromptLiteral { body, .. } => self.rename_ast_expr(body),
-            Expr::PromptDeref { expr, .. } => self.rename_ast_expr(expr),
-            Expr::Dict { entries, .. } => {
-                for (k, v) in entries.iter_mut() {
-                    self.rename_ast_expr(k);
-                    self.rename_ast_expr(v);
-                }
-            }
-            Expr::Await { expr, .. } => self.rename_ast_expr(expr),
-            // A pipe stage is an ordinary expression — an imported function is a
-            // legitimate stage (`x |> mathlib.double`), so it needs namespacing
-            // exactly as the piped value does.
-            Expr::Pipe { value, stage, .. } => {
-                self.rename_ast_expr(value);
-                self.rename_ast_expr(stage);
-            }
-            Expr::Integer { .. } | Expr::Float { .. } | Expr::Bool { .. } | Expr::Str { .. } => {}
+                .to_string(),
+            ),
+            ExprKind::Integer(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => {}
         }
     }
 }
@@ -1639,7 +1522,7 @@ mod rust_symbol_tests {
         ]
         .into_iter()
         .collect();
-        let TStmt::StructDef { name, fields, members, .. } = rust_class(&point(), &classes) else {
+        let Stmt::StructDef { name, fields, members, .. } = rust_class(&point(), &classes) else {
             panic!("a struct becomes a class");
         };
         assert_eq!(name, "Point$rgeo");

@@ -4,6 +4,18 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.6
+
+*The compiler builds one tree instead of two.* No language change: every example prints what it printed before. `design/v2-simplify.md` has the plan.
+
+- *The typed tree is gone.* Each file used to be turned into a second tree that gave every node a type, and nothing after that step read the types: the whole-program checker works out every type again once imports are merged. Now the checker, MIR and the import pass read the parser's tree, after a per-file pass that flattens pipes, folds `toInt(?p)` and its kin into a typed dereference, fills in class literal defaults, and refuses what one file can settle, such as an undefined name or a whole-reply stage after `?p`.
+- *A few type errors are worded by the whole-program checker,* which now reports every type error. `let x = 1 + "a"` says `'+' cannot combine int and str`, `if 1 { … }` says `type mismatch in an if condition: int and bool do not mix`, and `prompt p = 42` says `a prompt's text must be a str, got int`. A pipe stage bound to a value that is not a function, `let n = 1` then `5 |> n`, is still refused in the pipe's words.
+- *A type error inside a function nothing calls is no longer reported.* The checker checks a function at the types each call gives it, and a function no call reaches is never compiled.
+- *A `let` inside a block binds a name for that block alone,* in the checker as in the compiled program. A block that rebinds an outer name to another type used to be refused; it now compiles and leaves the outer name as it was.
+- *A copy-with literal takes the declared default of a field its base's class lacks,* wherever the base comes from: `Full { ...make_bare() }` works as `Full { ...bare }` did. When the field has no default, the message says to set it in the literal.
+- *A class field whose default builds the same class* is refused with a message naming the fix, where it used to exhaust the stack.
+- *`jade check`'s cache holds one tree per file,* and caches from earlier versions are not read.
+
 ## v2.0.5
 
 *Native packages are Rust crates.* A dependency with `abi = "rust"` is a crate built by cargo and linked into the program, and Jade's own C foreign function interface is gone. `design/v2-rust-packages.md` has the design and the reasons for it.

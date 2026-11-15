@@ -16,8 +16,8 @@ pub mod imports;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::frontend::ast::Program;
 use crate::typechecker::infer::native::NativeSig;
-use crate::typechecker::tir::TProgram;
 
 /// What a build produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,7 +41,7 @@ pub struct CompileOutcome {
 /// Purpose: This struct holds a program with its imports merged and its
 /// defaults filled, ready for the checker.
 struct Merged {
-    program: TProgram,
+    program: Program,
     /// The Rust packages' staticlib, when the program calls one.
     rust: Option<crate::rustpkg::Link>,
     sigs: HashMap<String, NativeSig>,
@@ -51,17 +51,17 @@ struct Merged {
 /// that run before the checker.
 ///
 /// Inputs:
-/// - `program`: the entry file's typed tree.
+/// - `program`: the entry file's tree, after the per-file pass.
 /// - `source_path`: where it is, which imports resolve from; `None` for a
 ///   program with no file.
 ///
 /// Outputs: the merged program, or why import resolution or the class rules
 /// refused it.
-fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, imports::ResolveError> {
+fn merge(program: Program, source_path: Option<&Path>) -> Result<Merged, imports::ResolveError> {
     let (mut program, rust, sigs) = match source_path {
         Some(src) => {
             let r = imports::resolve_and_namespace(program.stmts, src)?;
-            (TProgram { stmts: r.stmts }, r.rust, r.native_sigs)
+            (Program { stmts: r.stmts }, r.rust, r.native_sigs)
         }
         None => (program, None, HashMap::new()),
     };
@@ -69,7 +69,7 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
     // defaults are filled in. See `typechecker::infer::members`.
     crate::typechecker::infer::check_members(&program)
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
-    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut program)
+    crate::typechecker::resolve::fill_struct_literal_defaults(&mut program)
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
     // Each `?p` becomes a call into the inference prelude, added here.
     program.stmts =
@@ -97,13 +97,13 @@ fn lower(m: &Merged) -> Result<crate::mir::Program, String> {
 /// step of `compile` short of LLVM.
 ///
 /// Inputs:
-/// - `program`: the entry file's typed tree.
+/// - `program`: the entry file's tree, after the per-file pass.
 /// - `source_path`: where it is.
 ///
 /// Outputs: `Ok(())`, or the error `jade build` would report. An import that
 /// does not resolve is not reported here: it means a dependency is not
 /// installed yet, which `jade check`'s import walk says in better words.
-pub fn would_build(program: &TProgram, source_path: Option<&Path>) -> Result<(), String> {
+pub fn would_build(program: &Program, source_path: Option<&Path>) -> Result<(), String> {
     let merged = match merge(program.clone(), source_path) {
         Ok(m) => m,
         Err(imports::ResolveError::Unresolved(_)) => return Ok(()),
@@ -115,14 +115,14 @@ pub fn would_build(program: &TProgram, source_path: Option<&Path>) -> Result<(),
 /// Purpose: This function compiles a program.
 ///
 /// Inputs:
-/// - `program`: the entry file's typed tree.
+/// - `program`: the entry file's tree, after the per-file pass.
 /// - `source_path`: where it is, which imports resolve from.
 /// - `output_path`: the binary to write.
 /// - `emit`: what to produce.
 ///
 /// Outputs: the IR or MIR text when asked for it, or the first error.
 pub fn compile(
-    program: TProgram,
+    program: Program,
     source_path: Option<&Path>,
     output_path: &Path,
     emit: Emit,

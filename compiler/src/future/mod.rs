@@ -30,21 +30,5 @@
 //! `std/future` holding one name would be a package invented for the symmetry
 //! rather than for anything a program wants to import.
 
-use crate::typechecker::type_infer::TypeContext;
-
 /// The methods a `future` receiver has, by name.
 pub const FUTURE_METHODS: &[&str] = &["ready", "cancel"];
-
-pub fn register_future_method_types(ctx: &mut TypeContext) {
-    use crate::typechecker::tir::JadeType;
-    ctx.define_primitive_method(
-        "future",
-        "ready",
-        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bool) },
-    );
-    ctx.define_primitive_method(
-        "future",
-        "cancel",
-        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) },
-    );
-}

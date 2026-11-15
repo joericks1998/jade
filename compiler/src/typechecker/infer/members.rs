@@ -20,9 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::frontend::ast::{ClassMembers, StructFieldDef};
+use crate::frontend::ast::{ClassMembers, Expr, ExprKind, FStrPart, Program, Stmt, StructFieldDef};
 use crate::frontend::error::{JadeError, Span};
-use crate::typechecker::tir::{TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
 use super::ty::display_name;
 
@@ -71,11 +70,11 @@ struct Pass<'a> {
 ///   defaults are filled.
 ///
 /// Outputs: `Ok(())`, or the first rule a program breaks.
-pub fn check_members(program: &TProgram) -> Result<(), JadeError> {
+pub fn check_members(program: &Program) -> Result<(), JadeError> {
     let mut pass = Pass { classes: HashMap::new(), ancestors: HashMap::new(), fns: HashSet::new() };
     for s in &program.stmts {
         match s {
-            TStmt::StructDef { name, fields, parents, members, span } => {
+            Stmt::StructDef { name, fields, parents, members, span } => {
                 let fields = fields
                     .iter()
                     .map(|f| (f.name().to_string(), !matches!(f, StructFieldDef::Required(_))))
@@ -90,7 +89,7 @@ pub fn check_members(program: &TProgram) -> Result<(), JadeError> {
                     },
                 );
             }
-            TStmt::FnDef { name, .. } | TStmt::AsyncFnDef { name, .. } => {
+            Stmt::FnDef { name, .. } | Stmt::AsyncFnDef { name, .. } => {
                 pass.fns.insert(name);
             }
             _ => {}
@@ -153,12 +152,12 @@ impl<'a> Pass<'a> {
 
     /// Purpose: This function checks that every method defined outside its
     /// class is declared there, and that no method is defined twice.
-    fn check_definitions(&self, stmts: &[TStmt]) -> Result<(), JadeError> {
+    fn check_definitions(&self, stmts: &[Stmt]) -> Result<(), JadeError> {
         let mut defined: HashMap<(String, String), usize> = HashMap::new();
         for s in stmts {
-            let TStmt::ExtendBlock { type_name, methods, outside, span, .. } = s else { continue };
+            let Stmt::ExtendBlock { type_name, methods, outside, span, .. } = s else { continue };
             for m in methods {
-                let (TStmt::FnDef { name, .. } | TStmt::AsyncFnDef { name, .. }) = m else {
+                let (Stmt::FnDef { name, .. } | Stmt::AsyncFnDef { name, .. }) = m else {
                     continue;
                 };
                 if *outside {
@@ -201,11 +200,11 @@ impl<'a> Pass<'a> {
     /// Inputs:
     /// - `s`: the statement.
     /// - `inside`: the class whose code this is, if any.
-    fn stmt(&self, s: &TStmt, inside: Option<&str>) -> Result<(), JadeError> {
+    fn stmt(&self, s: &Stmt, inside: Option<&str>) -> Result<(), JadeError> {
         match s {
-            TStmt::Let { value, .. } | TStmt::Assign { value, .. } => self.expr(value, inside),
-            TStmt::FnDef { name, params, body, .. }
-            | TStmt::AsyncFnDef { name, params, body, .. } => {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value, inside),
+            Stmt::FnDef { name, params, body, .. }
+            | Stmt::AsyncFnDef { name, params, body, .. } => {
                 let ctor = constructor_class(name);
                 let inside = match &ctor {
                     Some(c) if self.classes.contains_key(c.as_str()) => Some(c.as_str()),
@@ -218,42 +217,42 @@ impl<'a> Pass<'a> {
                 }
                 self.stmts(body, inside)
             }
-            TStmt::ExtendBlock { type_name, methods, .. } => self.stmts(methods, Some(type_name)),
-            TStmt::Return { value, .. } => value.as_ref().map_or(Ok(()), |v| self.expr(v, inside)),
-            TStmt::Yield { value, .. } | TStmt::Raise { value, .. } => self.expr(value, inside),
-            TStmt::If { condition, then_body, else_body, .. } => {
+            Stmt::ExtendBlock { type_name, methods, .. } => self.stmts(methods, Some(type_name)),
+            Stmt::Return { value, .. } => value.as_ref().map_or(Ok(()), |v| self.expr(v, inside)),
+            Stmt::Yield { value, .. } | Stmt::Raise { value, .. } => self.expr(value, inside),
+            Stmt::If { condition, then_body, else_body, .. } => {
                 self.expr(condition, inside)?;
                 self.stmts(then_body, inside)?;
                 else_body.as_ref().map_or(Ok(()), |e| self.stmts(e, inside))
             }
-            TStmt::While { condition, body, .. } => {
+            Stmt::While { condition, body, .. } => {
                 self.expr(condition, inside)?;
                 self.stmts(body, inside)
             }
-            TStmt::For { iterable, body, .. } => {
+            Stmt::For { iterable, body, .. } => {
                 self.expr(iterable, inside)?;
                 self.stmts(body, inside)
             }
-            TStmt::FieldAssign { value, .. } | TStmt::PromptDecl { body: value, .. } => {
+            Stmt::FieldAssign { value, .. } | Stmt::PromptDecl { body: value, .. } => {
                 self.expr(value, inside)
             }
-            TStmt::IndexAssign { index, value, .. } => {
+            Stmt::IndexAssign { index, value, .. } => {
                 self.expr(index, inside)?;
                 self.expr(value, inside)
             }
-            TStmt::TryCatch { body, arms, .. } => {
+            Stmt::TryCatch { body, arms, .. } => {
                 self.stmts(body, inside)?;
                 for a in arms {
                     self.stmts(&a.body, inside)?;
                 }
                 Ok(())
             }
-            TStmt::Expr(e) => self.expr(e, inside),
+            Stmt::Expr(e) => self.expr(e, inside),
             _ => Ok(()),
         }
     }
 
-    fn stmts(&self, body: &[TStmt], inside: Option<&str>) -> Result<(), JadeError> {
+    fn stmts(&self, body: &[Stmt], inside: Option<&str>) -> Result<(), JadeError> {
         for s in body {
             self.stmt(s, inside)?;
         }
@@ -261,9 +260,9 @@ impl<'a> Pass<'a> {
     }
 
     /// Purpose: This function walks an expression, checking class literals.
-    fn expr(&self, e: &TExpr, inside: Option<&str>) -> Result<(), JadeError> {
+    fn expr(&self, e: &Expr, inside: Option<&str>) -> Result<(), JadeError> {
         match &e.kind {
-            TExprKind::StructLiteral { type_name, base, fields, given } => {
+            ExprKind::StructLiteral { type_name, base, fields, given } => {
                 for (_, v, _) in fields {
                     self.expr(v, inside)?;
                 }
@@ -272,7 +271,7 @@ impl<'a> Pass<'a> {
                 }
                 self.literal(type_name, base.is_some(), given, inside, e.span)
             }
-            TExprKind::Call { callee, args, kwargs } => {
+            ExprKind::Call { callee, args, kwargs } => {
                 self.expr(callee, inside)?;
                 for a in args {
                     self.expr(a, inside)?;
@@ -282,45 +281,45 @@ impl<'a> Pass<'a> {
                 }
                 Ok(())
             }
-            TExprKind::BinOp { left, right, .. } => {
+            ExprKind::BinOp { left, right, .. } => {
                 self.expr(left, inside)?;
                 self.expr(right, inside)
             }
-            TExprKind::UnaryOp { operand, .. } => self.expr(operand, inside),
-            TExprKind::FieldAccess { object, .. } => self.expr(object, inside),
-            TExprKind::Index { object, index } => {
+            ExprKind::UnaryOp { operand, .. } => self.expr(operand, inside),
+            ExprKind::FieldAccess { object, .. } => self.expr(object, inside),
+            ExprKind::Index { object, index } => {
                 self.expr(object, inside)?;
                 self.expr(index, inside)
             }
-            TExprKind::Array { elements } => {
+            ExprKind::Array { elements } => {
                 for x in elements {
                     self.expr(x, inside)?;
                 }
                 Ok(())
             }
-            TExprKind::Dict { entries } => {
+            ExprKind::Dict { entries } => {
                 for (k, v) in entries {
                     self.expr(k, inside)?;
                     self.expr(v, inside)?;
                 }
                 Ok(())
             }
-            TExprKind::FStr { parts } => {
+            ExprKind::FStr { parts } => {
                 for p in parts {
-                    if let TFStrPart::Expr(x) = p {
+                    if let FStrPart::Expr(x) = p {
                         self.expr(x, inside)?;
                     }
                 }
                 Ok(())
             }
-            TExprKind::PromptDeref { expr, grammar_expr, .. } => {
+            ExprKind::PromptDeref { expr, grammar_expr, .. } => {
                 self.expr(expr, inside)?;
                 grammar_expr.as_ref().map_or(Ok(()), |g| self.expr(g, inside))
             }
-            TExprKind::Await { expr } => self.expr(expr, inside),
-            TExprKind::Is { value, .. } => self.expr(value, inside),
-            TExprKind::PromptLiteral { body } => self.expr(body, inside),
-            TExprKind::Pipe { source, hoisted, body, .. } => {
+            ExprKind::Await { expr } => self.expr(expr, inside),
+            ExprKind::Is { value, .. } => self.expr(value, inside),
+            ExprKind::PromptLiteral { body } => self.expr(body, inside),
+            ExprKind::Pipe { source, hoisted, body, .. } => {
                 self.expr(source, inside)?;
                 for (_, v) in hoisted {
                     self.expr(v, inside)?;

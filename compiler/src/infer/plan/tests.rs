@@ -258,11 +258,11 @@ fn a_piped_prompt_compiles_against_a_plan() {
                ?p |> shout |> write\nprint(toInt(?p))\nprint(?p)\n";
     let tokens = crate::frontend::lexer::tokenize(src).unwrap();
     let program = crate::frontend::parser::parse(tokens).unwrap();
-    let mut tir = crate::typechecker::type_infer::infer(program).unwrap();
-    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tir).unwrap();
-    tir.stmts = crate::infer::rewrite::inject(tir.stmts).unwrap();
-    let typed = crate::typechecker::infer::check_program(&tir).unwrap();
-    let mut mir = crate::mir::lower_program(&tir, &typed).unwrap();
+    let mut tree = crate::typechecker::resolve::resolve(program).unwrap();
+    crate::typechecker::resolve::fill_struct_literal_defaults(&mut tree).unwrap();
+    tree.stmts = crate::infer::rewrite::inject(tree.stmts).unwrap();
+    let typed = crate::typechecker::infer::check_program(&tree).unwrap();
+    let mut mir = crate::mir::lower_program(&tree, &typed).unwrap();
     mir.infer = Some(plan);
     let ir = crate::backend::compile(&mir, Path::new("unused"), crate::backend::Emit::Ir)
         .unwrap()

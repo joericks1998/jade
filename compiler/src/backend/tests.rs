@@ -14,10 +14,10 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 fn mir_of(src: &str) -> mir::Program {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
-    let mut tir = crate::typechecker::type_infer::infer(program).expect("infer");
-    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tir).expect("defaults");
-    let typed = crate::typechecker::infer::check_program(&tir).expect("check");
-    mir::lower_program(&tir, &typed).expect("lowers")
+    let mut tree = crate::typechecker::resolve::resolve(program).expect("resolve");
+    crate::typechecker::resolve::fill_struct_literal_defaults(&mut tree).expect("defaults");
+    let typed = crate::typechecker::infer::check_program(&tree).expect("check");
+    mir::lower_program(&tree, &typed).expect("lowers")
 }
 
 /// Purpose: This function builds a program and runs it.

@@ -207,7 +207,7 @@ pub(crate) fn try_compile_file(
         Err(e) => return Err(format!("error: could not read '{}': {}", path, e)),
     };
 
-    // Frontend: lex → parse → type-infer.
+    // Frontend: lex → parse → the per-file pass.
     let tokens = match crate::frontend::lexer::tokenize(&source) {
         Ok(t) => t,
         Err(e) => return Err(format!("{path}: lexer error: {e}")),
@@ -216,8 +216,8 @@ pub(crate) fn try_compile_file(
         Ok(p) => p,
         Err(e) => return Err(format!("{path}: parse error: {e}")),
     };
-    let tprogram = match crate::typechecker::type_infer::infer(program) {
-        Ok(tp) => tp,
+    let program = match crate::typechecker::resolve::resolve(program) {
+        Ok(p) => p,
         Err(e) => return Err(format!("{path}: type error: {e}")),
     };
 
@@ -242,6 +242,6 @@ pub(crate) fn try_compile_file(
         std::env::current_dir().map(|d| d.join(out)).unwrap_or_else(|_| out.to_path_buf())
     };
 
-    crate::build::build(&tprogram, &abs_source, &abs_out, emit)
+    crate::build::build(&program, &abs_source, &abs_out, emit)
         .map_err(|e| format!("{path}: build error: {e}"))
 }

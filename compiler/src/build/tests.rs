@@ -7,10 +7,10 @@ use std::path::Path;
 
 use super::*;
 
-fn tir(src: &str) -> TProgram {
+fn resolved(src: &str) -> Program {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
-    crate::typechecker::type_infer::infer(program).expect("infer")
+    crate::typechecker::resolve::resolve(program).expect("resolve")
 }
 
 #[test]
@@ -51,7 +51,7 @@ impl Drop for Source {
 #[test]
 fn building_ir_does_not_write_an_output_file() {
     let src = Source::new("ir", "fn f() { return 1 }\n");
-    build(&tir("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Ir)
+    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Ir)
         .expect("IR emission should succeed");
 
     assert!(!src.out().exists(), "emitting IR must not produce an artifact");
@@ -60,7 +60,7 @@ fn building_ir_does_not_write_an_output_file() {
 #[test]
 fn building_a_binary_writes_an_artifact() {
     let src = Source::new("bin", "fn f() { return 1 }\n");
-    build(&tir("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Binary)
+    build(&resolved("fn f() { return 1 }\n"), &src.file, &src.out(), Emit::Binary)
         .expect("binary build should succeed");
 
     assert!(src.out().exists(), "no binary produced at {}", src.out().display());
@@ -70,7 +70,7 @@ fn building_a_binary_writes_an_artifact() {
 fn a_missing_source_file_is_an_error() {
     // source_path anchors import resolution, so it has to exist.
     let result = build(
-        &tir("fn f() { return 1 }\n"),
+        &resolved("fn f() { return 1 }\n"),
         Path::new("/nonexistent/nope.jde"),
         Path::new("/tmp/jade_build_never"),
         Emit::Ir,

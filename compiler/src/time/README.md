@@ -8,7 +8,7 @@ This directory holds only their names. Every function's actual behavior lives on
 
 ## What each file does
 
-- *`mod.rs`* holds `TIME_PKG`, the `Package` that names the nine functions, and the type registration for the `time` global. The calendar arithmetic is pinned by `examples/time/calendar/`, whose recorded output came from v1's arithmetic, which was tested against dates checked independently with `date -u`.
+- *`mod.rs`* holds `TIME_PKG`, the `Package` that names the nine functions; the per-file pass binds the `time` name when a `use` names the package. The calendar arithmetic is pinned by `examples/time/calendar/`, whose recorded output came from v1's arithmetic, which was tested against dates checked independently with `date -u`.
 
 ## The surface
 

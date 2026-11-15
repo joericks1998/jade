@@ -1,8 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::frontend::ast::Program;
-use crate::typechecker::tir::TProgram;
+use crate::frontend::ast::{ExprKind, Program, Stmt};
 
 /// Monotonic counter making each test's temp directory name unique.  A
 /// timestamp is not sufficient: two tests starting in the same nanosecond tick
@@ -151,17 +150,28 @@ fn ast_cache_miss_for_unknown_hash() {
     });
 }
 
-// ── TIR cache round-trip ──────────────────────────────────────────────────
+// ── A tree the per-file pass rewrote ──────────────────────────────────────
 
+/// The cache holds the per-file pass's output, so what comes back must be the
+/// rewritten tree: a pipe flattened, with its piece name, rather than the
+/// parser's raw stages.
 #[test]
-fn tir_cache_write_then_read() {
+fn ast_cache_round_trips_a_resolved_tree() {
     with_temp_home(|_home| {
+        let src = "fn double(x) { return x * 2 }\nlet n = 5 |> double";
+        let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
+        let program = crate::frontend::parser::parse(tokens).expect("parses");
+        let resolved = crate::typechecker::resolve::resolve(program).expect("resolves");
         let hash = [9u8; 32];
-        let tprog = TProgram { stmts: vec![] };
-        assert!(read_tir_cache(&hash).is_none());
-        write_tir_cache(&hash, "test.jde", &tprog);
-        let loaded = read_tir_cache(&hash).expect("should hit after write");
-        assert_eq!(loaded.stmts.len(), 0);
+        assert!(read_ast_cache(&hash).is_none());
+        write_ast_cache(&hash, "test.jde", &resolved);
+        let loaded = read_ast_cache(&hash).expect("should hit after write");
+        assert_eq!(loaded.stmts.len(), 2);
+        let Stmt::Let { value, .. } = &loaded.stmts[1] else { panic!("expected Let") };
+        let ExprKind::Pipe { piece, .. } = &value.kind else {
+            panic!("expected a flattened Pipe, got {:?}", value.kind)
+        };
+        assert!(piece.starts_with("$piece"));
     });
 }
 
@@ -220,25 +230,30 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
-    // Bumped to 19 in 2.0.5. `JadeType::Handle` left the middle of its enum
+    // Bumped to 20 in 2.0.6. The typed tree is gone: the cache holds one tree
+    // per file, the per-file pass's output, and `Expr` became a node of `kind`
+    // and `span` with a parser-only `RawPipe`. A v19 `ast.bin` holds the
+    // parser's old shape, which bincode would read as something else.
+    //
+    // Bumped to 19 in 2.0.5. The typed tree's `Handle` type left the middle of its enum
     // with the C path, so `Fn`, `AsyncFn`, `Future` and `Unknown` renumber under
     // bincode, and a cached function type would read back as the next one.
     //
     // Bumped to 17 in 2.0.4. No shape changed: `int` stopped folding into a
     // dereference and `toInt` started, and a class field's default now passes
-    // through its type decorators. A stale TIR would still hold `?p |> int`
+    // through its type decorators. A stale typed tree would still hold `?p |> int`
     // folded in, which `jade check` would then let through.
     //
-    // Bumped to 16 in 2.0.1. `x is Class` added `Expr::Is` and `TExprKind::Is`
+    // Bumped to 16 in 2.0.1. `x is Class` added `Expr::Is` and the typed tree's `Is`
     // at the front of their enums, so every other variant renumbers under
     // bincode. A stale cache read back `for n in nums` with an empty name.
     //
     // Bumped to 15 in 2.0.1. Classes replaced structs: `StructDef` gained
-    // `members`, `ExtendBlock` gained `outside`, and the TIR `StructLiteral`
+    // `members`, `ExtendBlock` gained `outside`, and the typed tree's `StructLiteral`
     // gained `given`. Each is a new field bincode cannot notice is missing.
     //
-    // Bumped to 14 in 2.0.1. Closures were removed: `Expr::Closure` and
-    // `TExprKind::Closure` left the middle of their enums, so every variant after
+    // Bumped to 14 in 2.0.1. Closures were removed: `Expr::Closure` and the
+    // typed tree's `Closure` left the middle of their enums, so every variant after
     // them renumbers under bincode, and a cached closure would read back as
     // whatever now holds its number.
     //
@@ -257,13 +272,13 @@ fn cache_format_version_is_stable() {
     // difference with — it would read the next value as the base and carry on.
     //
     // Bumped to 10 in v1.4.0. Three shapes changed at once: `Stmt::InterfaceDef`
-    // and `TStmt::InterfaceDef` were removed from the middle of their enums, so
+    // and the typed tree's `InterfaceDef` were removed from the middle of their enums, so
     // every later variant renumbers under bincode; `StructDef` swapped its
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
-    // opcode. A TIR cached by an older build would deserialize into something
+    // opcode. A typed tree cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    // 18 in 2.0.4: `Expr::PromptDeref` lost a field and `TExprKind::Pipe` is
+    // 18 in 2.0.4: `Expr::PromptDeref` lost a field and the typed tree's `Pipe` is
     // new, so a cached tree from 17 would not read back as what it was.
-    assert_eq!(CACHE_FORMAT_VERSION, 19);
+    assert_eq!(CACHE_FORMAT_VERSION, 20);
     assert!(!JADE_VERSION.is_empty());
 }
