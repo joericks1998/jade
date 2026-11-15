@@ -28,12 +28,11 @@ Two things to keep in mind when adding a function:
 
 | Module | Import name | Notes |
 |---|---|---|
-| `src/core/` | *(globals)* | The names every program has without an import, in `GLOBAL_NAMES`: `print`, `len`, `write`, `input`, the task controls, the type functions and their converters, and `Grammar`. |
+| `src/core/` | *(globals)* | The names every program has without an import, in `GLOBAL_NAMES`: `print`, `len`, `write`, `input`, the task controls, the type functions and their converters, `toDict` among them, and `Grammar`. |
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods, such as `upper`, `split`, and `trim`. |
 | `src/array/` | `std/array` | Its package functions take the *functional* style, so `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |
 | `src/math/` | `std/math` | |
-| `src/json/` | `std/json` | |
 | `src/fs/` | `std/fs` | Output is tainted (see `src/backend/fs.rs`). |
 | `src/future/` | *(none)* | Supplies the `future` primitive methods, `ready` and `cancel`. No package form: see that module's README for why. |
 | `src/path/` | `std/path` | |
@@ -44,6 +43,8 @@ Two things to keep in mind when adding a function:
 | `src/http/` | `std/http` | TCP HTTP; returns `{status, body}`. |
 | `src/uhttp/` | `std/uhttp` | The same API over a Unix socket, addressed as `unix://<sock>:<path>`, plus `uhttp.stream`. |
 | `src/stdio/` | *(internal)* | Not a Jade package. It provides stdout writes that survive a closed pipe, so `jade check app.jde \| head -3` does not panic. |
+
+`src/json/` and `std/json` were removed in 2.0.7: JSON is read with `toDict(text)` and written with `toString(d)`, both globals. A `use std::json` is refused by the per-file pass in `typechecker/resolve.rs`, which names the two.
 
 ## Who uses it
 

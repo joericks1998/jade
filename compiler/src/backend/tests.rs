@@ -245,7 +245,7 @@ fn map_and_filter_pass_extra_arguments() {
     let src = "fn scale(x, by) { x * by }\nfn above(x, floor) { x > floor }\n\
                print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(toString))\n";
     let (out, _, _) = run(src);
-    assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[1, 22]\n");
+    assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[\"1\", \"22\"]\n");
 }
 
 #[test]
@@ -271,19 +271,6 @@ fn a_commands_output_is_refused_as_a_command_however_it_is_rebuilt() {
 }
 
 #[test]
-fn type_functions_check_a_json_value_when_the_program_runs() {
-    let src = "use std::json\nlet j = json.parse(\"{\\\"n\\\": 3, \\\"s\\\": \\\"x\\\"}\")\n\
-               print(int(j[\"n\"]) + 1)\nprint(float(j[\"n\"]))\nprint(str(j[\"s\"]) + \"!\")\n\
-               print(toInt(toString(j[\"n\"])))\n\
-               try {\n    print(int(j[\"s\"]))\n} catch e {\n    print(e.message)\n}\n";
-    let (out, _, _) = run(src);
-    assert_eq!(
-        out,
-        "4\n3.0\nx!\n3\nint() needs an int, got json string; convert one with toInt()\n"
-    );
-}
-
-#[test]
 fn sized_numbers_compute_at_their_width_and_raise_past_it() {
     let src = "@byte\nlet b = 250\nprint(b + 5)\ntry {\n    print(b + 6)\n} catch e {\n    print(e.message)\n}\n\
                @short\nlet s = -300\nprint(s / 7)\nprint(s % 7)\n\
@@ -301,16 +288,142 @@ fn sized_numbers_compute_at_their_width_and_raise_past_it() {
     );
 }
 
+/// A dict of strings takes every value: a string unescaped, and anything else
+/// as the exact text the input wrote, a nested object or array included.
 #[test]
-fn json_parses_and_writes_with_serdes_rules() {
-    let src = "use std::json\nlet j = json.parse(\"{\\\"b\\\": [1, 2.5, null], \\\"a\\\": \\\"x\\\"}\")\n\
-               print(j)\nprint(json.stringify(j))\nprint(int(j[\"b\"][0]) + 1)\n\
-               try {\n    json.parse(\"{} oops\")\n} catch e {\n    print(e.message)\n}\n";
+fn to_dict_reads_a_dict_of_strings_as_the_text_written() {
+    let src = r#"let d = toDict('{"s": "a\\"b\\u00e9\\ud83d\\ude00", "n": -1.50e3, "t": true, "z": null, "o": {"x": [1, {}]}, "k": 1, "k": 2}')
+print(d["s"])
+print(d["n"])
+print(d["t"])
+print(d["z"])
+print(d["o"])
+print(d["k"])
+print(len(d))
+print(toDict(d["o"]))
+"#;
+    let (out, err, rc) = run(src);
+    assert_eq!((err.as_str(), rc), ("", 0));
+    assert_eq!(
+        out,
+        "a\"b\u{e9}\u{1f600}\n-1.50e3\ntrue\nnull\n{\"x\": [1, {}]}\n2\n6\n{\"x\": \"[1, {}]\"}\n"
+    );
+}
+
+/// Use settles the value type, and the reader builds that type: ints, floats
+/// that take ints, bools, and nested dicts and arrays.
+#[test]
+fn to_dict_builds_the_value_type_the_program_uses() {
+    let src = r#"let i = toDict('{"a": 1, "b": -9223372036854775808}')
+print(i["a"] + 1)
+print(i["b"])
+let f = toDict('{"a": 2, "b": 0.5}')
+print(f["a"] + f["b"] * 1.0)
+let b = toDict('{"on": true, "off": false}')
+if b["on"] == true {
+    print(b)
+}
+let n = toDict('{"a": {"x": [1, 2]}, "b": {}}')
+print(n["a"]["x"][1] + 1)
+print(n)
+"#;
+    let (out, err, rc) = run(src);
+    assert_eq!((err.as_str(), rc), ("", 0));
+    assert_eq!(
+        out,
+        "2\n-9223372036854775808\n2.5\n{\"off\": false, \"on\": true}\n3\n{\"a\": {\"x\": [1, 2]}, \"b\": {}}\n"
+    );
+}
+
+/// A value that does not fit raises with the line and column and the fix, as
+/// does text that is not JSON or holds no object.
+#[test]
+fn to_dict_raises_where_the_text_does_not_fit() {
+    let src = r#"fn try_int(t) {
+    try {
+        let d = toDict(t)
+        print(d["a"] + 1)
+    } catch e {
+        print(e.message)
+    }
+}
+try_int('{"a": 1.5}')
+try_int('{"a": 99999999999999999999}')
+try_int('{\n  "a": null}')
+try_int('{"a": [1]}')
+try_int('{"a": 1} x')
+try_int('"text"')
+try_int('{"a": tru}')
+fn try_floats(t) {
+    try {
+        let d = toDict(t)
+        print(d["a"] * 2.0)
+    } catch e {
+        print(e.message)
+    }
+}
+try_floats('{"a": "1"}')
+try_floats('{"a": 1e999}')
+"#;
+    let (out, _, rc) = run(src);
+    assert_eq!(rc, 0);
+    let want = [
+        "toDict: expected an int, found a float at line 1 column 7; to read mixed values, use \
+         the dict as strings and convert each with toInt()",
+        "toDict: expected an int, found a number too long for 64 bits at line 1 column 7; read \
+         the dict as strings to keep its digits",
+        "toDict: expected an int, found null at line 2 column 8; read the dict as strings and \
+         check for \"null\"",
+        "toDict: expected an int, found an array at line 1 column 7; to read mixed values, use \
+         the dict as strings and convert each with toInt()",
+        "toDict: trailing characters at line 1 column 10",
+        "toDict: the text must hold a JSON object, found a string at line 1 column 1; to read \
+         another value, put it under a key, such as {\"items\": [1, 2]}",
+        "toDict: expected ident at line 1 column 10",
+        "toDict: expected a float, found a string at line 1 column 7; to read mixed values, use \
+         the dict as strings and convert each with toFloat()",
+        "toDict: number out of range at line 1 column 11",
+    ];
+    assert_eq!(out, want.join("\n") + "\n");
+}
+
+/// Nesting past serde's limit is refused, in a dict of strings too, which reads
+/// past nested text rather than building it.
+#[test]
+fn to_dict_refuses_nesting_past_the_limit() {
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let src = format!(
+        "try {{\n    let d = toDict('{{\"a\": {deep}}}')\n    print(d[\"a\"])\n}} catch e {{\n    print(e.message)\n}}\n"
+    );
+    let (out, _, _) = run(&src);
+    assert_eq!(out, "toDict: recursion limit exceeded at line 1 column 133\n");
+}
+
+/// Keys and values take the trust of the text they came from, so a command's
+/// output read into a dict cannot reach `sh.run` by either.
+#[test]
+fn to_dict_keys_and_values_keep_the_texts_trust() {
+    let src = "use std::sh\nlet d = toDict(sh.exec(\"printf '{\\\"echo hi\\\": \\\"echo hi\\\"}'\"))\n\
+               for k in d.keys() {\n    for cmd in [k, d[k]] {\n        try {\n            sh.run(cmd)\n            print(\"ran\")\n        } catch e {\n            print(\"refused\")\n        }\n    }\n}\n\
+               let mine = toDict(\"{\\\"c\\\": \\\"echo trusted\\\"}\")\nprint(sh.exec(mine[\"c\"]))\n";
+    let (out, _, code) = run(src);
+    assert_eq!(out, "refused\nrefused\ntrusted\n");
+    assert_eq!(code, 0);
+}
+
+/// A string inside an array or a dict prints quoted and escaped as JSON, so
+/// `toString` of a dict is JSON; a string on its own prints bare.
+#[test]
+fn strings_inside_collections_print_as_json() {
+    let src = "print(\"a\\\"b\")\nprint([\"a\\\"b\", \"c\\\\d\", \"e\\nf\\t\\r\"])\n\
+               print({\"k\\\"\": \"v\"})\nlet m = [nil, \"x\"]\nprint(m)\n\
+               let ys = [\"y\"]\nprint(f\"{ys}\")\nprint(toString({\"caf\u{e9}\": [\"\u{e9}\"]}))\n\
+               print([\"a\", \"b\"].join(\",\"))\n";
     let (out, _, _) = run(src);
     assert_eq!(
         out,
-        "{\"a\": x, \"b\": [1, 2.5, nil]}\n{\"a\":\"x\",\"b\":[1,2.5,null]}\n2\n\
-         I/O error: json.parse: trailing characters at line 1 column 4\n"
+        "a\"b\n[\"a\\\"b\", \"c\\\\d\", \"e\\nf\\t\\r\"]\n{\"k\\\"\": \"v\"}\n[nil, \"x\"]\n[\"y\"]\n\
+         {\"caf\u{e9}\": [\"\u{e9}\"]}\na,b\n"
     );
 }
 

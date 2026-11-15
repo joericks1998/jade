@@ -11,8 +11,7 @@ use crate::typechecker::resolve::Names;
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
 use crate::{
-    array, bytes, core, dict, env, fs, future, http, json, math, path, random, sh, string, time,
-    uhttp,
+    array, bytes, core, dict, env, fs, future, http, math, path, random, sh, string, time, uhttp,
 };
 
 // ── Package ───────────────────────────────────────────────────────────────────
@@ -49,7 +48,6 @@ static PACKAGES: &[&Package] = &[
     &http::HTTP_PKG,
     &uhttp::UHTTP_PKG,
     &sh::SH_PKG,
-    &json::JSON_PKG,
     &env::ENV_PKG,
     &path::PATH_PKG,
     &random::RANDOM_PKG,
@@ -112,7 +110,7 @@ pub fn package_by_global_name(name: &str) -> Option<&'static Package> {
 }
 
 /// Returns true if `name` is the global binding name of any stdlib package
-/// (e.g. "fs", "http", "json"). Used to separate stdlib imports from
+/// (e.g. "fs", "http", "path"). Used to separate stdlib imports from
 /// user-defined exports when packaging module globals.
 pub fn is_package_global_name(name: &str) -> bool {
     PACKAGES.iter().any(|p| p.global_name == name)

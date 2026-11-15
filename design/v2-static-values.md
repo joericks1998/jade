@@ -153,6 +153,8 @@ print(c.Image)
 
 `json.stringify` takes any value whose type the compiler can write out: primitives, arrays, dicts, structs and `Json`.
 
+*Replaced in 2.0.7 (2026-11-14):* there is no `Json` type and no `std::json`. `toDict(text)` reads JSON text into a dict whose value type comes from how the program uses it, `str` when nothing settles it, and `toString(d)` writes a dict as JSON; neither works on a class. See part 2 of `v2-simplify.md`.
+
 ### 6. `raise` throws a struct
 
 *Problem.* `raise` accepts any value today, and the catch-all `catch e` binding has no single type: one fixture prints `e` as a string and reads `e.message` as a struct field in the same file.

@@ -1,0 +1,25 @@
+Paris
+2100000
+true
+{"lat": 48.85, "lon": 2.35}
+["art", "food"]
+2100001
+cannot convert "Paris" to an int
+no mayor on file
+true
+4
+8
+{"ana": 3, "bo": 5}
+toDict: expected an int, found a string at line 1 column 18; to read mixed values, use the dict as strings and convert each with toInt()
+toDict: expected an int, found null at line 1 column 9; read the dict as strings and check for "null"
+8081
+{"db": {"port": 5432, "workers": 1}, "web": {"port": 8080, "workers": 4}}
+toDict: trailing comma at line 1 column 9
+toDict: expected `:` at line 1 column 6
+toDict: the text must hold a JSON object, found an array at line 1 column 1; to read another value, put it under a key, such as {"items": [1, 2]}
+toDict: the text must hold a JSON object, found nothing at line 1 column 0
+second
+she said "hi"
+{"lines": "one\ntwo", "say": "she said \"hi\""}
+true
+{"n": "2100000"}

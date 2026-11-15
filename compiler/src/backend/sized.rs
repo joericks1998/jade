@@ -12,7 +12,7 @@ use inkwell::values::{BasicValueEnum, FloatValue, IntValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
 use super::fb::F;
-use crate::mir::{ArithOp, BitOp, JsonFn, SizedNum, Ty};
+use crate::mir::{ArithOp, BitOp, SizedNum, Ty};
 
 /// Purpose: This enum holds a number read for conversion: an int, the bits of a
 /// `ulong`, which may be past the int's range, or a float.
@@ -183,8 +183,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     ///
     /// Inputs:
     /// - `to`: the target: `int`, `float` or a sized type.
-    /// - `from`: the value's type: a number type, `bool`, `char`, `str` or
-    ///   `json`.
+    /// - `from`: the value's type: a number type, `bool`, `char` or `str`.
     /// - `v`: the value.
     ///
     /// Outputs: the converted value.
@@ -204,10 +203,6 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 Src::Float(self.callv(self.cx.tofloat_str_fn(), &[v]).into_float_value())
             }
             Ty::Str => Src::Signed(self.call_int(self.cx.toint_str_fn(), &[v])),
-            Ty::Json if to_float => {
-                Src::Float(self.callv(self.cx.json_fn(JsonFn::ToFloat), &[v]).into_float_value())
-            }
-            Ty::Json => Src::Signed(self.call_int(self.cx.json_fn(JsonFn::ToInt), &[v])),
             _ => Src::Signed(self.i64(0)),
         };
         match to {

@@ -172,8 +172,8 @@ pub enum Ty {
     Str,
     Bytes,
     Nil,
-    /// A value that may be absent: `T` joined with `nil`. Never wraps `Nil`,
-    /// another `Opt`, or `Json`, which has a null of its own.
+    /// A value that may be absent: `T` joined with `nil`. Never wraps `Nil`
+    /// or another `Opt`.
     Opt(Box<Ty>),
     Array(Box<Ty>),
     /// A dict: string keys, one value type.
@@ -193,8 +193,6 @@ pub enum Ty {
     Stream(Box<Ty>),
     Prompt,
     Grammar,
-    /// A parsed JSON value. The one built-in value that carries its own kind.
-    Json,
     /// The value a catch-all `catch e` binds.
     Error,
     /// A slot in the [`Store`].
@@ -228,8 +226,8 @@ impl Ty {
     /// Outputs: `T?`, or `t` itself when it is already nil or optional.
     pub fn opt(t: Ty) -> Ty {
         match t {
-            // JSON already has a null of its own.
-            Ty::Nil | Ty::Opt(_) | Ty::Json | Ty::Error => t,
+            // A caught error is already a value that may be absent.
+            Ty::Nil | Ty::Opt(_) | Ty::Error => t,
             other => Ty::Opt(Box::new(other)),
         }
     }
@@ -709,7 +707,6 @@ impl fmt::Display for Ty {
             Ty::Stream(t) => write!(f, "stream of {t}"),
             Ty::Prompt => write!(f, "prompt"),
             Ty::Grammar => write!(f, "grammar"),
-            Ty::Json => write!(f, "json"),
             Ty::Error => write!(f, "error"),
             Ty::Var(_) => write!(f, "an unknown type"),
         }

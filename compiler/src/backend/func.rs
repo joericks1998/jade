@@ -18,8 +18,8 @@ use inkwell::{FloatPredicate, IntPredicate};
 use super::layout::{self, ARR_DATA, LEN, TYPE_ID};
 use super::{Cx, F, tasks};
 use crate::mir::{
-    ArithOp, BinOp, BitOp, CmpOp, Const, EnvFn, Func, JsonFn, NumTy, Op, Operand, PathFn, Place,
-    Program, RandomFn, Rvalue, Stmt, StrMethod, Term, Ty, UnOp, is_heap,
+    ArithOp, BinOp, BitOp, CmpOp, Const, EnvFn, Func, NumTy, Op, Operand, PathFn, Place, Program,
+    RandomFn, Rvalue, Stmt, StrMethod, Term, Ty, UnOp, is_heap,
 };
 
 /// Purpose: This struct holds what every function's lowering needs from the
@@ -900,23 +900,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
                 cx.infer_op(f, *m, &vals)
             }
-            Op::Json(m @ (JsonFn::Stringify | JsonFn::StringifyPretty)) => {
-                let t = self.op_ty(&args[0]);
-                let pretty = f.bool(*m == JsonFn::StringifyPretty);
-                (f.callv(cx.json_stringify_fn(&t), &[arg(0), pretty.into()]), Ty::Str)
-            }
-            Op::Json(m) => {
-                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
-                let t = match m {
-                    JsonFn::Len | JsonFn::ToInt | JsonFn::AsInt => Ty::Int,
-                    JsonFn::ToFloat | JsonFn::AsFloat => Ty::Float,
-                    JsonFn::ToBool | JsonFn::AsBool => Ty::Bool,
-                    JsonFn::AsStr => Ty::Str,
-                    JsonFn::Items => Ty::Array(Box::new(Ty::Json)),
-                    _ => Ty::Json,
-                };
-                (f.callv(cx.json_fn(*m), &vals), t)
-            }
+            Op::ToDict(t) => (f.callv(cx.todict_fn(t), &[arg(0)]), t.clone()),
             Op::Http(m, unix) => {
                 let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
                 (f.callv(cx.http_fn(*m, *unix), &vals), m.result())

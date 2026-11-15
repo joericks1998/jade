@@ -50,7 +50,6 @@ mod fs;
 mod func;
 mod http;
 mod infer;
-mod json;
 mod layout;
 mod link;
 mod math;
@@ -62,6 +61,7 @@ mod sized;
 mod tasks;
 mod text;
 mod time;
+mod todict;
 mod unicode;
 
 #[cfg(test)]

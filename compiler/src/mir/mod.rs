@@ -413,9 +413,15 @@ pub enum Op {
     ToChar(Ty),
     /// `(v: from) -> to`: a converter where either side is a sized number
     /// type, such as `toByte(v)` or `toInt(b)` with `b` a byte. `from` may also
-    /// be a str, bool, char or json value. Raises when the value does not fit
-    /// `to`, or the text is not a number.
+    /// be a str, bool or char. Raises when the value does not fit `to`, or the
+    /// text is not a number.
     Convert { to: Ty, from: Ty },
+    /// `(text: str) -> {str: V}`, for `toDict(text)`: JSON text holding an
+    /// object, read into the dict type given, whose value type the checker
+    /// chose from the program's use. Raises on text that is not JSON, on a
+    /// top-level value that is not an object, and on a value that does not
+    /// fit `V`. Keys and values take the text's trust.
+    ToDict(Ty),
 
     // ── arrays (the element type is given) ───────────────────────────────
     /// `(a: [T]) -> int`.
@@ -548,9 +554,7 @@ pub enum Op {
     /// A `std::random` function; see [`RandomFn`].
     Random(RandomFn),
 
-    // ── json ─────────────────────────────────────────────────────────────
-    /// `std::json`, or an operation on a `Json` value; see [`JsonFn`].
-    Json(JsonFn),
+    // ── inference ────────────────────────────────────────────────────────
     /// What the inference prelude asks of the backend; see [`InferFn`].
     Infer(InferFn),
     /// `(b: bytes) -> [int]`: each octet, for a `for` loop over bytes.
@@ -608,39 +612,6 @@ impl HttpFn {
             _ => Ty::Struct("HttpResponse".into()),
         }
     }
-}
-
-/// Purpose: This enum lists `std::json` and what a `Json` value supports. A
-/// `Json` value carries its kind; one of the wrong kind raises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonFn {
-    /// `(s: str) -> json`: raises `I/O error: json.parse: …` on bad input.
-    Parse,
-    /// `(v: T) -> str`: compact JSON; the operand's type picks the writer.
-    Stringify,
-    /// `(v: T) -> str`: two-space indented JSON.
-    StringifyPretty,
-    /// `(j: json, key: str) -> json`: an object's member.
-    Get,
-    /// `(j: json, i: int) -> json`: an array's element.
-    At,
-    /// `(j: json) -> int`: an array's, object's or string's length.
-    Len,
-    /// `(j: json) -> [json]`: what a `for` loop walks: an array's elements,
-    /// an object's keys or a string's characters.
-    Items,
-    /// `(j: json) -> int`, `-> float`, `-> bool`: `toInt(j)` and friends,
-    /// which convert a string or a number.
-    ToInt,
-    ToFloat,
-    ToBool,
-    /// `(j: json) -> int`, `-> float`, `-> bool`, `-> str`: `int(j)` and
-    /// friends, which raise unless the value already has the type; `float(j)`
-    /// also takes an int.
-    AsInt,
-    AsFloat,
-    AsBool,
-    AsStr,
 }
 
 /// Purpose: This enum lists what the inference prelude, `src/infer/prelude.jde`,
@@ -930,7 +901,7 @@ impl Op {
                 | Op::BytesConcat
                 | Op::Sh(_)
                 | Op::Random(RandomFn::Int | RandomFn::Index)
-                | Op::Json(_)
+                | Op::ToDict(_)
                 | Op::Infer(InferFn::Map | InferFn::Setup | InferFn::Next)
                 | Op::Http(..)
                 | Op::UhttpStream(_)
@@ -1035,8 +1006,7 @@ pub fn is_heap(t: &Ty) -> bool {
         | Ty::Map(_)
         | Ty::Struct(_)
         | Ty::Error
-        | Ty::Future(_)
-        | Ty::Json => true,
+        | Ty::Future(_) => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

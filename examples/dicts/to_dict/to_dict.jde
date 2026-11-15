@@ -1,0 +1,90 @@
+// toDict(text) reads a JSON object into a dict, and toString(d) writes one.
+//
+// A dict holds one kind of value, and the program decides which: the value
+// type comes from how the program uses the dict, and it is str when nothing
+// says otherwise. A dict of strings takes any value, each as the text the
+// file wrote, so mixed values never fail; a value fails only when the program
+// converts it to something it does not fit.
+
+// ── A dict of strings ────────────────────────────────────────────────────────
+// Nothing below uses city's values as anything but text, so every value fits:
+// a number, true and null as the text the file wrote, a string unescaped, and
+// a nested object or array as its JSON text.
+let city = toDict(
+    '{"name": "Paris", "population": 2100000, "capital": true, "mayor": null, "location": {"lat": 48.85, "lon": 2.35}, "tags": ["art", "food"]}'
+)
+print(city["name"])
+print(city["population"])
+print(city["capital"])
+print(city["location"])
+print(city["tags"])
+
+// toInt converts at the call, and does not make the dict a dict of ints.
+print(toInt(city["population"]) + 1)
+try {
+    toInt(city["name"])
+} catch e {
+    print(e.message)
+}
+
+// null in a dict of strings is the text "null", which the program checks for.
+if city["mayor"] == "null" {
+    print("no mayor on file")
+}
+
+// A nested object read as text is a dict again through toDict.
+let location = toDict(city["location"])
+print(toFloat(location["lat"]) > 48.0)
+
+// ── A dict of ints, settled by use ───────────────────────────────────────────
+// `+ 1` makes the values ints. Adding two values alone would not: neither side
+// says what they are, so the dict would stay a dict of strings and join them.
+let scores = toDict('{"ana": 3, "bo": 5}')
+print(scores["ana"] + 1)
+print(scores["ana"] + scores["bo"])
+print(scores)
+
+// A dict of ints refuses a value that is not an int, and null.
+try {
+    let bad = toDict('{"ana": 3, "bo": "five"}')
+    print(bad["ana"] + 1)
+} catch e {
+    print(e.message)
+}
+try {
+    let empty = toDict('{"ana": null}')
+    print(empty["ana"] + 1)
+} catch e {
+    print(e.message)
+}
+
+// ── Nested objects read as dicts ─────────────────────────────────────────────
+// Indexing into a value makes it a dict, whose own values follow the same rule.
+let servers = toDict(
+    '{"web": {"port": 8080, "workers": 4}, "db": {"port": 5432, "workers": 1}}'
+)
+print(servers["web"]["port"] + 1)
+print(servers)
+
+// ── Malformed text ───────────────────────────────────────────────────────────
+for text in ['{"a": 1,}', '{"a" 1}', '[1, 2]', ''] {
+    try {
+        toDict(text)
+    } catch e {
+        print(e.message)
+    }
+}
+
+// A key written twice keeps its last value.
+let twice = toDict('{"k": "first", "k": "second"}')
+print(twice["k"])
+
+// ── Writing ──────────────────────────────────────────────────────────────────
+// toString writes a dict as JSON: a string inside it is quoted and escaped, and
+// a string on its own still prints bare.
+let quoted = toDict('{"say": "she said \\"hi\\"", "lines": "one\\ntwo"}')
+print(quoted["say"])
+print(quoted)
+let text = toString(quoted)
+print(toDict(text)["lines"] == quoted["lines"])
+print(toString({"n": "2100000"}))

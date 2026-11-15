@@ -19,7 +19,7 @@ Around that idea, Jade is an ordinary general-purpose language.
 
 *Everything else.* Multi-file `use` imports, f-string interpolation, and the pipe operator `|>`.
 
-The standard library covers math, strings, arrays, dicts, file I/O, time, HTTP, JSON, shell commands, environment variables, paths, and random numbers. You import each one with `::` notation, such as `use std::math`.
+The standard library covers math, strings, arrays, dicts, file I/O, time, HTTP, shell commands, environment variables, paths, and random numbers. You import each one with `::` notation, such as `use std::math`. JSON needs no import: `toDict(text)` reads it into a dict, and `toString(d)` writes one.
 
 One compiler runs the language. `jade build` compiles a native binary through LLVM, and `jade run` builds the file and runs that binary. A binary links the C library and nothing else.
 

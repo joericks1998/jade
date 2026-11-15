@@ -1,11 +1,14 @@
 //! Text for values, output, input, and conversions between kinds.
 //!
-//! `print`, `str()` and f-strings all show a value the same way, and they all
-//! come through `jade.tostr.<type>`, one function per type a program shows.
-//! The rules are v1's (`src/runtime/src/render.rs`): strings and chars as their
-//! text, even inside a container; floats as the shortest digits that read back
-//! to the same number, never in exponent form, with `.0` on a whole number;
-//! dicts with their keys sorted and quoted; a struct as `<struct>`.
+//! `print`, `toString()` and f-strings all show a value the same way, and they
+//! all come through `jade.tostr.<type>`, one function per type a program shows.
+//! The rules are v1's (`src/runtime/src/render.rs`) with one change from 2.0.7:
+//! a string on its own is its text, and a string inside an array or a dict is
+//! quoted and escaped as JSON writes it, as dict keys always were, so a dict
+//! prints as JSON (`design/v2-simplify.md`, part 2). Chars are their text, even
+//! inside a container; floats are the shortest digits that read back to the
+//! same number, never in exponent form, with `.0` on a whole number; dicts
+//! have their keys sorted; a struct is `<struct>`.
 //!
 //! Floats are the one subtle case. The C library finds the shortest digits:
 //! `snprintf("%.*e")` at increasing precision until `strtod` reads the same
@@ -136,7 +139,7 @@ impl<'ctx> Cx<'ctx> {
                     f.for_range(f.i64(0), len, |f, i, _| {
                         f.if_(f.sgt(i, f.i64(0)), |f| f.sb_push_lit(sb, ", "));
                         let x = f.load(et, f.elem(et, data, i));
-                        f.sb_push_value(sb, el, x);
+                        f.sb_push_elem(sb, el, x);
                     });
                     f.sb_push_lit(sb, "]");
                     f.sb_finish(sb)
@@ -151,12 +154,10 @@ impl<'ctx> Cx<'ctx> {
                     f.for_range(f.i64(0), len, |f, i, _| {
                         f.if_(f.sgt(i, f.i64(0)), |f| f.sb_push_lit(sb, ", "));
                         let k = f.load_ptr(f.elem(f.cx.ptrt(), kdata, i));
-                        let q = f.call_ptr(f.cx.str_debug_fn(), &[k.into()]);
-                        f.sb_push_str(sb, q);
-                        f.release(&Ty::Str, q.into());
+                        f.sb_push_quoted(sb, k);
                         f.sb_push_lit(sb, ": ");
                         let x = f.dict_get(vt, d, k);
-                        f.sb_push_value(sb, vt, x);
+                        f.sb_push_elem(sb, vt, x);
                     });
                     f.release(&Ty::Array(Box::new(Ty::Str)), keys.into());
                     f.sb_push_lit(sb, "}");
@@ -190,84 +191,67 @@ impl<'ctx> Cx<'ctx> {
                 }
                 Ty::Future(_) => f.cx.lit("<future>"),
                 Ty::Bytes => f.call_ptr(f.cx.bytes_render_fn(), &[v]),
-                Ty::Json => f.call_ptr(f.cx.json_tostr_fn(), &[v]),
                 _ => f.cx.lit("<value>"),
             };
             f.ret(s);
         })
     }
 
-    /// Purpose: This function returns `jade.str.debug(s) -> str`: a string
-    /// quoted and escaped the way Rust's `{:?}` writes it, for dict keys.
-    pub fn str_debug_fn(&self) -> FunctionValue<'ctx> {
-        let ptr = self.ptrt();
-        self.support("jade.str.debug", Some(ptr.into()), &[ptr.into()], |f| {
-            let s = f.param_ptr(0);
-            let sb = f.sb_new();
+    /// Purpose: This function returns `jade.str.quote(sb, s)`, which appends a
+    /// string to a string builder quoted and escaped as JSON writes it: `"`
+    /// and `\` escaped, the control characters as `\n`, `\t`, `\r`, `\b`, `\f`
+    /// or `\u00XX`, and everything else, UTF-8 included, as it is. The builder
+    /// takes the string's trust.
+    pub fn str_quote_fn(&self) -> FunctionValue<'ctx> {
+        let p = self.ptrt();
+        self.support("jade.str.quote", None, &[p.into(), p.into()], |f| {
+            let (sb, s) = (f.param_ptr(0), f.param_ptr(1));
             f.sb_taint(sb, f.str_trust(s));
             f.sb_push_lit(sb, "\"");
             let data = f.str_data(s);
-            let len = f.str_len(s);
-            let off = f.var(f.i64(0));
-            let step = f.alloca(f.cx.i64t());
-            f.while_(
-                |f| f.slt(f.load_i64(off), len),
-                |f, _| {
-                    let o = f.load_i64(off);
-                    let cp =
-                        f.call_int(f.cx.utf8_decode_fn(), &[f.at(data, o).into(), step.into()]);
-                    let done = f.block();
-                    let other = f.block();
-                    let escapes = [
-                        (34, "\\\""),
-                        (92, "\\\\"),
-                        (10, "\\n"),
-                        (13, "\\r"),
-                        (9, "\\t"),
-                        (0, "\\0"),
-                    ];
-                    let mut cases = Vec::new();
-                    let mut bodies = Vec::new();
-                    for (c, text) in escapes {
-                        let b = f.block();
-                        cases.push((f.i32(c), b));
-                        bodies.push((b, text));
-                    }
-                    f.switch(cp, other, &cases);
-                    for (b, text) in bodies {
-                        f.position(b);
-                        f.sb_push_lit(sb, text);
-                        f.br(done);
-                    }
-                    f.position(other);
-                    let control = f.or(
-                        f.icmp(inkwell::IntPredicate::ULT, cp, f.i32(0x20)),
-                        f.eq(cp, f.i32(0x7f)),
-                    );
-                    f.if_else(
-                        control,
-                        |f| {
-                            let buf = f.alloca(f.cx.i8t().array_type(16));
-                            let n = f.call_int(
-                                f.cx.libc("snprintf"),
-                                &[
-                                    buf.into(),
-                                    f.i64(16).into(),
-                                    f.cx.cstr("\\u{%x}").into(),
-                                    cp.into(),
-                                ],
-                            );
-                            f.sb_push(sb, buf, f.sext(n, f.cx.i64t()));
-                        },
-                        |f| f.sb_push(sb, f.at(data, o), f.load_i64(step)),
-                    );
+            let hex = f.alloca(f.cx.i8t().array_type(8));
+            f.for_range(f.i64(0), f.str_len(s), |f, k, _| {
+                let c = f.zext(f.load_i8(f.at(data, k)), f.cx.i32t());
+                let done = f.block();
+                let other = f.block();
+                let mut cases = Vec::new();
+                let mut bodies = Vec::new();
+                for (ch, text) in [
+                    (34, "\\\""),
+                    (92, "\\\\"),
+                    (10, "\\n"),
+                    (13, "\\r"),
+                    (9, "\\t"),
+                    (8, "\\b"),
+                    (12, "\\f"),
+                ] {
+                    let bb = f.block();
+                    cases.push((f.i32(ch), bb));
+                    bodies.push((bb, text));
+                }
+                f.switch(c, other, &cases);
+                for (bb, text) in bodies {
+                    f.position(bb);
+                    f.sb_push_lit(sb, text);
                     f.br(done);
-                    f.position(done);
-                    f.store(off, f.add(o, f.load_i64(step)));
-                },
-            );
+                }
+                f.position(other);
+                f.if_else(
+                    f.icmp(inkwell::IntPredicate::ULT, c, f.i32(0x20)),
+                    |f| {
+                        let n = f.call_int(
+                            f.cx.libc("snprintf"),
+                            &[hex.into(), f.i64(8).into(), f.cx.cstr("\\u%04x").into(), c.into()],
+                        );
+                        f.sb_push(sb, hex, f.sext(n, f.cx.i64t()));
+                    },
+                    |f| f.sb_push(sb, f.at(data, k), f.i64(1)),
+                );
+                f.br(done);
+                f.position(done);
+            });
             f.sb_push_lit(sb, "\"");
-            f.ret(f.sb_finish(sb));
+            f.ret_void();
         })
     }
 
@@ -603,6 +587,32 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         let s = self.call_ptr(self.cx.tostr_fn(t), &[v]);
         self.sb_push_str(sb, s);
         self.release(&Ty::Str, s.into());
+    }
+
+    /// Purpose: This function appends a string quoted and escaped as JSON
+    /// writes it, as a string inside an array or a dict prints.
+    pub fn sb_push_quoted(&self, sb: PointerValue<'ctx>, s: PointerValue<'ctx>) {
+        self.call(self.cx.str_quote_fn(), &[sb.into(), s.into()]);
+    }
+
+    /// Purpose: This function appends the text of an array element or a dict
+    /// value: a string quoted, as JSON writes it, so a dict prints as JSON, and
+    /// anything else as `print` shows it, which quotes the strings inside.
+    pub fn sb_push_elem(&self, sb: PointerValue<'ctx>, t: &Ty, v: BasicValueEnum<'ctx>) {
+        match t {
+            Ty::Str => self.sb_push_quoted(sb, v.into_pointer_value()),
+            Ty::Opt(inner) if **inner == Ty::Str => {
+                self.if_else(
+                    self.is_nil(t, v),
+                    |f| f.sb_push_lit(sb, "nil"),
+                    |f| {
+                        let s = f.unwrap(t, v);
+                        f.sb_push_quoted(sb, s.into_pointer_value());
+                    },
+                );
+            }
+            _ => self.sb_push_value(sb, t, v),
+        }
     }
 
     /// Purpose: This function finds a string's span without ASCII whitespace

@@ -144,6 +144,18 @@ mod resolve {
         resolve_ok("use std::math");
     }
 
+    /// std::json was removed in 2.0.7; its `use` names what replaced it.
+    #[test]
+    fn a_removed_std_package_names_its_replacement() {
+        for src in ["use std::json", "from std::json use parse"] {
+            let err = resolve_err(src);
+            assert!(matches!(err, JadeError::RemovedPackage { .. }), "for {src}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("std::json was removed in 2.0.7"), "{msg}");
+            assert!(msg.contains("toDict(text)") && msg.contains("toString(d)"), "{msg}");
+        }
+    }
+
     #[test]
     fn a_quoted_std_import_is_an_error() {
         let err = resolve_err(r#"use "std/math""#);
@@ -283,6 +295,17 @@ mod resolve {
         assert!(matches!(let_value(&p, 1).kind, ExprKind::Call { .. }));
     }
 
+    /// `toDict` reads the whole reply's text, so it stays an ordinary call
+    /// around an untyped dereference rather than asking the model for a type.
+    #[test]
+    fn to_dict_around_a_deref_is_a_call() {
+        let p = resolve_ok("prompt p = \"x\"\nlet d = toDict(?p)");
+        let ExprKind::Call { args, .. } = &let_value(&p, 1).kind else {
+            panic!("expected Call, got {:?}", let_value(&p, 1).kind)
+        };
+        assert!(matches!(args[0].kind, ExprKind::PromptDeref { output_type: None, .. }));
+    }
+
     /// A class is a name in scope, so by name alone it looks like something to
     /// call; around a dereference it is a type, not a class view.
     #[test]
@@ -315,6 +338,7 @@ mod resolve {
             ("prompt p = \"x\"\nlet n = ?p |> int", "toInt(?p)"),
             ("prompt p = \"x\"\nlet c = ?p |> toChar", "toChar(?p)"),
             ("prompt p = \"x\"\nlet n = ?p |> byte", "toByte(?p)"),
+            ("prompt p = \"x\"\nlet d = ?p |> toDict", "toDict(?p)"),
             ("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = ?p |> City", "City(?p)"),
             ("let g = Grammar.new('\"a\"')\nprompt p = \"x\"\nlet r = ?p |> g", "g(?p)"),
         ] {

@@ -118,7 +118,6 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.eq(ia, ib)
             }
             Ty::Array(_) | Ty::Map(_) | Ty::Opt(_) => self.call_int(self.cx.eq_fn(t), &[a, b]),
-            Ty::Json => self.call_int(self.cx.json_eq_fn(), &[a, b]),
             _ => self.bool(false),
         }
     }

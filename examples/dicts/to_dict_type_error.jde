@@ -1,0 +1,4 @@
+// toDict reads JSON text, so its argument is a str. A number is refused when
+// the program is checked, with a message that names what toDict takes.
+let d = toDict(5)
+print(d)

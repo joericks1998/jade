@@ -30,6 +30,7 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "toString",
     "toBool",
     "toChar",
+    "toDict",
     "byte",
     "short",
     "ushort",

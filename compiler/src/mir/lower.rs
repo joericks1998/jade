@@ -1071,10 +1071,8 @@ impl<'a, 'l> Fx<'a, 'l> {
             }
         }
         match (from, to) {
-            // JSON null and a missing error are null pointers too.
-            (Ty::Nil, Ty::Opt(_) | Ty::Json | Ty::Error) => {
-                Ok(Operand::Const(Const::Nil(to.clone())))
-            }
+            // A missing error is a null pointer too.
+            (Ty::Nil, Ty::Opt(_) | Ty::Error) => Ok(Operand::Const(Const::Nil(to.clone()))),
             (Ty::Opt(a), Ty::Opt(b)) => match (&**a, &**b) {
                 // A class value is the same object read as any of its classes.
                 (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
@@ -1575,13 +1573,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     .assign_temp(Ty::Array(Box::new(Ty::Int)), Rvalue::Op(Op::BytesInts, vec![it]));
                 (a, Ty::Int)
             }
-            Ty::Json => {
-                let a = self.assign_temp(
-                    Ty::Array(Box::new(Ty::Json)),
-                    Rvalue::Op(Op::Json(JsonFn::Items), vec![it]),
-                );
-                (a, Ty::Json)
-            }
             Ty::Stream(_) => return Err(not_yet("streams", span)),
             other => return Err(not_yet(format!("a for loop over {other}"), span)),
         };
@@ -1770,11 +1761,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Bytes => {
                         let (i, _) = self.expr(index)?;
                         self.assign_temp(Ty::Int, Rvalue::Op(Op::BytesGet, vec![o, i]))
-                    }
-                    Ty::Json => {
-                        let (i, itt) = self.expr(index)?;
-                        let m = if itt == Ty::Int { JsonFn::At } else { JsonFn::Get };
-                        self.assign_temp(Ty::Json, Rvalue::Op(Op::Json(m), vec![o, i]))
                     }
                     Ty::Stream(_) => return Err(not_yet("streams", span)),
                     other => return Err(internal(format!("an index into {other}"), span)),
@@ -2011,8 +1997,8 @@ impl<'a, 'l> Fx<'a, 'l> {
             let (v, t) = self.expr(other)?;
             let is = match t {
                 Ty::Nil => Operand::Const(Const::Bool(true)),
-                // An error, and a JSON null, is a null pointer.
-                Ty::Opt(_) | Ty::Error | Ty::Json => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
+                // A missing error is a null pointer.
+                Ty::Opt(_) | Ty::Error => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
                 _ => Operand::Const(Const::Bool(false)),
             };
             return Ok(if matches!(op, BinOpKind::Ne) {

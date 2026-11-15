@@ -553,7 +553,6 @@ impl<'a> Checker<'a> {
             Ty::Map(_) => Ty::Str,
             Ty::Str => Ty::Char,
             Ty::Bytes => Ty::Int,
-            Ty::Json => Ty::Json,
             Ty::Var(_) => self.slot(f, node + 2),
             other => {
                 let other = self.store.resolve(&other);
@@ -1658,7 +1657,7 @@ impl<'a> Checker<'a> {
                 if nil_side {
                     let other = if is_nil_literal(left) { &sr } else { &sl };
                     match other {
-                        Ty::Opt(_) | Ty::Nil | Ty::Var(_) | Ty::Json | Ty::Error => {}
+                        Ty::Opt(_) | Ty::Nil | Ty::Var(_) | Ty::Error => {}
                         t => {
                             let t = self.store.resolve(t);
                             self.report(
@@ -1977,19 +1976,6 @@ impl<'a> Checker<'a> {
                 self.unify(&it, &Ty::Str, span, "a dict key");
                 *v
             }
-            Ty::Json => {
-                match self.store.shallow(&it) {
-                    Ty::Str | Ty::Int | Ty::Var(_) => {}
-                    other => {
-                        let other = self.store.resolve(&other);
-                        self.report(
-                            span,
-                            format!("a json value is indexed by str or int, got {other}"),
-                        );
-                    }
-                }
-                Ty::Json
-            }
             Ty::Struct(_) | Ty::Error => match &index.kind {
                 // `r["status"]` on a struct reads the field, so a std result that
                 // used to be a dict reads the same either way.
@@ -2002,6 +1988,13 @@ impl<'a> Checker<'a> {
                     );
                     self.slot(f, node)
                 }
+            },
+            // A value `toDict` reads is a dict when indexed by a str and an
+            // array when indexed by an int.
+            Ty::Var(_) if self.is_todict_slot(&ot) => match self.store.shallow(&it) {
+                Ty::Str => self.settle_todict(&ot, true, span, f, node),
+                Ty::Int => self.settle_todict(&ot, false, span, f, node),
+                _ => self.slot(f, node),
             },
             Ty::Var(_) => self.slot(f, node),
             other => {
@@ -2195,6 +2188,18 @@ impl<'a> Checker<'a> {
                 };
                 self.record_target(f, node, t);
                 result
+            }
+            // A value `toDict` reads takes the shape a dict or array method
+            // asks for, and the call is checked again on it.
+            Ty::Var(_)
+                if self.is_todict_slot(recv)
+                    && let Some(as_dict) = super::builtins::todict_method_shape(name) =>
+            {
+                self.settle_todict(recv, as_dict, span, f, node + 3);
+                if matches!(self.store.shallow(recv), Ty::Var(_)) {
+                    return self.slot(f, node);
+                }
+                self.method_call(recv, name, tys, args, span, f, node)
             }
             Ty::Var(_) => self.slot(f, node),
             Ty::Opt(inner) => {

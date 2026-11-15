@@ -7,12 +7,12 @@ JADE
 JADE
 a+b
 a+b
-[a, b]
-[a, b]
+["a", "b"]
+["a", "b"]
 true
 true
-[ada, alan]
-[ada, alan]
+["ada", "alan"]
+["ada", "alan"]
 [36, 41]
 [36, 41]
 36
