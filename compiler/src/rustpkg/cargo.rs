@@ -200,7 +200,12 @@ pub fn build(p: &Places) -> Result<Built, String> {
     }
     let out = Command::new(&cargo)
         .current_dir(&p.crate_dir)
-        .args(["rustc", "--release", "--lib", "--message-format=json-render-diagnostics"])
+        // Colors off, whatever `CARGO_TERM_COLOR` says: rustc's note and its
+        // errors are read as text, and a colored note starts with an escape
+        // code, not `note:`. CI's Rust setup turns colors on, which is how a
+        // Linux build lost Rust's system libraries.
+        .args(["rustc", "--release", "--lib", "--color=never"])
+        .arg("--message-format=json-render-diagnostics")
         .arg("--manifest-path")
         .arg(&manifest)
         .arg("--target-dir")
@@ -224,8 +229,8 @@ pub fn build(p: &Places) -> Result<Built, String> {
     })?;
     // rustc's note is a diagnostic, rendered to stderr; a rustc that prints it
     // as `--print` output instead puts it on stdout, so both are read. When it
-    // is in neither, as on Linux CI, `backend::link` supplies what Rust's
-    // standard library needs on glibc.
+    // is in neither, `backend::link` supplies what Rust's standard library
+    // needs on glibc.
     let mut native_libs = native_libs_from(&stderr);
     if native_libs.is_empty() {
         native_libs = native_libs_from(&stdout);
@@ -298,12 +303,38 @@ pub fn native_libs_from(stderr: &str) -> Vec<String> {
         .lines()
         .rev()
         .find_map(|l| {
+            let l = without_colors(l);
             let l = l.trim();
             l.strip_prefix("note: native-static-libs:")
                 .or_else(|| l.strip_prefix("native-static-libs:"))
+                .map(str::to_string)
         })
         .map(|rest| rest.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default()
+}
+
+/// Purpose: This function takes a terminal's color codes out of a line, the
+/// `ESC [ … m` sequences cargo adds when colors are on.
+///
+/// Inputs:
+/// - `line`: the line.
+///
+/// Outputs: the line without them.
+fn without_colors(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Purpose: This function asks cargo which crate each dependency of the generated

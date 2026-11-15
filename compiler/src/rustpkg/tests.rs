@@ -73,6 +73,11 @@ fn cargo_output_gives_the_staticlib_and_its_system_libraries() {
     );
     let stderr = "   Compiling geo v0.1.0\nnote: native-static-libs: -lSystem -lc -lm\n";
     assert_eq!(cargo::native_libs_from(stderr), ["-lSystem", "-lc", "-lm"]);
+    // With `CARGO_TERM_COLOR=always`, as CI's Rust setup sets, the note starts
+    // with color codes; it is still read, so Linux links Rust's unwinder.
+    let colored =
+        "\u{1b}[1m\u{1b}[92mnote\u{1b}[0m\u{1b}[1m: native-static-libs: -lgcc_s -lz -lc\u{1b}[0m\n";
+    assert_eq!(cargo::native_libs_from(colored), ["-lgcc_s", "-lz", "-lc"]);
     assert_eq!(cargo::diagnostics(stderr), "");
     let failed = "   Compiling geo v0.1.0\nerror[E0277]: `HashMap<i64, i64>` cannot cross\n";
     assert!(cargo::diagnostics(failed).starts_with("error[E0277]"));
