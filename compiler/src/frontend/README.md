@@ -26,7 +26,7 @@ A third choice is worth knowing before you add syntax: *prefer desugaring*. If t
 
 The parser used to rewrite `x |> f` straight into a call. Doing that meant deciding that `f` was a function, which is a question about what a name refers to, and the parser cannot answer it. So a second rule grew for `?p |> int`, where the stage is a type rather than a function. Then a `Parser::in_print_call` flag grew on top of that, to ban the one combination the two rules could not express together. The result was one operator with two parse paths, and a grammar whose legality depended on the name of the enclosing call.
 
-In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_infer::infer_pipe` lowers it. That deleted both extra paths and the flag. In 2.0.3 a pipe stopped being a call at all: it calls its stages once per piece of its source as each piece arrives, and a typed dereference is a call around the reply, `toInt(?p)`. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
+In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `typechecker::type_infer::infer_pipe` lowers it. That deleted both extra paths and the flag. In 2.0.4 a pipe stopped being a call at all: it calls its stages once per piece of its source as each piece arrives, and a typed dereference is a call around the reply, `toInt(?p)`. The rule to take from it: if a rewrite needs to know what a name *means*, it is not a desugaring.
 
 ## What each file does
 

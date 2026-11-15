@@ -12,8 +12,8 @@ Jade 2.0 changes the compiler's architecture end to end, and several of its choi
 
 - *`v2-static-values.md`* is the design for compiling every value to a plain machine value with a type known at compile time, with no runtime library: how types are inferred per call, how `nil`, dicts, mixed values, JSON and exceptions are typed, how the compiler's pipeline changes, which examples change, and in what order the work lands.
 - *`v2-classes.md`* is the design for 2.0.1's simpler language: classes in place of structs and `extend`, with methods attached by `fn A::m()`, private members, constructors, types as decorators, and no closures.
-- *`v2-number-types.md`* is the design for 2.0.3's sized number types, `byte` to `ulong` and `float32`: their names and widths, a type function and a converter for each, and arithmetic rules that follow assembly, with no implicit widening.
-- *`v2-pipes.md`* is the design for 2.0.3's pipes: `x |> f` calls `f` once per piece of `x` as it arrives, while `f(x)` waits for all of it; what a piece is for a generator, a held stream, a prompt and any other value; and how a typed dereference moves to `toInt(?p)`.
+- *`v2-number-types.md`* is the design for 2.0.4's sized number types, `byte` to `ulong` and `float32`: their names and widths, a type function and a converter for each, and arithmetic rules that follow assembly, with no implicit widening.
+- *`v2-pipes.md`* is the design for 2.0.4's pipes: `x |> f` calls `f` once per piece of `x` as it arrives, while `f(x)` waits for all of it; what a piece is for a generator, a held stream, a prompt and any other value; and how a typed dereference moves to `toInt(?p)`.
 
 ## Who uses it
 

@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-These are the fixtures for `|>`. Since 2.0.3 a pipe listens to a value as it arrives: `x |> f` calls `f` once per piece of `x`, while a call, `f(x)`, waits for all of `x`. A call to a generator gives each value as it is yielded, a stream already held gives its values in order, a prompt's reply gives its text a piece at a time, and anything else is one piece. `design/v2-pipes.md` has the rules and why.
+These are the fixtures for `|>`. Since 2.0.4 a pipe listens to a value as it arrives: `x |> f` calls `f` once per piece of `x`, while a call, `f(x)`, waits for all of `x`. A call to a generator gives each value as it is yielded, a stream already held gives its values in order, a prompt's reply gives its text a piece at a time, and anything else is one piece. `design/v2-pipes.md` has the rules and why.
 
 ## Why it exists
 

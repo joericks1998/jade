@@ -4,13 +4,7 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
-## v2.0.3
-
-*The compiler calls dovata's library, and a program opens the model's memory by name.* The JSON messages between them are gone. Use jade 2.0.3 with dovata 3.2.2 or later, its release beside this one; jade 2.0.3 tells you to restart an older dovata that is still running.
-
-- *Building calls dovata directly.* The compiler links dovata's library, finds the running process, and reads which models it holds, where each one's memory is, and the model's plan as Rust values. It used to ask dovata's socket for the plan as several MiB of JSON and walk it by string keys.
-- *A program opens its model's memory by itself.* The name of each region, a model file's path or a shared memory object's name, is a constant of the program, so a prompt's first run opens and maps each region with no message to dovata. The program no longer connects to a socket, receives file descriptors, or parses a JSON reply with `std::json`. A program built against a model keeps running after dovata restarts, once the same model is added again with the same options.
-- *What goes wrong says how to fix it.* A program whose model was removed, added with other options, or changed on disk after dovata loaded it stops with a message naming the model and the fix, rather than mapping memory its offsets do not fit. It also refuses shared memory that is not its user's alone, since another user could make an object under a name dovata does not hold.
+## v2.0.4
 
 *A type function checks a value's type; a converter changes it.* Now that Jade only compiles, a type name says what a value is.
 
@@ -36,6 +30,14 @@ sidebar_label: Changelog
 - *Overflow raises at each width,* a signed type on signed overflow and an unsigned one on carry or borrow. Unsigned types divide, compare and shift right as unsigned. Converting raises when the value does not fit: `toByte(300)` raises `300 does not fit a byte, which holds 0 to 255`.
 - *Each value is held at its own width* and printed as itself: a `ulong` past the int's range prints all its digits, and a `float32` prints the fewest digits that read back as the same float32, so `1.1` prints as `1.1`.
 - *Converter messages name the converter,* since the type functions no longer convert: `toChar(): 1114112 is not a Unicode scalar`, and `cannot convert "abc" to an int`.
+
+## v2.0.3
+
+*The compiler calls dovata's library, and a program opens the model's memory by name.* The JSON messages between them are gone. Use jade 2.0.3 with dovata 3.2.2 or later, its release beside this one; jade 2.0.3 tells you to restart an older dovata that is still running.
+
+- *Building calls dovata directly.* The compiler links dovata's library, finds the running process, and reads which models it holds, where each one's memory is, and the model's plan as Rust values. It used to ask dovata's socket for the plan as several MiB of JSON and walk it by string keys.
+- *A program opens its model's memory by itself.* The name of each region, a model file's path or a shared memory object's name, is a constant of the program, so a prompt's first run opens and maps each region with no message to dovata. The program no longer connects to a socket, receives file descriptors, or parses a JSON reply with `std::json`. A program built against a model keeps running after dovata restarts, once the same model is added again with the same options.
+- *What goes wrong says how to fix it.* A program whose model was removed, added with other options, or changed on disk after dovata loaded it stops with a message naming the model and the fix, rather than mapping memory its offsets do not fit. It also refuses shared memory that is not its user's alone, since another user could make an object under a name dovata does not hold.
 
 ## dovata v3.2.2
 

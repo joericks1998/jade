@@ -177,7 +177,7 @@ print(answer)
 ```
 
 :::note
-The compiled backend does not run grammars yet, so a program that uses one stops at build time with an error naming it. Before 2.0.3 a grammar was a pipe stage, `?p |> g`, and streamed its reply while hiding the text between the grammar's anchors. A pipe now always runs once per piece, so a grammar wraps the whole reply instead.
+The compiled backend does not run grammars yet, so a program that uses one stops at build time with an error naming it. Before 2.0.4 a grammar was a pipe stage, `?p |> g`, and streamed its reply while hiding the text between the grammar's anchors. A pipe now always runs once per piece, so a grammar wraps the whole reply instead.
 :::
 
 ## Dereferencing a Prompt in a Field

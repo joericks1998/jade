@@ -1,6 +1,6 @@
 # Pipes call once per piece
 
-Status: decided and being built, 2026-11-14, for jade 2.0.3. Joe made the decisions
+Status: decided and being built, 2026-11-14, for jade 2.0.4. Joe made the decisions
 marked as his; the others are defaults chosen while building, listed at the end so
 they can be overruled.
 

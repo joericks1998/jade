@@ -1,13 +1,13 @@
 # Sized number types
 
-Status: decided and built, 2026-11-13, for jade 2.0.3. Joe made every decision here; this file
+Status: decided and built, 2026-11-13, for jade 2.0.4. Joe made every decision here; this file
 records them before the code, so the code has one place to answer to.
 
 ## The problem
 
 Jade has one integer type, `int`, a signed 64-bit integer, and one float, `float`,
 64 bits. A compiled language talks to C libraries, GPU kernels and file formats that
-use other widths, and since 2.0.3 a type name is a promise the compiler keeps:
+use other widths, and since 2.0.4 a type name is a promise the compiler keeps:
 `int(x)` checks that `x` is an int and never converts it. So the widths a program
 needs should be types the checker knows, not conversions a program hopes for.
 
@@ -32,7 +32,7 @@ and `float`, not new ones. C's name for 32 bits, `int`, is taken, so 32 bits is
 
 ## Each type has a type function and a converter
 
-As with the built-in types since 2.0.3, the type function checks and the converter
+As with the built-in types since 2.0.4, the type function checks and the converter
 converts.
 
 | Type | Type function | Converter |
@@ -102,7 +102,7 @@ number. Each raises when the result does not fit its type, or the text is not a 
   through a converter first.
 - *Native packages* keep declaring C scalars as `int` and `float` in `jade.toml`;
   mapping `scalar:uint32_t` and friends to the sized types is a later change.
-- *Typed dereferences* stay the five converters of 2.0.3, written `toInt(?p)` since pipes run once per piece; see `v2-pipes.md`.
+- *Typed dereferences* stay the five converters of 2.0.4, written `toInt(?p)` since pipes run once per piece; see `v2-pipes.md`.
 
 ## What changes in the compiler
 

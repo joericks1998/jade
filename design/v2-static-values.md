@@ -140,7 +140,7 @@ To act on the actual kind, a program can call a method each child defines, or us
 *Recommendation.* Two ways to read JSON:
 
 - `json.parse(s)` returns a `Json` value: null, bool, number, string, array of `Json`, or object of `Json`. Indexing one gives another `Json`, and `str(j)`, `int(j)`, `float(j)`, `bool(j)` convert it, raising if it is the wrong kind. Printing one prints it. Like decision 4's parent structs, a `Json` value carries a tag, and it is the language's one built-in value that does.
-- `json.parse(s) |> T` decodes straight into a struct or primitive, reusing the machinery `?p |> City` already has for model replies. *Changed in 2.0.3:* a pipe calls its stage once per piece, so a decode is a call around the value, as `City(?p)` is; see `v2-pipes.md`.
+- `json.parse(s) |> T` decodes straight into a struct or primitive, reusing the machinery `?p |> City` already has for model replies. *Changed in 2.0.4:* a pipe calls its stage once per piece, so a decode is a call around the value, as `City(?p)` is; see `v2-pipes.md`.
 
 ```
 let event = json.parse(line)
@@ -222,7 +222,7 @@ This breaks the Jade-level FFI entry point `jade-graphics` uses today, and needs
 
 Prompts keep their current types: `?p` is a `str`, `?p |> T` decodes into a primitive or a struct, and streaming gives a stream of strings. Inference itself is the next milestone; this one only gives the prompt types static layouts. The struct coercion behind `?p |> City` becomes generated per struct type, and decision 5's typed JSON decoding shares it.
 
-*Changed in 2.0.3:* a typed dereference is a call around it, `toInt(?p)` and `City(?p)`, and `?p |> f` calls `f` once per piece of the reply as the model writes it; see `v2-pipes.md`.
+*Changed in 2.0.4:* a typed dereference is a call around it, `toInt(?p)` and `City(?p)`, and `?p |> f` calls `f` once per piece of the reply as the model writes it; see `v2-pipes.md`.
 
 *Inference on Metal is done* (2026-11-09), unoptimized on purpose; `src/infer/README.md` describes it. A prompt lowers as its text, and `?p` and `?p |> int`, `float`, `bool`, `char` and `str` become calls into a Jade prelude that tokenizes and decodes; `?p |> City` and grammars are not compiled yet. Replies run to `max_tokens()`, 256 unless `set_max_tokens(n)` says otherwise.
 
