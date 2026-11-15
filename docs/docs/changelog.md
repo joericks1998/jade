@@ -4,6 +4,31 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.9
+
+*The std library is compiled once per machine, not once per build.* A build compiles each std library function a program uses, at each set of argument types, in a module of its own, keeps the object file under `~/.jade/lib/<version>/<target>/`, and links it with LLD; any later build of any program that needs the same function at the same types links that file instead of compiling it again. Part 4 of `design/v2-simplify.md` has the plan. Programs print what they printed, and run as fast.
+
+- *Builds are faster, most on a warm cache.* In a debug build of the compiler, median of 7 runs, all measured on one machine in one session:
+
+  | example | 2.0.7 | 2.0.8 | 2.0.9, cold cache | 2.0.9, warm cache |
+  |---|---|---|---|---|
+  | `path/components` | 120 ms | 225 ms | 140 ms | 102 ms |
+  | `time/calendar` | 54 ms | 76 ms | 75 ms | 61 ms |
+  | `numbers/math_functions` | 64 ms | 71 ms | 73 ms | 73 ms |
+  | `fs/basic` | 63 ms | 89 ms | 64 ms | 41 ms |
+  | `trust/sh_sinks` | 70 ms | 82 ms | 89 ms | 61 ms |
+  | `random/seeded` | 92 ms | 124 ms | 118 ms | 98 ms |
+
+  With a release build of the compiler the warm builds take 92, 53, 65, 34, 55 and 91 ms, against 2.0.8's 218, 70, 64, 86, 78 and 119. `numbers/math_functions` gains nothing, since every `math` function it calls is small enough to be copied into the program, below. `time/calendar` spends most of its time in `time.utc` and `time.parts`, which return a class and so compile with the program.
+- *A first build costs about what a 2.0.8 build did,* from 9% more for `trust/sh_sinks` to 38% less for `path/components`. A cold cache compiles one module per function, which on one thread made `path/components` take 258 ms, so the modules are compiled on up to 8 threads, each with its own LLVM context.
+- *Where the cache is, and how to clear it.* Each object is `~/.jade/lib/<version>/<target>/<key>.o`, a few kilobytes; every example in the repository together leaves 68 of them, 336 KB. Remove the directory with `rm -rf ~/.jade/lib` to clear it. Nothing removes the directories older versions of Jade left there, and `jade cache clean`, which cleans the AST cache, does not touch it.
+- *The key covers the code, not only the version.* An object's name is the SHA-256 of the compiler's version, the target, its CPU, features and code-generation options, the optimization pipeline, and the function's LLVM IR before optimization. A compiler built from source whose library or backend changed never links an object built from older code, even at the same version number.
+- *What is cached.* A library function at argument types that are all built in, such as `path.join(str, str)` or `fs.read(str)`, which calls only functions like it. One that holds a class, such as `time.parts`, `sh.output`, `http.get`, or `random.choice` over an array of your own class, compiles with the program as before, since a class's type id is its place among the program's classes. `raise "text"` inside the library does not stop a function from being cached.
+- *Small functions are still inlined.* A library function of a few numeric operations, such as `math.sqrt`, `math.abs`, `math.min` or `math.clamp`, gets no file of its own: each program and each cached file that calls it compiles a private copy, so `math.sqrt(x)` is still one `fsqrt` instruction. A loop of 20 million `math` calls runs in 35 ms with 2.0.8 and with 2.0.9; with every function in a file of its own it took 229 ms.
+- *The cache never fails a build.* When `~/.jade/lib` cannot be made or written, the object files go beside the output and are deleted after linking. When linking with a cached file fails, the build links once more without the cache, and a warning names the directory to remove, since only a damaged file can cause that.
+- *Two builds at once are safe.* An object is written under a name of its own in the cache's directory and renamed into place, so no build ever reads part of one.
+- *`--emit ir` and `--emit mir` are unchanged.* They show the whole program in one module and never use the cache, and for every example they print what 2.0.8 printed. A program that uses no std package builds to the same binary, byte for byte.
+
 ## v2.0.8
 
 *Every std package but the value types' own is written in Jade.* `std::path`, `std::time`, `std::math`, `std::env`, `std::fs`, `std::sh`, `std::random`, `std::http` and `std::uhttp` are each a `.jde` module the compiler carries and compiles with a program that uses it, and what Jade cannot do on its own, such as reading a clock, opening a file or starting a process, it asks of a small set of hooks. Every example prints what it printed before, and every number and every message a program can catch is the same. Part 3 of `design/v2-simplify.md` has the plan. `std::string`, `std::array`, `std::dict` and `std::bytes` stay generated, since they are the values' own methods.

@@ -16,6 +16,7 @@
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
 use super::layout::{ARR_DATA, DICT_INDEX, DICT_KEYS, DICT_VALS, DROPPED, LEN, TYPE_ID};
+use super::shared::SharedFn;
 use super::{Cx, F};
 use crate::mir::{Ty, is_heap};
 
@@ -65,12 +66,7 @@ impl<'ctx> Cx<'ctx> {
     /// Outputs: `jade.release.<type>(p)`.
     pub fn release_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
         let t = base(t).clone();
-        let name = match &t {
-            Ty::Struct(_) | Ty::Error => "jade.release.struct".to_string(),
-            Ty::Future(_) => "jade.release.future".to_string(),
-            other => format!("jade.release.{}", key(other)),
-        };
-        self.support(&name, None, &[self.ptrt().into()], |f| {
+        let body = |f: &F<'_, 'ctx>| {
             let p = f.param_ptr(0);
             f.if_(f.is_null(p), |f| f.ret_void());
             let rc = f.load_i64_atomic(p);
@@ -78,7 +74,17 @@ impl<'ctx> Cx<'ctx> {
             let old = f.atomic_add(p, -1);
             f.if_(f.eq(old, f.i64(1)), |f| f.destroy(&t, p));
             f.ret_void();
-        })
+        };
+        let name = match &t {
+            // Freeing a class value reads the program's classes, so a library
+            // object calls the program's copy; see `shared.rs`.
+            Ty::Struct(_) | Ty::Error => {
+                return self.shared_fn(SharedFn::ReleaseStruct, None, &[self.ptrt().into()], body);
+            }
+            Ty::Future(_) => "jade.release.future".to_string(),
+            other => format!("jade.release.{}", key(other)),
+        };
+        self.support(&name, None, &[self.ptrt().into()], body)
     }
 
     /// Purpose: This function returns the function that frees one struct type's

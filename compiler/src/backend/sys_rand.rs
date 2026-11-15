@@ -11,20 +11,14 @@
 
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
 
+use super::shared::{Slot, State};
 use super::{Cx, F};
 
 impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns the generator's state: four words, a
     /// seeded flag and a lock word.
     fn rng_state(&self) -> PointerValue<'ctx> {
-        if let Some(g) = self.module.get_global("jade.rng") {
-            return g.as_pointer_value();
-        }
-        let t = self.i64t().array_type(6);
-        let g = self.module.add_global(t, None, "jade.rng");
-        g.set_initializer(&t.const_zero());
-        g.set_linkage(inkwell::module::Linkage::Internal);
-        g.as_pointer_value()
+        self.state("jade.rng", State::global(Slot::Words(6))).as_pointer_value()
     }
 
     /// Purpose: This function returns `jade.rng.reseed(seed)`, which must be

@@ -242,6 +242,7 @@ pub(crate) fn try_compile_file(
         std::env::current_dir().map(|d| d.join(out)).unwrap_or_else(|_| out.to_path_buf())
     };
 
-    crate::build::build(&program, &abs_source, &abs_out, emit)
+    let lib_cache = crate::backend::default_lib_cache();
+    crate::build::build(&program, &abs_source, &abs_out, emit, Some(&lib_cache))
         .map_err(|e| format!("{path}: build error: {e}"))
 }

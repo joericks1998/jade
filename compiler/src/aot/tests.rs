@@ -25,13 +25,13 @@ fn a_task_that_races_does_not_build() {
     let err = would_build(&resolved(src), None).unwrap_err();
     assert!(err.contains("counter"), "{err}");
     let out = std::env::temp_dir().join(format!("jade_aot_race_{}", std::process::id()));
-    assert!(compile(resolved(src), None, &out, Emit::Mir).is_err());
+    assert!(compile(resolved(src), None, &out, Emit::Mir, None).is_err());
 }
 
 #[test]
 fn mir_is_text_and_writes_nothing() {
     let out = std::env::temp_dir().join(format!("jade_aot_mir_{}", std::process::id()));
-    let r = compile(resolved("print(1)\n"), None, &out, Emit::Mir).unwrap();
+    let r = compile(resolved("print(1)\n"), None, &out, Emit::Mir, None).unwrap();
     assert!(r.ir.unwrap().contains("fn f0 main"));
     assert!(!out.exists());
 }

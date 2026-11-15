@@ -12,8 +12,8 @@ It stays a separate module so the CLI never reaches into `aot/` internals, and t
 
 ## What each file does
 
-- *`mod.rs`* re-exports `aot::Emit`, whose variants are `Binary`, `Ir` and `Mir`, and holds `build`, which compiles and writes IR or MIR to standard output.
-- *`tests.rs`* holds tests for building a binary, printing IR, and a missing source file.
+- *`mod.rs`* re-exports `aot::Emit`, whose variants are `Binary`, `Ir` and `Mir`, and holds `build`, which compiles and writes IR or MIR to standard output. It passes `lib_cache`, the root of the std library's compiled-instance cache, through to `aot::compile`; `cli/build.rs` passes `backend::default_lib_cache()`, `~/.jade/lib`.
+- *`tests.rs`* holds tests for building a binary, with a cache root inside the test's own directory, printing IR, and a missing source file.
 
 ## Who uses it
 
