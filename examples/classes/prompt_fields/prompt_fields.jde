@@ -39,7 +39,7 @@ print(held)       // [<prompt>, <prompt>]
 // operation — `~>` is the terser spelling, the way C's `p->x` beats `(*p).x`:
 //   let response = a.(?system)
 //   let response = a~>system
-//   let n        = a.(?system) |> int          // constraints work as usual
+//   let n        = toInt(a.(?system))          // constraints work as usual
 //   let r        = build(cfg).agent.(?system)
 //
 // Or extract first, then deref the bare prompt:

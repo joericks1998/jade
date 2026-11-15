@@ -320,6 +320,13 @@ impl<'a> Pass<'a> {
             TExprKind::Await { expr } => self.expr(expr, inside),
             TExprKind::Is { value, .. } => self.expr(value, inside),
             TExprKind::PromptLiteral { body } => self.expr(body, inside),
+            TExprKind::Pipe { source, hoisted, body, .. } => {
+                self.expr(source, inside)?;
+                for (_, v) in hoisted {
+                    self.expr(v, inside)?;
+                }
+                self.expr(body, inside)
+            }
             _ => Ok(()),
         }
     }

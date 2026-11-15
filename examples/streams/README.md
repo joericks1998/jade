@@ -19,6 +19,10 @@ The earlier design had `?p` produce a one-shot token stream that raised `DoubleS
 - *`yield_basic/`* covers the whole surface in one file: a generator, `len`, indexing, iterating twice, printing, an early bare `return`, mixed yield types widening, and a generator calling another generator.
 - *`yield_toplevel_error.jde`* puts `yield` outside any function. It is rejected for the same reason a top-level `return` is: there is no stream for the value to join. The `_error` suffix means CI asserts that `jade check` *fails* on it.
 
+## Called or piped
+
+Called, a generator runs to the end into its buffer. Piped, `doubles(4) |> print`, each value goes through the pipe's stages at the moment it is yielded, before the generator makes the next. `examples/pipe/per_piece/` covers that side, and `design/v2-pipes.md` has the rules.
+
 ## Gotchas
 
 *A generator cannot also return a value.* A bare `return` is fine and stops it early. But `return x` asks the function to be both a stream producer and a plain function, which is a compile error called `YieldAndReturn`. The fixture covers the legal half. The illegal half is a Rust test in `typechecker/tests.rs`, because a second `_error` fixture would add a file to prove one line.

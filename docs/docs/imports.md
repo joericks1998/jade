@@ -182,7 +182,7 @@ Jade rejects quoted-string imports of every kind at compile time, with a `Quoted
 
 See the [Standard Library](stdlib) reference for full API documentation.
 
-There is no `llm` import. Running inference is language syntax, written `?p` or `?p |> Type`, rather than a package. See [LLM Integration](llm).
+There is no `llm` import. Running inference is language syntax, written `?p` or `toInt(?p)`, rather than a package. See [LLM Integration](llm).
 
 ## Selective Imports (`from … use`)
 

@@ -1378,20 +1378,15 @@ impl Parser {
         sub.parse_pipe()
     }
 
-    /// Lowest precedence: `|>` (pipe). Left-associative, so `a |> f |> g` is
-    /// `g(f(a))` and a prompt dereference chains like anything else.
+    /// Lowest precedence: `|>` (pipe). Left-associative, so `a |> f |> g`
+    /// nests as `Pipe(Pipe(a, f), g)`, which `type_infer::infer_pipe` flattens
+    /// into one pipe with two stages.
     ///
-    /// This is the **only** place `|>` is consumed. It builds an `Expr::Pipe`
-    /// per stage and decides nothing else: whether a stage is a type, a Grammar,
-    /// or a function is a question about what its name refers to, which the
-    /// parser cannot answer. `typechecker::type_infer::infer_pipe` does.
-    ///
-    /// Two things used to happen here that no longer do. The stage was desugared
-    /// straight into `Expr::Call` by matching on its shape, which made a stage
-    /// that was not an identifier, call, or field access a *syntax* error
-    /// phrased in terms of tokens. And `?p |> …` was parsed somewhere else
-    /// entirely — see `parse_primary`'s `Question` arm — so the same operator
-    /// had two parse paths and two meanings.
+    /// This is the only place `|>` is consumed. It builds an `Expr::Pipe` per
+    /// stage and decides nothing else: what a stage's name refers to, and
+    /// whether the source arrives in pieces, are questions for the type
+    /// checker. A prompt dereference chains like any other value, since
+    /// `parse_primary`'s `Question` arm leaves a trailing `|>` here.
     fn parse_pipe(&mut self) -> Result<Expr> {
         self.enter()?;
         let out = self.parse_pipe_inner();
@@ -1832,7 +1827,7 @@ impl Parser {
             self.expect(&TokenKind::RParen)?;
         }
         let target = Expr::FieldAccess { object: Box::new(object), field, span };
-        Ok(Expr::PromptDeref { expr: Box::new(target), constraint: None, style, span })
+        Ok(Expr::PromptDeref { expr: Box::new(target), style, span })
     }
 
     fn parse_call(&mut self) -> Result<Expr> {
@@ -2027,16 +2022,9 @@ impl Parser {
                         span: *fspan,
                     });
                 }
-                // A trailing `|> …` is left for `parse_pipe`. This arm used to
-                // take it with `parse_or` — never `parse_pipe` — precisely so a
-                // chain could not form, which is why `?p |> int |> double` was
-                // unwritable before v1.2.0.
-                Ok(Expr::PromptDeref {
-                    expr: Box::new(expr),
-                    constraint: None,
-                    style: DerefStyle::Prefix,
-                    span,
-                })
+                // A trailing `|> …` is left for `parse_pipe`, so `?p |> f`
+                // is a pipe over the reply like any other.
+                Ok(Expr::PromptDeref { expr: Box::new(expr), style: DerefStyle::Prefix, span })
             }
             // Closures were removed in 2.0.1; say so rather than "expected
             // expression", which would explain nothing to someone porting code.

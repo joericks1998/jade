@@ -417,7 +417,7 @@ mod type_infer {
 
     #[test]
     fn test_infer_prompt_deref_typed_int() {
-        let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p |> int");
+        let tp = infer_ok("prompt p = \"hi\"\nlet r = toInt(?p)");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
         assert_eq!(value.ty, JadeType::Int);
     }
@@ -553,63 +553,67 @@ mod type_infer {
         assert_eq!(value.ty, JadeType::Unknown);
     }
 
-    // ── Pipe stages ───────────────────────────────────────────────────────────
+    // ── Pipes and typed dereferences ──────────────────────────────────────────
     //
-    // `|>` reaches inference as an `Expr::Pipe` carrying an unclassified stage.
-    // These pin which of the three meanings each stage shape takes, because the
-    // choice is the language rule and it is not visible in the syntax.
+    // A pipe calls its stages once per piece of its source, so a whole chain
+    // becomes one `TExprKind::Pipe`. A typed dereference is a call around the
+    // whole reply instead, `toInt(?p)`. See `design/v2-pipes.md`.
 
     use crate::typechecker::tir::TExprKind;
 
-    /// The stage folds back into the dereference as an `output_type`, which is
-    /// what makes `grammar_for` constrain sampling. If this regressed to an
-    /// ordinary call the program would still compile and still coerce — the
-    /// model would simply generate unconstrained, which is exactly the kind of
-    /// failure that shows up as a flaky reply rather than an error.
-    #[test]
-    fn a_converter_stage_on_a_deref_becomes_an_output_type() {
-        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> toInt");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
-            panic!("expected PromptDeref, got {:?}", value.kind)
+    /// The pipe a `let` holds, with its parts.
+    fn pipe_of(value: &TExpr) -> (&TExpr, &Vec<(String, TExpr)>, &str, &TExpr) {
+        let TExprKind::Pipe { source, hoisted, piece, body } = &value.kind else {
+            panic!("expected Pipe, got {:?}", value.kind)
         };
-        assert_eq!(output_type.as_deref(), Some("int"));
-        assert!(grammar_expr.is_none());
-        assert_eq!(value.ty, JadeType::Int);
+        (source, hoisted, piece, body)
     }
 
-    /// A type function only checks, so it does not fold into the dereference:
-    /// `?p |> int` is the call `int(?p)`, which the static checker refuses.
+    /// A converter around a whole dereference asks the model for that type, so
+    /// it folds into the dereference as an `output_type`.
     #[test]
-    fn a_type_function_stage_on_a_deref_is_a_call() {
-        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> int");
+    fn a_converter_around_a_deref_becomes_an_output_type() {
+        for (conv, ty, want) in [
+            ("toInt", "int", JadeType::Int),
+            ("toChar", "char", JadeType::Char),
+            ("toBool", "bool", JadeType::Bool),
+        ] {
+            let tp = infer_ok(&format!("prompt p = \"x\"\nlet n = {conv}(?p)"));
+            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+            let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
+                panic!("expected PromptDeref, got {:?}", value.kind)
+            };
+            assert_eq!(output_type.as_deref(), Some(ty));
+            assert!(grammar_expr.is_none());
+            assert_eq!(value.ty, want);
+        }
+    }
+
+    /// A type function only checks, so it does not fold: `int(?p)` is a call,
+    /// which the static checker refuses since the reply is a str.
+    #[test]
+    fn a_type_function_around_a_deref_is_a_call() {
+        let tp = infer_ok("prompt p = \"x\"\nlet n = int(?p)");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
         assert!(matches!(value.kind, TExprKind::Call { .. }), "got {:?}", value.kind);
     }
 
-    /// A struct registers itself as a callable constructor under its own name,
-    /// so by type alone it is indistinguishable from a function. Checking the
-    /// function rule first turned `?p |> City` into `City(?p)`.
+    /// A class registers itself under its own name, so by type alone it looks
+    /// like a function; around a dereference it is a type, not a class view.
     #[test]
-    fn a_struct_name_stage_on_a_deref_is_a_type_not_a_call() {
-        let tp =
-            infer_ok("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = ?p |> City");
+    fn a_class_around_a_deref_is_a_type() {
+        let tp = infer_ok("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = City(?p)");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
         let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
             panic!("expected PromptDeref, got {:?}", value.kind)
         };
         assert_eq!(output_type.as_deref(), Some("City"));
-        // `parse_type_name` maps only the builtin keywords, so a struct-typed
-        // dereference is statically `Unknown` and its fields are checked at run
-        // time. That predates v1.2.0 and is deliberately unchanged here: this
-        // patch moves *where* a stage is classified, not what a stage means.
-        assert_eq!(value.ty, JadeType::Unknown);
     }
 
     #[test]
-    fn a_grammar_stage_on_a_deref_becomes_a_grammar_expr() {
+    fn a_grammar_around_a_deref_becomes_a_grammar_expr() {
         let tp =
-            infer_ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = ?p |> g");
+            infer_ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = g(?p)");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
         let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
             panic!("expected PromptDeref, got {:?}", value.kind)
@@ -619,39 +623,128 @@ mod type_infer {
         assert_eq!(value.ty, JadeType::Str);
     }
 
-    /// The chain that was unwritable before v1.2.0. The first stage folds in and
-    /// constrains generation; the second is an ordinary call that receives the
-    /// coerced int rather than the raw reply text.
+    /// The old spellings of a typed dereference would call the stage on each
+    /// piece of the reply, which is almost never meant, so each is refused with
+    /// the call that applies it to the whole reply.
     #[test]
-    fn a_function_stage_after_a_typed_deref_receives_the_coerced_value() {
+    fn a_whole_reply_stage_piped_after_a_deref_names_the_call() {
+        for (src, fix) in [
+            ("prompt p = \"x\"\nlet n = ?p |> toInt", "toInt(?p)"),
+            ("prompt p = \"x\"\nlet n = ?p |> int", "toInt(?p)"),
+            ("prompt p = \"x\"\nlet c = ?p |> toChar", "toChar(?p)"),
+            ("prompt p = \"x\"\nlet n = ?p |> byte", "toByte(?p)"),
+            ("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = ?p |> City", "City(?p)"),
+            ("let g = Grammar.new('\"a\"')\nprompt p = \"x\"\nlet r = ?p |> g", "g(?p)"),
+        ] {
+            let err = infer_err(src);
+            let JadeError::WholeReplyStage { fix: got, .. } = &err else {
+                panic!("expected WholeReplyStage for {src}, got {err}")
+            };
+            assert_eq!(got, fix, "for {src}");
+        }
+    }
+
+    /// A function after a dereference runs on each piece of the reply: the
+    /// piece is a str, and the pipe is a stream of what the stage gives.
+    #[test]
+    fn a_function_piped_after_a_deref_runs_per_piece() {
+        let tp = infer_ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let (source, _, piece, body) = pipe_of(value);
+        assert!(matches!(source.kind, TExprKind::PromptDeref { output_type: None, .. }));
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&args[0].kind, TExprKind::Identifier(n) if n == piece));
+        assert_eq!(args[0].ty, JadeType::Str);
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+    }
+
+    /// A typed dereference is one piece, so the stage after it gets the int.
+    #[test]
+    fn a_function_piped_after_a_typed_deref_receives_the_converted_value() {
         let tp = infer_ok(
-            "fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = ?p |> int |> double",
+            "fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = toInt(?p) |> double",
         );
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::Call { args, .. } = &value.kind else {
-            panic!("expected the outer stage to be a Call, got {:?}", value.kind)
-        };
-        assert_eq!(args.len(), 1, "the piped value is the sole argument");
+        let (source, _, _, body) = pipe_of(value);
+        assert!(matches!(source.kind, TExprKind::PromptDeref { .. }));
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert_eq!(args.len(), 1, "the piece is the sole argument");
         assert_eq!(args[0].ty, JadeType::Int, "double() receives an int, not the reply text");
     }
 
-    /// A function stage on a plain value is the pipe the language always had.
+    /// A plain value is one piece, and the pipe gives back the stage's result.
     #[test]
-    fn a_function_stage_on_an_ordinary_value_is_a_call() {
+    fn a_function_stage_on_an_ordinary_value_is_one_call() {
         let tp = infer_ok("fn double(x) { return x * 2 }\nlet n = 5 |> double");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::Call { args, .. } = &value.kind else { panic!("expected Call") };
+        let (source, hoisted, _, body) = pipe_of(value);
+        assert!(matches!(source.kind, TExprKind::Integer(5)));
+        assert!(hoisted.is_empty());
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].ty, JadeType::Int);
+        assert!(!matches!(value.ty, JadeType::Stream(_)));
     }
 
-    /// The piped value goes in front of the stage's own arguments.
+    /// The piece goes in front of the stage's own arguments, and a literal
+    /// argument stays where it is, so it still takes the type it meets.
     #[test]
-    fn a_call_stage_takes_the_piped_value_as_its_first_argument() {
+    fn a_call_stage_takes_the_piece_as_its_first_argument() {
         let tp = infer_ok("fn add(a, b) { return a + b }\nlet n = 5 |> add(3)");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::Call { args, .. } = &value.kind else { panic!("expected Call") };
+        let (_, hoisted, piece, body) = pipe_of(value);
+        assert!(hoisted.is_empty());
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
         assert_eq!(args.len(), 2);
+        assert!(matches!(&args[0].kind, TExprKind::Identifier(n) if n == piece));
+        assert!(matches!(args[1].kind, TExprKind::Integer(3)));
+    }
+
+    /// A stage argument that is neither a literal nor a name is worked out
+    /// once, before the first piece, not once per piece.
+    #[test]
+    fn a_stage_argument_is_worked_out_once() {
+        let tp = infer_ok(
+            "fn add(a, b) { return a + b }\nfn ten() { return 10 }\nlet n = 5 |> add(ten())",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let (_, hoisted, _, body) = pipe_of(value);
+        assert_eq!(hoisted.len(), 1);
+        assert!(matches!(hoisted[0].1.kind, TExprKind::Call { .. }));
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&args[1].kind, TExprKind::Identifier(n) if *n == hoisted[0].0));
+    }
+
+    /// A chain is one pipe, so each piece goes through every stage before the
+    /// next piece is made.
+    #[test]
+    fn a_chain_is_one_pipe() {
+        let tp = infer_ok(
+            "fn double(x) { return x * 2 }\nfn inc(x) { return x + 1 }\nlet n = 5 |> double |> inc",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let (source, _, piece, body) = pipe_of(value);
+        assert!(matches!(source.kind, TExprKind::Integer(5)));
+        let TExprKind::Call { callee, args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(matches!(&callee.kind, TExprKind::Identifier(n) if n == "inc"));
+        let TExprKind::Call { callee, args: inner, .. } = &args[0].kind else {
+            panic!("expected the inner stage to be a Call")
+        };
+        assert!(matches!(&callee.kind, TExprKind::Identifier(n) if n == "double"));
+        assert!(matches!(&inner[0].kind, TExprKind::Identifier(n) if n == piece));
+    }
+
+    /// A pipe over a stream keeps the source's shape: a stream back.
+    #[test]
+    fn a_pipe_over_a_stream_gives_a_stream() {
+        let tp = infer_ok(
+            "fn g() {\n    yield 1\n}\nfn double(x) { return x * 2 }\nlet s = g() |> double",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let (_, _, _, body) = pipe_of(value);
+        let TExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert_eq!(args[0].ty, JadeType::Int, "the piece is the stream's element");
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
     }
 
     #[test]
@@ -664,8 +757,6 @@ mod type_infer {
         }
     }
 
-    /// A user function beats anything else it collides with, which is the rule
-    /// for every name that is not a builtin keyword or a declared struct.
     // ── char ──────────────────────────────────────────────────────────────────
 
     #[test]
@@ -711,20 +802,6 @@ mod type_infer {
             let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
             assert_eq!(value.ty, JadeType::Str, "for {src}");
         }
-    }
-
-    /// `toChar` is a builtin converter, so it constrains a dereference rather
-    /// than applying the function to the raw reply. Without the grammar the
-    /// model generates freely and the conversion then fails.
-    #[test]
-    fn a_char_converter_stage_on_a_deref_constrains_rather_than_converts() {
-        let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> toChar");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
-            panic!("expected PromptDeref, got {:?}", value.kind)
-        };
-        assert_eq!(output_type.as_deref(), Some("char"));
-        assert_eq!(value.ty, JadeType::Char);
     }
 
     // ── yield / streams ───────────────────────────────────────────────────────
@@ -776,17 +853,6 @@ mod type_infer {
         );
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
         assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
-    }
-
-    #[test]
-    fn a_user_function_stage_beats_a_grammar_variable_of_the_same_name() {
-        let tp = infer_ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
-        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        assert!(
-            matches!(value.kind, TExprKind::Call { .. }),
-            "a function stage applies, it does not constrain: {:?}",
-            value.kind,
-        );
     }
 
     // ── Handles cannot cross a task boundary ──────────────────────────────────

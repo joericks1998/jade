@@ -4,7 +4,7 @@ title: LLM Integration
 sidebar_label: LLM Integration
 ---
 
-Jade treats LLM access as part of the language. A `prompt` declaration names a prompt string. The `?` operator sends that string to your inference provider and returns the response. A `|>` stage after the dereference says what shape the response must take, either a Jade type or a grammar you write yourself, and Jade constrains the model to produce it.
+Jade treats LLM access as part of the language. A `prompt` declaration names a prompt string. The `?` operator sends that string to the model and returns the response. A converter around the dereference, such as `toInt(?p)`, says what shape the response must take, either a Jade type or a grammar you write yourself, and Jade constrains the model to produce it. A pipe after it, `?p |> f`, calls `f` on each piece of the reply as the model writes it.
 
 ## Declaring a Prompt
 
@@ -75,56 +75,77 @@ let name = ?p2       // "Alice"
 print(name)
 ```
 
+### Showing a reply as the model writes it
+
+`?p` on its own waits for the whole reply. A pipe instead calls its stage once per piece of the reply as each piece arrives, so `write`, which prints without a newline, shows the reply live:
+
+```jade
+prompt p = "Tell me a short story."
+?p |> write          // each piece, as the model writes it
+print(?p)            // the whole reply, once it is finished
+```
+
+A piece is the text of one token. A character split across two tokens arrives whole, in the piece that finishes it. Each piece is a `str`, and a pipe over a reply gives back a stream of what its last stage returned:
+
+```jade
+fn shout(s) { return s.upper() }
+let loud = ?p |> shout     // a stream of strings
+```
+
+See [Operators](operators.md#pipe) for how pipes work on any value.
+
 :::note
 Under `jade run`, sending the *same* prompt text with the same target type reuses the first reply instead of calling the model again. That cache lives in one process, so it never carries between runs. A compiled binary has no such cache, so under `jade build` every dereference is a real call. To get a fresh answer from a prompt you have already sent, change the text.
 :::
 
-## Typed dereference, written `?p |> toInt`
+## Typed dereference
 
-Add a converter such as `|> toInt` after a prompt dereference to turn the model's response into a Jade value. A converter does two things here. It builds a grammar that constrains how the model *generates*, and it converts the reply afterwards. These are the supported targets:
+Call a converter such as `toInt` around a prompt dereference to turn the model's response into a Jade value. A converter around a whole dereference does two things. It builds a grammar that constrains how the model *generates*, and it converts the reply afterwards. These are the supported targets:
 
-| Stage | Accepted reply | Result |
+| Call | Accepted reply | Result |
 |------|----------------|--------|
-| `toInt` | `42`, `-7` | `int` value |
-| `toFloat` | `3.14`, `-0.5` | `float` value |
-| `toBool` | `true`, `True`, `false` | `bool` value |
-| `toChar` | exactly one character | `char` value |
-| `toString` | anything | `str` value (always succeeds) |
-| `array` | a JSON array | `array` of int, float, bool, or str |
-| `dict` | a JSON object | `dict` |
-| a `struct` name | a JSON object | an instance of that struct |
+| `toInt(?p)` | `42`, `-7` | `int` value |
+| `toFloat(?p)` | `3.14`, `-0.5` | `float` value |
+| `toBool(?p)` | `true`, `True`, `false` | `bool` value |
+| `toChar(?p)` | exactly one character | `char` value |
+| `toString(?p)` | anything | `str` value (always succeeds) |
+| `array(?p)` | a JSON array | `array` of int, float, bool, or str |
+| `dict(?p)` | a JSON object | `dict` |
+| a class name, `City(?p)` | a JSON object | an instance of that class |
 
-A type function such as `int` is not a converter. It only checks a value's type, so `?p |> int` is `int(?p)`, and the build refuses it because a reply is a `str`. See [Types](types#type-functions-and-converters).
+A type function such as `int` is not a converter. It only checks a value's type, so `int(?p)` is refused, because a reply is a `str`. See [Types](types#type-functions-and-converters).
 
-`toString` is the one target with no grammar, because any text is already valid. `toInt`, `toFloat`, `toBool`, and `toChar` get a full grammar, since the output is short and constraining every token costs little. `array`, `dict`, and structs get a *prefix* grammar instead. A prefix grammar pins the opening bracket and then lets the model generate freely, which keeps the cost of grammar checking to the first few tokens.
+`toString` is the one target with no grammar, because any text is already valid. `toInt`, `toFloat`, `toBool`, and `toChar` get a full grammar, since the output is short and constraining every token costs little. `array`, `dict`, and classes get a *prefix* grammar instead. A prefix grammar pins the opening bracket and then lets the model generate freely, which keeps the cost of grammar checking to the first few tokens.
 
 ```jade
 prompt p = "What is 3 + 4? Respond with only the number."
-let n = ?p |> toInt
+let n = toInt(?p)
 print(n + 1)          // 8
 ```
 
 ```jade
 prompt p = "Is 5 greater than 3? Respond with only: true or false"
-let result = ?p |> toBool
+let result = toBool(?p)
 if result {
     print("correct!")
 }
 ```
 
-### Coercing to a struct
+A converter goes *around* the dereference, never after it in a pipe. `?p |> toInt` would call `toInt` on each piece of the reply as it arrives, one token's text at a time, so the build refuses it and names `toInt(?p)` as the fix. The same goes for `?p |> int`, `?p |> City` and `?p |> g`.
 
-Naming a `struct` asks the model for JSON and builds an instance from the result. The rule matches a struct literal. A field the reply leaves out takes its declared default. A required field the reply leaves out is a coercion failure, not a `nil`.
+### Coercing to a class
+
+Naming a class asks the model for JSON and builds an instance from the result. The rule matches a class literal. A field the reply leaves out takes its declared default. A required field the reply leaves out is a coercion failure, not a `nil`.
 
 ```jade
-struct City {
-    name,
-    let population = 7,
-    let country = "unknown"
+class City {
+    @public name,
+    @public let population = 7,
+    @public let country = "unknown"
 }
 
 prompt p = "Describe a city as JSON."
-let c = ?p |> City
+let c = City(?p)
 
 print(c.name)         // from the reply
 print(c.country)      // "unknown" if the reply left it out
@@ -132,47 +153,31 @@ print(c.country)      // "unknown" if the reply left it out
 
 ### Chaining past the type
 
-A converter stage is just one stage of an ordinary pipe, so anything can follow it. The converter constrains how the model *generates*, and the next stage receives the value after conversion:
+A typed dereference is one value, so a pipe after it runs once, on the converted value:
 
 ```jade
 fn double(x) { return x * 2 }
 
 prompt p = "What is 21 + 21? Respond with only the number."
-let n = ?p |> toInt |> double   // 84
+let n = toInt(?p) |> double   // 84
 ```
 
-Order matters here, in a useful way. `?p |> toInt |> double` constrains the reply to an integer and hands `double` a real int. `?p |> double` gives Jade no type to build a grammar from, so the model generates freely and `double` receives the raw reply text.
-
-:::note
-Before v1.2.0 you could write neither of these. A `|>` after `?p` went through a separate parse path that read only one constraint, so no chain could form, and a typed dereference inside `print(...)` was rejected outright. Both work now. `print(?p |> toInt)` prints the converted int, and `print(?p)` still streams tokens live.
-:::
+Order matters here, in a useful way. `toInt(?p) |> double` constrains the reply to an integer and hands `double` a real int. `?p |> double` gives Jade no type to build a grammar from, so the model generates freely and `double` runs on each piece of the reply's text.
 
 ## Constraining with a Grammar
 
-When the shape you want is not a Jade type, build a `Grammar` and use it as a `|>` stage. Its GBNF goes out with the request, and the reply stays a stream. Printing that stream shows tokens as they arrive, and reading it as a value gives you the full text.
+When the shape you want is not a Jade type, build a `Grammar` and call it around the dereference, as you would a converter. Its GBNF goes out with the request, and the reply arrives whole.
 
 ```jade
 let g = Grammar.new("\"yes\" | \"no\"")
 prompt p = "yes or no?"
 
-let answer = ?p |> g   // "yes" or "no", and nothing else
+let answer = g(?p)   // "yes" or "no", and nothing else
 print(answer)
 ```
 
-A grammar also decides what a *live* print shows, and this is the part worth getting right. A grammar can carry an *anchor* and a *stop*. Together they mark a region of the reply to hide from live output while keeping it in the value. That is how you hide a tool call or a chain-of-thought span from the reader without losing it to the program:
-
-```jade
-let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
-prompt p = "Reply with <t>a</t> and nothing else."
-
-print(?p |> g)        // everything between <t> and </t> is suppressed
-let full = ?p |> g    // ... but it is still here
-```
-
-A grammar with *no anchor* hides output from the very first token, because the whole reply is then structured output with no prose to show. So `print(?p |> g)` on a grammar without an anchor prints an empty line. That is not a bug. It is the same rule, with the hidden region starting at token one. Read the value and print that instead, the way the first example does.
-
 :::note
-This used to be a builtin called `stream(?p, mute_on = [g])`. It existed only because a grammar-constrained dereference collapsed into a blocking call, leaving no stream to print. Since v1.2.4 it no longer collapses, so the pipe covers both cases and `stream()` is gone.
+The compiled backend does not run grammars yet, so a program that uses one stops at build time with an error naming it. Before 2.0.3 a grammar was a pipe stage, `?p |> g`, and streamed its reply while hiding the text between the grammar's anchors. A pipe now always runs once per piece, so a grammar wraps the whole reply instead.
 :::
 
 ## Dereferencing a Prompt in a Field
@@ -188,11 +193,11 @@ let a = Agent {}
 
 let r = a.(?system)                  // explicit
 let r = a~>system                    // shorter, and means the same
-let n = a.(?system) |> toInt           // constraints work as usual
+let n = toInt(a.(?system))           // constraints work as usual
 let d = build(cfg).agent.(?system)   // reads left-to-right; no backtracking
 ```
 
-`obj.(?field)` and `obj~>field` are the same operation. `~>` is simply the shorter spelling, much as C offers `p->x` for `(*p).x`. A `|>` constraint goes outside the parentheses.
+`obj.(?field)` and `obj~>field` are the same operation. `~>` is simply the shorter spelling, much as C offers `p->x` for `(*p).x`. A converter goes around the whole form: `toInt(a~>system)`.
 
 Plain `.` still works as before. `a.system` reads the field and gives you the prompt value itself, undereferenced.
 
@@ -206,7 +211,7 @@ A typed dereference gets one attempt, because grammar-constrained sampling alrea
 
 ```jade
 prompt p = "Pick a lucky number."
-let n = ?p |> toInt
+let n = toInt(?p)
 print(n)
 ```
 
@@ -224,7 +229,7 @@ The error carries the line and column of the dereference rather than the name of
 prompt p = "Pick a lucky number."
 let n = 0
 try {
-    n = ?p |> toInt
+    n = toInt(?p)
 } catch e {
     print("model did not give a number, using 0")
 }
@@ -257,7 +262,7 @@ A provider is an ordinary compiled Jade package that makes its own HTTP calls to
 
 There is no `use llm` package in the language. Everything it used to expose now belongs to the provider package: model selection and introspection, the token budget and token accounting, anchor handling, retry policy, backend health, model profiles, and tool-call parsing.
 
-The language keeps only the inference *syntax*: declaring a prompt, dereferencing it with `?p` or `?p |> Type`, and constraining it with `?p |> grammar`. Jade builds a request, calls the provider, and reads the reply. That is all it does.
+The language keeps only the inference *syntax*: declaring a prompt, dereferencing it with `?p`, shaping the reply with `toInt(?p)` or a grammar, `g(?p)`, and listening to it with `?p |> f`. Jade builds a request, calls the provider, and reads the reply. That is all it does.
 
 ## Async Inference
 
@@ -298,7 +303,8 @@ See [Async / Await](async) for the full reference.
 | `NoInferenceBackend` | `?p` ran with no provider installed. Run `jade register` |
 | `PromptOverflow` | A typed dereference produced a reply that would not coerce to the target type. There is one attempt, and the provider owns any retry policy |
 | `InferenceError` | The provider reported a failure, such as a bad API key, a rate limit, or a grammar it cannot enforce |
-| `InvalidPipeStage` | The right side of `\|>` is not a function, a type name, or a Grammar. This replaced `StreamingWithType` in v1.2.0 |
+| `InvalidPipeStage` | The right side of `\|>` is not a function |
+| `WholeReplyStage` | A converter, type function, class or grammar piped straight after `?p`, as in `?p \|> toInt`, which would run on each piece of the reply. Call it around the dereference instead: `toInt(?p)` |
 | `NotAPrompt` | `?x` where `x` is not a prompt. Usually caught earlier as a type error, where `jade check` reports `expected prompt, got int` |
 | `PrefixDerefOnField` | `?obj.field`, which the parser rejects in favor of `obj.(?field)` or `obj~>field` |
 | `NotAFuture` | `await` applied to a non-Future value |

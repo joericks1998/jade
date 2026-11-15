@@ -102,7 +102,7 @@ number. Each raises when the result does not fit its type, or the text is not a 
   through a converter first.
 - *Native packages* keep declaring C scalars as `int` and `float` in `jade.toml`;
   mapping `scalar:uint32_t` and friends to the sized types is a later change.
-- *Typed dereferences* stay `?p |> toInt` and the other four converters of 2.0.3.
+- *Typed dereferences* stay the five converters of 2.0.3, written `toInt(?p)` since pipes run once per piece; see `v2-pipes.md`.
 
 ## What changes in the compiler
 

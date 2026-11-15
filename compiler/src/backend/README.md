@@ -67,7 +67,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`random.rs`* has `std::random`: v1's xoshiro256** generator, so a seeded program draws the same numbers.
 - *`json.rs`* has the `Json` value, `json.parse` with serde_json's grammar and messages, and `json.stringify`, generated per type.
 - *`native.rs`* has native packages: loading, marshalling to and from `JadeVal` by static type, handles, callbacks and their trampolines, and freeing what crossed.
-- *`infer.rs`* has inference: the tokenizer's tables and Unicode classes, connecting to dovata and mapping the model's memory with the descriptors it sends, Metal through `objc_msgSend`, one forward step as one command buffer over the op table, and greedy generation. `src/infer/README.md` describes the whole path.
+- *`infer.rs`* has inference: the tokenizer's tables and Unicode classes, connecting to dovata and mapping the model's memory with the descriptors it sends, Metal through `objc_msgSend`, one forward step as one command buffer over the op table, and greedy generation one token per call, so a pipe can hand on each piece of a reply as it comes. `src/infer/README.md` describes the whole path.
 - *`http.rs`* has `std::http` and `std::uhttp`, both through `curl`, and `uhttp.stream`, which calls the handler through a function pointer once a line.
 - *`tests.rs`* builds small programs, runs them, and checks what they print. One test checks that a program declares only C library functions.
 

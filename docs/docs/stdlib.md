@@ -839,7 +839,7 @@ None of this applies outside a task. An ordinary function may write into any blo
 
 ## LLM inference
 
-There is no `llm` package. Running inference is language *syntax* rather than a package: you declare a prompt and dereference it, written `?p` or `?p |> Type`. The provider package now owns everything a program used to reach for through `use llm`, including the model, the token budget and accounting, anchor handling, retries, health, model profiles, and tool-call parsing. See [LLM Integration](llm).
+There is no `llm` package. Running inference is language *syntax* rather than a package: you declare a prompt and dereference it, written `?p` or `toInt(?p)`. The provider package now owns everything a program used to reach for through `use llm`, including the model, the token budget and accounting, anchor handling, retries, health, model profiles, and tool-call parsing. See [LLM Integration](llm).
 
 ```jade
 prompt p = "Write a one-sentence summary of Jade."

@@ -72,6 +72,9 @@ pub struct TypeContext {
     /// else binds the name, so a local that shadows a package is not checked
     /// against it.
     imported_packages: HashSet<String>,
+    /// How many pipes this file has lowered, so each one's piece and hoisted
+    /// arguments get names no other pipe uses: `$piece3`, `$arg3.0`.
+    next_pipe: usize,
 }
 
 impl Default for TypeContext {
@@ -94,6 +97,7 @@ impl TypeContext {
             primitive_methods: HashMap::new(),
             opaque_imports: false,
             imported_packages: HashSet::new(),
+            next_pipe: 0,
         };
         builtins::register_core_types(&mut ctx);
         builtins::register_primitive_method_types(&mut ctx);
@@ -615,6 +619,13 @@ fn fill_in_expr(
             }
         }
         TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::Pipe { source, hoisted, body, .. } => {
+            fill_in_expr(source, defs, ctx)?;
+            for (_, v) in hoisted.iter_mut() {
+                fill_in_expr(v, defs, ctx)?;
+            }
+            fill_in_expr(body, defs, ctx)?;
+        }
         TExprKind::StructLiteral { type_name, base, fields, .. } => {
             if let Some(b) = base.as_mut() {
                 fill_in_expr(b, defs, ctx)?;
@@ -1414,6 +1425,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── Function calls ────────────────────────────────────────────────────
         Expr::Call { callee, args, kwargs, span } => {
+            // A converter, class or grammar called on a whole dereference asks
+            // the model for that shape: `toInt(?p)` asks for an int, and
+            // `City(?p)` for a City. Piped, `?p |> f` runs per piece instead.
+            if kwargs.is_empty()
+                && let [Expr::PromptDeref { expr: inner, .. }] = args.as_slice()
+                && let Some(c) = deref_constraint(callee, ctx)?
+            {
+                return infer_deref(inner, Some(c), *span, ctx);
+            }
             // Grammar.new(pattern) → JadeType::Grammar (special-cased for static typing).
             let is_grammar_new = matches!(callee.as_ref(),
                 Expr::FieldAccess { object, field, .. }
@@ -2030,24 +2050,21 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         }
 
         // ── LLM prompt dereference ────────────────────────────────────────────
-        Expr::PromptDeref { expr, constraint, span, style: _ } => {
-            infer_deref(expr, constraint.as_deref(), *span, ctx)
-        }
+        Expr::PromptDeref { expr, span, style: _ } => infer_deref(expr, None, *span, ctx),
 
         // ── Pipe ──────────────────────────────────────────────────────────────
         Expr::Pipe { value, stage, span } => infer_pipe(value, stage, *span, ctx),
     }
 }
 
-/// Lower a prompt dereference, with an optional constraint already classified.
+/// Lower a prompt dereference.
 ///
-/// `constraint` is always `None` from the parser as of v1.2.0 — `infer_pipe`
-/// supplies one when a `|>` stage turns out to name a type or a Grammar. The
-/// parameter survives because a cached AST written by an older toolchain can
-/// still carry one.
+/// `constraint` is what a call around the whole dereference asks the model
+/// for: `toInt(?p)` is the type `int`, `City(?p)` the class, and `g(?p)` a
+/// grammar. `None` is a plain `?p`, a str.
 fn infer_deref(
     expr: &Expr,
-    constraint: Option<&Expr>,
+    constraint: Option<DerefStage>,
     span: Span,
     ctx: &mut TypeContext,
 ) -> Result<TExpr> {
@@ -2061,16 +2078,11 @@ fn infer_deref(
     }
     let (output_type, grammar_expr, ty) = match constraint {
         None => (None, None, JadeType::Str),
-        Some(c) => match classify_deref_stage(c, ctx)? {
-            Some(DerefStage::Type(name)) => {
-                let ty = parse_type_name(&name);
-                (Some(name), None, ty)
-            }
-            Some(DerefStage::Grammar(g)) => (None, Some(g), JadeType::Str),
-            // A cached AST could carry a stage that is neither; treat it as a
-            // runtime Grammar, which is what pre-v1.2.0 inference did.
-            None => (None, Some(Box::new(infer_expr(c, ctx)?)), JadeType::Str),
-        },
+        Some(DerefStage::Type(name)) => {
+            let ty = parse_type_name(&name);
+            (Some(name), None, ty)
+        }
+        Some(DerefStage::Grammar(g)) => (None, Some(g), JadeType::Str),
     };
     Ok(TExpr {
         kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type, grammar_expr },
@@ -2079,70 +2091,74 @@ fn infer_deref(
     })
 }
 
-/// What a `|>` stage means when the piped value is a prompt dereference.
+/// What a call around a whole prompt dereference asks the model for.
 enum DerefStage {
-    /// A type name: generate a grammar from it and coerce the reply.
+    /// A type name: ask for that type and read the reply as one.
     Type(String),
     /// A Grammar value: constrain sampling with it directly.
     Grammar(Box<TExpr>),
 }
 
-/// Decide whether `stage` constrains a dereference or is an ordinary function
-/// applied to its result. `None` means the latter.
+/// Purpose: This function decides whether a call around a whole prompt
+/// dereference shapes the reply, as `toInt(?p)` does, or is an ordinary call,
+/// as `print(?p)` is.
 ///
-/// The order of these checks is the language rule, so it is worth stating:
+/// The order of these checks is the language rule:
 ///
-/// 1. **A converter always wins.** `?p |> toInt` folds in as the type `int`:
-///    the model is constrained to write an int, and the reply becomes one.
-///    `toInt` and friends are also registered as callables in
-///    `core::register_types`, so without this they would classify as functions,
-///    the model would generate freely, reply "the answer is 42", and fail to
-///    convert. The grammar is the valuable half of a typed dereference. A type
-///    function such as `int` is not a converter: `?p |> int` is `int(?p)`,
-///    which refuses the reply's str and names `toInt`.
-/// 2. **A declared struct is a type.** This has to be checked *before* the
-///    function test below, because a struct registers itself as a callable
-///    constructor under its own name (see the `StructDef` arm), so by type
-///    alone every struct looks like a function. Reaching the function test
-///    first turned `?p |> City` into `City(?p)`.
-/// 3. **A user function beats anything else it collides with.**
-/// 4. **An uppercase name is a struct type**, even one this pass has not seen —
-///    an imported struct is not in `struct_defs` here.
-/// 5. **A name of unknown type is a Grammar.** This is the `?p |> self.grammar`
-///    case: a struct field's type is not tracked statically, and firing the
-///    coercion path on the literal string "self.grammar" would fail at runtime.
-/// 6. **Anything else applies.** A call stage is ordinary pipe application, so
-///    `?p |> f(a)` is `f(?p, a)`. Binding a grammar to a name first — which is
-///    what every use in the tree already does — keeps case 5 available.
-fn classify_deref_stage(stage: &Expr, ctx: &mut TypeContext) -> Result<Option<DerefStage>> {
-    let Some(name) = extract_type_name(stage) else {
+/// 1. *A converter is its type.* `toInt(?p)` asks the model for an int. The
+///    type functions are not converters: `int(?p)` checks the reply, a str,
+///    and the checker names `toInt`.
+/// 2. *`array`, `dict` and a declared class are types,* the class checked
+///    before the function test since it registers itself under its own name.
+/// 3. *A function is an ordinary call.*
+/// 4. *A Grammar value constrains sampling.*
+/// 5. *An uppercase name is a class,* even one this file does not declare,
+///    since an imported class is not in `struct_defs` here.
+///
+/// Inputs:
+/// - `callee`: what is called.
+/// - `ctx`: the type environment.
+///
+/// Outputs: the constraint, or `None` for an ordinary call.
+fn deref_constraint(callee: &Expr, ctx: &mut TypeContext) -> Result<Option<DerefStage>> {
+    let Some(name) = extract_type_name(callee) else {
         return Ok(None);
     };
     if let Some(ty) = converter_type(&name) {
         return Ok(Some(DerefStage::Type(ty.to_string())));
     }
-    if (is_builtin_type_name(&name) && !is_type_function(&name))
-        || ctx.struct_defs.contains_key(&name)
-    {
+    if is_collection_type(&name) || ctx.struct_defs.contains_key(&name) {
         return Ok(Some(DerefStage::Type(name)));
     }
-    if matches!(ctx.get(&name), Some(JadeType::Fn { .. }) | Some(JadeType::AsyncFn { .. })) {
-        return Ok(None);
+    match ctx.get(&name) {
+        Some(JadeType::Fn { .. } | JadeType::AsyncFn { .. }) => return Ok(None),
+        Some(JadeType::Grammar) => {
+            return Ok(Some(DerefStage::Grammar(Box::new(infer_expr(callee, ctx)?))));
+        }
+        _ => {}
     }
-    if name.chars().next().is_some_and(char::is_uppercase) {
+    if last_segment_is_upper(&name) {
         return Ok(Some(DerefStage::Type(name)));
     }
-    let t = infer_expr(stage, ctx)?;
-    match t.ty {
-        JadeType::Fn { .. } | JadeType::AsyncFn { .. } => Ok(None),
-        _ => Ok(Some(DerefStage::Grammar(Box::new(t)))),
-    }
+    Ok(None)
+}
+
+/// Purpose: This function says whether a name is a collection type a reply
+/// can be decoded into as JSON: `array(?p)`, `dict(?p)`.
+fn is_collection_type(name: &str) -> bool {
+    matches!(name, "array" | "Array" | "dict" | "Dict")
+}
+
+/// Purpose: This function says whether the last part of a name, `City` in
+/// `shapes.City`, starts with a capital, as a class name does.
+fn last_segment_is_upper(name: &str) -> bool {
+    name.rsplit('.').next().and_then(|n| n.chars().next()).is_some_and(char::is_uppercase)
 }
 
 /// Purpose: This function gives the type a converter makes.
 ///
 /// Inputs:
-/// - `name`: a name a pipe stage names.
+/// - `name`: a name a call names.
 ///
 /// Outputs: the type's name for `toInt`, `toFloat`, `toString`, `toBool` and
 /// `toChar`, and `None` for anything else.
@@ -2157,20 +2173,171 @@ fn converter_type(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Purpose: This function says whether a name is a type function, which
-/// checks a value's type and returns it unchanged.
+/// Purpose: This function finds a pipe stage, right after a prompt
+/// dereference, that only makes sense on the whole reply: a converter, a type
+/// function, a class or a grammar. Each was how a typed dereference was
+/// written before pipes ran once per piece, and calling one on a single
+/// token's text is almost never what was meant.
 ///
 /// Inputs:
-/// - `name`: the name.
+/// - `stage`: the pipe's first stage.
+/// - `ctx`: the type environment.
 ///
-/// Outputs: true for `int`, `float`, `str`, `bool` and `char`.
-fn is_type_function(name: &str) -> bool {
-    matches!(name, "int" | "float" | "str" | "bool" | "char")
+/// Outputs: how the stage was written and the call that applies it to the
+/// whole reply, such as `toInt(?p)`, or `None` for an ordinary function.
+fn whole_reply_stage(stage: &Expr, ctx: &TypeContext) -> Option<(String, String)> {
+    use super::infer::SizedNum;
+    let name = extract_type_name(stage)?;
+    let canon = super::infer::canonical(&name);
+    let type_fn_converter = match canon {
+        "int" => Some("toInt"),
+        "float" => Some("toFloat"),
+        "str" => Some("toString"),
+        "bool" => Some("toBool"),
+        "char" => Some("toChar"),
+        other => SizedNum::from_name(other).map(SizedNum::converter),
+    };
+    let fix = if let Some(conv) = type_fn_converter {
+        conv.to_string()
+    } else if converter_type(canon).is_some()
+        || SizedNum::from_converter(canon).is_some()
+        || is_collection_type(&name)
+        || ctx.struct_defs.contains_key(&name)
+        || matches!(ctx.get(&name), Some(JadeType::Grammar))
+    {
+        name.clone()
+    } else if matches!(ctx.get(&name), Some(JadeType::Fn { .. } | JadeType::AsyncFn { .. })) {
+        return None;
+    } else if last_segment_is_upper(&name) {
+        name.clone()
+    } else {
+        return None;
+    };
+    Some((name, format!("{fix}(?p)")))
 }
 
-/// Type keywords that name a coercion target for a dereference. `nil`/`null`
-/// are here because `parse_type_name` accepts them, not because constraining a
-/// reply to nil is useful.
+/// Lower a pipe chain, `source |> f |> g(a)`.
+///
+/// The parser nests a chain as `Pipe(Pipe(source, f), g(a))`; this flattens it
+/// into one `TExprKind::Pipe`, so each piece goes through every stage before
+/// the next piece is made. The stages become one expression over a name for
+/// the piece in hand, `g(f(piece), a)`, checked with that name bound to the
+/// piece's type: a stream's element, a prompt reply's str, or the source
+/// itself when it is one piece. A stage argument that is not a literal or a
+/// name gets a name of its own, so it is worked out once, not once per piece.
+fn infer_pipe(value: &Expr, stage: &Expr, span: Span, ctx: &mut TypeContext) -> Result<TExpr> {
+    let mut stages = vec![stage];
+    let mut source = value;
+    while let Expr::Pipe { value, stage, .. } = source {
+        stages.push(stage);
+        source = value;
+    }
+    stages.reverse();
+
+    let from_prompt = matches!(source, Expr::PromptDeref { .. });
+    if from_prompt && let Some((stage, fix)) = whole_reply_stage(stages[0], ctx) {
+        return Err(JadeError::WholeReplyStage { stage, fix, span: expr_span(stages[0]) });
+    }
+    // Reject a stage that plainly cannot be called, so the message names what
+    // it found rather than letting the call path report a mismatched callee.
+    for s in &stages {
+        if let Some(got) = uncallable_stage(s, ctx) {
+            return Err(JadeError::InvalidPipeStage { got, span: expr_span(s) });
+        }
+    }
+
+    let tsource = infer_expr(source, ctx)?;
+    let id = ctx.next_pipe;
+    ctx.next_pipe += 1;
+    let piece = format!("$piece{id}");
+    let mut hoisted_src: Vec<(String, Expr)> = Vec::new();
+    let mut body = Expr::Identifier { name: piece.clone(), span };
+    for s in &stages {
+        body = match s {
+            // A call stage keeps its own span, so `5 |> add(3)` reports errors
+            // against `add(3)`, not against the pipe.
+            Expr::Call { callee, args, kwargs, span: cspan } => {
+                let mut with_piece = Vec::with_capacity(args.len() + 1);
+                with_piece.push(body);
+                for a in args {
+                    with_piece.push(hoist_stage_arg(a, id, &mut hoisted_src));
+                }
+                let kwargs = kwargs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), hoist_stage_arg(v, id, &mut hoisted_src)))
+                    .collect();
+                Expr::Call { callee: callee.clone(), args: with_piece, kwargs, span: *cspan }
+            }
+            other => Expr::Call {
+                callee: Box::new((*other).clone()),
+                args: vec![body],
+                kwargs: vec![],
+                span: expr_span(other),
+            },
+        };
+    }
+
+    let mut hoisted = Vec::with_capacity(hoisted_src.len());
+    for (name, e) in &hoisted_src {
+        hoisted.push((name.clone(), infer_expr(e, ctx)?));
+    }
+    let (piece_ty, streamed) = match &tsource.ty {
+        _ if from_prompt => (JadeType::Str, true),
+        JadeType::Stream(el) => ((**el).clone(), true),
+        other => (other.clone(), false),
+    };
+    ctx.push_scope();
+    for (name, v) in &hoisted {
+        ctx.define(name.clone(), v.ty.clone());
+    }
+    ctx.define(piece.clone(), piece_ty);
+    let tbody = infer_expr(&body, ctx);
+    ctx.pop_scope();
+    let tbody = tbody?;
+    let ty = if streamed { JadeType::Stream(Box::new(tbody.ty.clone())) } else { tbody.ty.clone() };
+    Ok(TExpr {
+        kind: TExprKind::Pipe { source: Box::new(tsource), hoisted, piece, body: Box::new(tbody) },
+        ty,
+        span,
+    })
+}
+
+/// Purpose: This function leaves a pipe stage's argument in place when
+/// working it out once per piece would change nothing, a literal or a name,
+/// and otherwise binds it to a name of its own, worked out once before the
+/// first piece.
+///
+/// A literal stays where it is so it still takes the type it meets: in
+/// `x |> f(5)` with `f` taking a byte, the 5 is a byte.
+///
+/// Inputs:
+/// - `a`: the argument.
+/// - `pipe`: the pipe's number, for a name no other pipe uses.
+/// - `out`: the hoisted arguments so far.
+///
+/// Outputs: the argument, or the name standing for it.
+fn hoist_stage_arg(a: &Expr, pipe: usize, out: &mut Vec<(String, Expr)>) -> Expr {
+    let stays = match a {
+        Expr::Integer { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Str { .. }
+        | Expr::Identifier { .. } => true,
+        Expr::UnaryOp { op: UnaryOpKind::Neg, operand, .. } => {
+            matches!(operand.as_ref(), Expr::Integer { .. } | Expr::Float { .. })
+        }
+        _ => false,
+    };
+    if stays {
+        return a.clone();
+    }
+    let name = format!("$arg{pipe}.{}", out.len());
+    out.push((name.clone(), a.clone()));
+    Expr::Identifier { name, span: expr_span(a) }
+}
+
+/// Type keywords. `nil`/`null` are here because `parse_type_name` accepts
+/// them.
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
@@ -2188,68 +2355,7 @@ fn is_builtin_type_name(name: &str) -> bool {
     )
 }
 
-/// Lower `value |> stage`.
-///
-/// Two outcomes. If `value` is an unconstrained dereference and `stage` names a
-/// type or a Grammar, the stage folds into the dereference and constrains how
-/// the reply is *generated*. Otherwise the stage is applied to the value, with
-/// the value inserted as the first argument — `5 |> add(3)` is `add(5, 3)`.
-///
-/// Doing this here rather than in the parser is what lets one operator carry
-/// both meanings: which one applies depends on what a name refers to, and only
-/// the type checker knows that. It is also what makes `?p |> int |> double`
-/// expressible, since the first stage folds in and the second sees a real int.
-fn infer_pipe(value: &Expr, stage: &Expr, span: Span, ctx: &mut TypeContext) -> Result<TExpr> {
-    if let Expr::PromptDeref { expr, constraint: None, span: dspan, .. } = value
-        && let Some(kind) = classify_deref_stage(stage, ctx)?
-    {
-        let texpr = infer_expr(expr, ctx)?;
-        if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
-            return Err(JadeError::TypeMismatch {
-                expected: "prompt".to_string(),
-                got: jade_type_name(&texpr.ty),
-                span: *dspan,
-            });
-        }
-        let (output_type, grammar_expr, ty) = match kind {
-            DerefStage::Type(name) => {
-                let ty = parse_type_name(&name);
-                (Some(name), None, ty)
-            }
-            DerefStage::Grammar(g) => (None, Some(g), JadeType::Str),
-        };
-        return Ok(TExpr {
-            kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type, grammar_expr },
-            ty,
-            span: *dspan,
-        });
-    }
-
-    // Reject a stage that plainly cannot be applied, so the message names what
-    // it found rather than letting the call path report a mismatched callee.
-    if let Some(got) = uncallable_stage(stage, ctx) {
-        return Err(JadeError::InvalidPipeStage { got, span });
-    }
-
-    // Application. A call stage keeps its own arguments and its own span, so
-    // `5 |> add(3)` reports errors against `add(3)`, not against the pipe.
-    let call = match stage {
-        Expr::Call { callee, args, kwargs, span: cspan } => {
-            let mut args = args.clone();
-            args.insert(0, value.clone());
-            Expr::Call { callee: callee.clone(), args, kwargs: kwargs.clone(), span: *cspan }
-        }
-        other => Expr::Call {
-            callee: Box::new(other.clone()),
-            args: vec![value.clone()],
-            kwargs: vec![],
-            span,
-        },
-    };
-    infer_expr(&call, ctx)
-}
-
-/// Describe a pipe stage that is certainly not applicable, or `None` if it
+/// Describe a pipe stage that is certainly not a function, or `None` if it
 /// might be. Conservative: an unknown type is allowed through, because an
 /// imported function has no static type here.
 fn uncallable_stage(stage: &Expr, ctx: &mut TypeContext) -> Option<String> {

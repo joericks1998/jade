@@ -1,7 +1,7 @@
-// Typed dereference: LLM output converted to a bool by toBool.
+// Typed dereference: the reply converted to a bool by toBool around it.
 
 prompt p = "Is 5 greater than 3? Respond with only: true or false"
-let result = ?p |> toBool
+let result = toBool(?p)
 if result {
     print("correct!")
 } else {

@@ -17,7 +17,15 @@ sidebar_label: Changelog
 - *`int`, `float`, `str`, `bool` and `char` only check.* Each returns its argument unchanged when it already has the type, and the build refuses anything else, naming the converter to use: `int("42")` stops with `int() needs an int, got str; convert one with toInt()`. An int is also a float, so `float(5)` is 5.0. A JSON value's kind is known only when the program runs, so `int(j)` raises then if `j` is not an int.
 - *Five converters do what the type functions used to:* `toInt`, `toFloat`, `toString`, `toBool` and `toChar`. `toInt("42")` is 42, `toString(7)` is `"7"`, and `toChar(106)` is `'j'`.
 - *A type decorator checks too,* since `@int let n = v` is `let n = int(v)`. `@float let ratio = 1` holds 1.0, and `@toInt let n = "42"` converts. A class field's default is checked the same way, so `@float let rate = 1` works in a class body and `@int let count = "3"` is refused.
-- *A typed dereference names a converter:* `?p |> toInt` constrains the model to write an int and converts the reply, as `?p |> int` did. `?p |> int` is now the check `int(?p)`, which a reply, being a `str`, fails.
+- *A typed dereference names a converter,* called around the reply: `toInt(?p)` constrains the model to write an int and converts the reply. `int(?p)` is a check, which a reply, being a `str`, fails.
+
+*A pipe calls its stages once per piece, as each piece arrives.* `x |> f` used to be another spelling of `f(x)`; now a call waits for the whole value and a pipe listens to it. `design/v2-pipes.md` has the rules.
+
+- *A generator's values go through a pipe as they are yielded.* `numbers() |> double |> print` doubles and prints each value before the generator makes the next, and gives back a stream of the results. A stream already held gives its values in order, and anything else, an array included, is one piece, so `5 |> double` is still `double(5)`.
+- *A reply streams through a pipe.* `?p |> write` shows the reply as the model writes it, a piece at a time; `print(?p)` waits and prints it once. A character split across two tokens arrives whole.
+- *A typed dereference is a call around the reply:* `toInt(?p)`, `City(?p)`, and `g(?p)` for a grammar. Piping one straight after `?p`, as `?p |> toInt` did, would run it on each piece, so the build refuses it and names the call to write.
+- *A stage's other arguments are worked out once,* before the first piece. A raise in a stage stops the generator, and the generator's own `try` does not catch it.
+- *The model gives one token per call,* so a prompt in a pipe runs the program's code between tokens. Another task's prompt can run in between; the reply reads its tokens back into the model's memory and goes on.
 
 *Hex integer literals.* `0x11` is 17. A hex literal is `0x` or `0X` followed by the digits 0-9 and a-f in either case, and is an int with the int's range. A letter that is not a hex digit, as in `0x1g`, and `0x` with no digits are refused with a message saying so.
 

@@ -37,7 +37,11 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     does not, and a class field's default passes through its type
 ///     decorators. A v16 cache holds `?p |> int` folded in, which would let a
 ///     program the checker now refuses through.
-pub const CACHE_FORMAT_VERSION: u32 = 17;
+/// v18: `Expr::PromptDeref` lost its `constraint` field and `TExprKind` gained
+///     `Pipe` (2.0.3), when a pipe began calling its stages once per piece and
+///     a typed dereference became a call around the reply, `toInt(?p)`. A v17
+///     cache holds pipes as calls and `?p |> toInt` folded in.
+pub const CACHE_FORMAT_VERSION: u32 = 18;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

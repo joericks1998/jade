@@ -44,7 +44,18 @@ fn register_infer_pkg_types(ctx: &mut TypeContext) {
 pub static INFER_PKG: Package = Package {
     import_name: "std/__infer",
     global_name: "__infer",
-    fns: &["data", "config", "char_class", "taint", "text", "ready", "map", "setup", "generate"],
+    fns: &[
+        "data",
+        "config",
+        "char_class",
+        "taint",
+        "text",
+        "ready",
+        "map",
+        "setup",
+        "next",
+        "conversation",
+    ],
     register_types: register_infer_pkg_types,
 };
 

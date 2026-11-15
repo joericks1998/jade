@@ -258,6 +258,8 @@ fn cache_format_version_is_stable() {
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 17);
+    // 18 in 2.0.3: `Expr::PromptDeref` lost a field and `TExprKind::Pipe` is
+    // new, so a cached tree from 17 would not read back as what it was.
+    assert_eq!(CACHE_FORMAT_VERSION, 18);
     assert!(!JADE_VERSION.is_empty());
 }

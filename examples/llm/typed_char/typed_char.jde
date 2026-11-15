@@ -1,13 +1,12 @@
-// `?p |> toChar` — constrain the reply to exactly one character.
+// `toChar(?p)`: ask the model for exactly one character.
 //
-// `toChar` is a builtin converter, so it constrains generation with a grammar
-// rather than converting afterwards. That matters: `toChar` is also a callable
-// function, and if the stage resolved to the function the model would
-// generate unconstrained and the conversion would then fail on a whole
-// sentence. The grammar is the valuable half. `?p |> char` is a type check
-// instead, and refuses the reply, which is a str.
+// A converter called on a whole dereference shapes the reply rather than
+// converting it afterwards. That matters: if it were an ordinary call, the
+// model would generate freely and the conversion would then fail on a whole
+// sentence. `char(?p)` is a type check instead, and refuses the reply, which
+// is a str.
 
 prompt p = "Reply with a single letter."
-let c = ?p |> toChar
+let c = toChar(?p)
 print(c)
 print(c == "a")

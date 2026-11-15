@@ -1315,29 +1315,25 @@ mod parser {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-        else {
+        let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
             panic!("expected Let with PromptDeref")
         };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(constraint.is_none());
     }
 
-    /// The type stage is a pipe over the dereference, not a field on it. What it
-    /// *means* is unchanged — inference still folds it back in as an
-    /// `output_type` — but that decision now happens where the names are known.
+    /// A stage after a dereference is a pipe over it, like any other pipe;
+    /// whether the stage makes sense per piece is the type checker's question.
     #[test]
-    fn test_parse_prompt_deref_typed_int() {
-        let p = parse_src("let x = ?p |> int");
+    fn test_parse_prompt_deref_piped() {
+        let p = parse_src("let x = ?p |> clean");
         let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
             panic!("expected Let with Pipe")
         };
-        let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+        let Expr::PromptDeref { expr, .. } = value.as_ref() else {
             panic!("expected the piped value to be a PromptDeref")
         };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(constraint.is_none(), "the parser no longer sets a constraint");
-        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
+        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "clean"));
     }
 
     #[test]
@@ -1374,8 +1370,7 @@ mod parser {
     fn test_parse_postfix_deref() {
         for src in ["let x = obj.(?system)", "let x = obj~>system"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else {
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
                 panic!("expected Let with PromptDeref for {src}")
             };
             let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
@@ -1383,7 +1378,6 @@ mod parser {
             };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "system");
-            assert!(constraint.is_none());
         }
     }
 
@@ -1420,8 +1414,7 @@ mod parser {
         // the line) — the sugar is a spelling, not a semantic distinction.
         for src in ["let x = obj.(?p)", "let x = obj~>p"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else {
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
                 panic!("expected PromptDeref for {src}")
             };
             let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
@@ -1429,7 +1422,6 @@ mod parser {
             };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "p");
-            assert!(constraint.is_none());
         }
     }
 
@@ -1443,11 +1435,10 @@ mod parser {
             let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
                 panic!("expected Let with Pipe for {src}")
             };
-            let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+            let Expr::PromptDeref { expr, .. } = value.as_ref() else {
                 panic!("expected a PromptDeref for {src}")
             };
             assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-            assert!(constraint.is_none(), "the parser no longer sets a constraint");
             assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
         }
     }
@@ -1489,16 +1480,14 @@ mod parser {
         }
     }
 
-    /// `|>` has exactly one parse path now, so a stage after a dereference is an
-    /// ordinary `Expr::Pipe` and not a `PromptDeref.constraint`. This is what
-    /// makes chaining possible: the old deref arm read its stage with
-    /// `parse_or`, specifically so a second `|>` could not follow.
+    /// `|>` has exactly one parse path, so a stage after a dereference is an
+    /// ordinary `Expr::Pipe`, and a second `|>` can follow it.
     #[test]
-    fn a_deref_stage_parses_as_a_pipe_not_a_constraint() {
+    fn a_deref_stage_parses_as_a_pipe() {
         let p = parse_src("let x = ?p |> int");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
         let Expr::Pipe { value: piped, .. } = value else { panic!("expected Pipe, got {value:?}") };
-        assert!(matches!(piped.as_ref(), Expr::PromptDeref { constraint: None, .. }));
+        assert!(matches!(piped.as_ref(), Expr::PromptDeref { .. }));
     }
 
     #[test]

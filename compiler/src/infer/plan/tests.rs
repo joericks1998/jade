@@ -242,3 +242,31 @@ fn attention_over_a_quantized_cache_is_refused() {
     let e = read_test(&p).unwrap_err();
     assert!(e.contains("KV cache of ggml type 8") && e.contains("f16 cache"), "{e}");
 }
+
+/// A prompt piped through stages compiles end to end against a plan: the
+/// prelude's `reply_pieces` generator, the copy of it whose `yield` calls the
+/// stages, and `__infer.next`, which gives one token per call, all checked by
+/// LLVM's verifier. Nothing runs, so no model or dovata process is needed.
+#[test]
+fn a_piped_prompt_compiles_against_a_plan() {
+    let p = plan(
+        json!([{"op": "get_rows", "inputs": ["token_embd.weight", "inp_tokens"], "outputs": ["inpL"], "params": {}}]),
+        Vec::new(),
+    );
+    let plan = read_test(&p).unwrap();
+    let src = "prompt p = \"hi\"\nfn shout(s) { return s.upper() }\n\
+               ?p |> shout |> write\nprint(toInt(?p))\nprint(?p)\n";
+    let tokens = crate::frontend::lexer::tokenize(src).unwrap();
+    let program = crate::frontend::parser::parse(tokens).unwrap();
+    let mut tir = crate::typechecker::type_infer::infer(program).unwrap();
+    crate::typechecker::type_infer::fill_struct_literal_defaults(&mut tir).unwrap();
+    tir.stmts = crate::infer::rewrite::inject(tir.stmts).unwrap();
+    let typed = crate::typechecker::infer::check_program(&tir).unwrap();
+    let mut mir = crate::mir::lower_program(&tir, &typed).unwrap();
+    mir.infer = Some(plan);
+    let ir = crate::backend::compile(&mir, Path::new("unused"), crate::backend::Emit::Ir)
+        .unwrap()
+        .unwrap();
+    assert!(ir.contains("jade.infer.next.body"), "the token step is in the program");
+    assert!(ir.contains("piped in main"), "the generator's copy for the pipe is in it");
+}

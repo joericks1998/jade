@@ -321,3 +321,29 @@ fn paths_follow_rusts_components() {
     let (out, _, _) = run(src);
     assert_eq!(out, "b\n/\n.gz\n.hidden\n/b\n");
 }
+
+/// A pipe over a call to a generator runs each value through its stages as it
+/// is yielded, before the generator makes the next. A stage's other arguments
+/// are worked out once, a raise in a stage passes the generator's own `try`,
+/// and a generator that pipes itself compiles and terminates.
+#[test]
+fn a_pipe_calls_its_stages_as_each_value_is_yielded() {
+    let (out, err, rc) = run(concat!(
+        "fn two() {\n    print(\"a\")\n    yield 1\n    print(\"b\")\n    yield 2\n}\n",
+        "fn add(x, y) { return x + y }\n",
+        "let n = 0\nfn once() {\n    n = n + 1\n    return n * 10\n}\n",
+        "two() |> add(once()) |> print\n",
+        "print(n)\n",
+        "print(two() |> add(1))\n",
+        "let held = two()\n",
+        "print(held |> add(5))\n",
+        "fn guarded() {\n    try {\n        yield 1\n        yield 2\n    } catch e {\n        print(\"inner\")\n    }\n}\n",
+        "fn no_two(x) {\n    if x == 2 {\n        raise \"two\"\n    }\n    return x\n}\n",
+        "try {\n    guarded() |> no_two |> print\n} catch e {\n    print(f\"outer {e}\")\n}\n",
+        "fn down(k) {\n    if k > 0 {\n        down(k - 1) |> print\n    }\n    yield k\n}\n",
+        "print(down(2))\n",
+    ));
+    assert_eq!(err, "");
+    assert_eq!(rc, 0);
+    assert_eq!(out, "a\n11\nb\n12\n1\na\nb\n[2, 3]\na\nb\n[6, 7]\n1\nouter two\n0\n1\n[2]\n");
+}

@@ -1,27 +1,19 @@
-// A grammar stage constrains generation and leaves the reply a stream.
+// A grammar around a whole dereference constrains how the model writes it.
 //
-// `?p |> g` sends `g`'s grammar with the request and carries its anchors along
-// with the resulting stream. Printing that stream shows tokens as they arrive
-// with the muted region suppressed; reading it as a value gives the full text,
-// muted span included.
+// `g(?p)` sends `g`'s grammar with the request, the way `toInt(?p)` asks for an
+// int, and the reply arrives whole, like any typed dereference. A pipe straight
+// after `?p` runs once per piece of an unconstrained reply instead.
 //
-// The mute region is (anchor, stop): output stays visible until the model emits
-// "<t>", is suppressed until "</t>", then becomes visible again. A grammar with
-// no anchor mutes from the very first token instead, since the whole reply is
-// then structured output.
-//
-// This used to be spelled `stream(?p, mute_on = [g])`. That builtin is gone as
-// of v1.2.4: it existed only because a grammar-constrained dereference used to
-// collapse into a blocking call, leaving no stream to print. It does not any
-// more, so one operator covers both.
+// This used to be spelled `?p |> g`, which streamed the constrained reply and
+// hid the text between the grammar's anchors, "<t>" and "</t>", while it
+// printed. A pipe now always runs per piece, so a grammar wraps the reply. v2
+// does not compile grammars yet.
 
 prompt p = "Reply with <t>a</t> and nothing else."
 
 let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
 
-// Live output, with the region between the anchors suppressed.
-print(?p |> g)
+print(g(?p))
 
-// The same dereference read as a value carries the muted text too.
-let out = ?p |> g
+let out = g(?p)
 print(len(out) > 0)

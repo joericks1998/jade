@@ -18,7 +18,7 @@ These are Jade's value types.
 | `bytes` | A counted sequence of raw octets; binary data that is not text |
 | `array` | Mutable array with index access; may hold values of different types |
 | `dict` | String-keyed mutable hash map |
-| `stream` | A buffered sequence produced by a `yield`ing function, or by `?p` |
+| `stream` | A buffered sequence produced by a `yield`ing function, or by a pipe over one |
 | `struct` | User-defined record type with named fields |
 | `fn` | First-class function value |
 | `prompt` | Text to send to a model; `?p` dereferences one |
@@ -162,7 +162,7 @@ for c in s { print(c) }  // four lines: "é" is one character, not two
 
 A `char` is a single Unicode scalar, not a byte. It is an *immediate* value, meaning it fits inside the tagged value word alongside `int`, `bool`, and `nil`. Scanning a string therefore allocates nothing. The old one-character-string behavior allocated once per character.
 
-There is no char literal. A char comes from indexing a string, iterating one, `toChar("x")`, `toChar(<number>)`, or `?p |> toChar`.
+There is no char literal. A char comes from indexing a string, iterating one, `toChar("x")`, `toChar(<number>)`, or `toChar(?p)`.
 
 `toInt(c)` gives a character's Unicode scalar. `toChar(n)` builds a character from a number, and refuses anything that is not a valid scalar rather than substituting a replacement character.
 
@@ -225,7 +225,7 @@ Bytes carry a trust marker the same way strings do. So `sh.exec` refuses `fs.rea
 
 ## Stream
 
-A function whose body contains a `yield` returns a *stream* rather than a single value. The body runs all the way through, filling a buffer, and the caller receives that buffer.
+A function whose body contains a `yield` returns a *stream* rather than a single value. Called, the body runs all the way through, filling a buffer, and the caller receives that buffer. Piped, `doubles(4) |> print`, each value goes to the stage at the moment it is yielded instead; see [Operators](operators#pipe).
 
 ```jade
 fn doubles(n) {
@@ -245,7 +245,7 @@ for x in s { print(x) }   // the same values again
 
 A stream is a buffer, not a one-shot channel. It keeps everything it produced, so reading it twice gives the same values twice. There is no "already consumed" state to keep track of. `len` and indexing work for the same reason.
 
-A prompt dereference is a stream too. `?p` produces one lazily, so `print(?p)` shows tokens as they arrive. You can still read the same value again afterwards.
+A prompt's reply arrives in pieces too. `?p` waits for the whole reply and gives a `str`, while `?p |> write` shows each piece as the model writes it, and `?p |> f` gives back a stream of what `f` returned.
 
 A bare `return` stops a generator early. Writing `return x` is a compile error, because a function that yields already produces a stream. Returning a value as well would ask it to be two things at once.
 
@@ -260,7 +260,7 @@ prompt p = "Name one prime number under 10."
 print(?p)
 ```
 
-`?p` on its own produces a stream of the reply. A `|>` stage after it limits what the model may generate and coerces the result, so `?p |> toInt` gives you an `int`. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#what-a-stage-can-be) for what a stage may be.
+`?p` on its own gives the whole reply as a `str`. A converter around it limits what the model may generate and converts the result, so `toInt(?p)` gives you an `int`. A pipe after it, `?p |> write`, runs once per piece of the reply as the model writes it. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#pipe) for how pipes work.
 
 ## Handle
 

@@ -1,11 +1,8 @@
-// A pipe stage has to be something you can apply.
+// A pipe stage has to be a function, called once per piece.
 //
-// `5 |> 3` asks to pipe a value into an integer, which means nothing. Before
-// v1.2.0 the parser caught this by matching on the shape of the right-hand
-// side, so the message talked about tokens: "expected function or call on
-// right side of |>, got expression". Now the stage survives into the AST and
-// type inference rejects it, which means the error can say what the stage
-// actually turned out to be.
+// `5 |> 3` asks to pipe a value into an integer, which means nothing. The
+// stage survives into the AST and type inference rejects it, so the error can
+// say what the stage turned out to be.
 
 fn double(x) {
     return x * 2

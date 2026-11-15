@@ -745,6 +745,46 @@ impl<'a> Checker<'a> {
                     Some(t) => self.named_type(t, span),
                 }
             }
+            // A pipe binds its piece the way `for` binds its variable: to a
+            // stream's element, or to the whole source when that is one piece.
+            // Its value keeps the source's shape. A source whose type no pass
+            // has settled yet waits for one that has.
+            TExprKind::Pipe { source, hoisted, piece, body } => {
+                let st = self.check_expr(source, f);
+                let mut scope = HashMap::new();
+                for (name, v) in hoisted {
+                    let vt = self.check_expr(v, f);
+                    let slot = self.slot(f, addr(v) + 1);
+                    self.unify(&slot, &vt, v.span, "a pipe stage's argument");
+                    scope.insert(name.clone(), slot);
+                }
+                let pslot = self.slot(f, addr(e) + 1);
+                let result = self.slot(f, addr(e) + 2);
+                let streamed = match self.store.shallow(&st) {
+                    Ty::Stream(el) => {
+                        self.unify(&pslot, &el, span, "a pipe's piece");
+                        Some(true)
+                    }
+                    Ty::Var(_) if !self.final_pass => None,
+                    _ => {
+                        self.unify(&pslot, &st, span, "a pipe's piece");
+                        Some(false)
+                    }
+                };
+                scope.insert(piece.clone(), pslot);
+                f.scopes.push(scope);
+                f.narrowed.push(HashMap::new());
+                let bt = self.check_expr(body, f);
+                f.scopes.pop();
+                f.narrowed.pop();
+                match streamed {
+                    Some(true) => {
+                        self.unify(&result, &Ty::Stream(Box::new(bt)), span, "a pipe's value")
+                    }
+                    Some(false) => self.unify(&result, &bt, span, "a pipe's value"),
+                    None => result,
+                }
+            }
             TExprKind::Await { expr } => {
                 let t = self.check_expr(expr, f);
                 match self.store.shallow(&t) {

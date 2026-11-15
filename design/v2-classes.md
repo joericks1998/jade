@@ -159,7 +159,7 @@ class Puppy(Dog) {
 
 - *On a built-in type*, the decorator checks, as `@f let x = v` already means `let x = f(v)` and `int()` only checks: `@int let n = 42` keeps the int, `@int let n = "42"` is refused, and `@float let x = 1` makes it 1.0, since an int is also a float. A converter decorates the same way: `@toInt let n = "42"` makes `n` the int 42.
 
-  *Changed in 2.0.3.* This bullet first said the decorator converts, as `int()` then did. Joe reversed that once Jade compiled only: `int`, `float`, `str`, `bool` and `char` check a value's type and return it unchanged, and `toInt`, `toFloat`, `toString`, `toBool` and `toChar` convert. `?p |> int` became `?p |> toInt` too.
+  *Changed in 2.0.3.* This bullet first said the decorator converts, as `int()` then did. Joe reversed that once Jade compiled only: `int`, `float`, `str`, `bool` and `char` check a value's type and return it unchanged, and `toInt`, `toFloat`, `toString`, `toBool` and `toChar` convert. `?p |> int` became `?p |> toInt` too, and then `toInt(?p)` once pipes ran once per piece; see `v2-pipes.md`.
 - *On a class*, it declares the variable's class, which may be a parent of the value's: `@Animal let a = Dog { … }` lets `a` later hold a `Cat`. A class that is not the value's own or one of its ancestors is a compile error.
 - *On a field*, it gives the field a type in place of a default: `@int count`, or `@public @int count` for a public one.
 

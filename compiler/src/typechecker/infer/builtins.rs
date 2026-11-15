@@ -884,9 +884,8 @@ impl<'a> Checker<'a> {
                     "taint" => (vec![Ty::Str], Ty::Str),
                     "ready" => (Vec::new(), Ty::Bool),
                     "setup" | "map" => (Vec::new(), Ty::Nil),
-                    "generate" => {
-                        (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int], Ty::Array(Box::new(Ty::Int)))
-                    }
+                    "next" => (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int, Ty::Int], Ty::Int),
+                    "conversation" => (Vec::new(), Ty::Int),
                     // A prompt's text, from a prompt or a string.
                     "text" => {
                         if !count(1..=1) {

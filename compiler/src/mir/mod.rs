@@ -43,6 +43,7 @@ mod display;
 pub mod lower;
 mod ops;
 mod packages;
+mod pipe;
 pub mod taskcheck;
 
 #[cfg(test)]
@@ -678,9 +679,13 @@ pub enum InferFn {
     Map,
     /// `() -> nil`: build the GPU buffers and kernels over the mapped regions.
     Setup,
-    /// `(ids: [int], max: int) -> [int]`: run the model on a prompt's tokens and
-    /// return the ones it generates, greedily, up to a stop token or `max`.
-    Generate,
+    /// `(ids: [int], conversation: int, prompt_len: int) -> int`: the token
+    /// the model picks after `ids`, greedily, or -1 at a stop token or when
+    /// the context is full. `ids` is the prompt's tokens and then the reply's
+    /// so far; only the ones the model has not seen yet go through it.
+    Next,
+    /// `() -> int`: a new conversation's id, which `Next` takes.
+    Conversation,
     /// `() -> int`: the most tokens a reply runs to, `max_tokens()`.
     MaxTokens,
     /// `(n: int) -> int`: set it, at least 1, and return what it is now.
@@ -941,7 +946,7 @@ impl Op {
                 | Op::Sh(_)
                 | Op::Random(RandomFn::Int | RandomFn::Index)
                 | Op::Json(_)
-                | Op::Infer(InferFn::Map | InferFn::Setup | InferFn::Generate)
+                | Op::Infer(InferFn::Map | InferFn::Setup | InferFn::Next)
                 | Op::Http(..)
                 | Op::UhttpStream(_)
                 | Op::Native(_)
