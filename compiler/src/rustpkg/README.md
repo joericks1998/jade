@@ -37,7 +37,7 @@ Until 2.0.5 a native package was a C library behind a shim generated from its he
 
 ## Who uses it
 
-*Used by:* `aot/imports.rs`, which calls `build` the first time a program's `use` names a Rust package, turns each struct into a class and each function into a `NativeSig` (`typechecker/infer/native.rs`), and passes the `Link` on to MIR and the backend, where `backend/link.rs` links it. `cli/pkg.rs` calls `build` when `jade pkg add` adds a Rust package. `pkg::resolved_libraries` lists the packages with `dependencies`.
+*Used by:* `mir/imports.rs`, which calls `build` the first time a program's `use` names a Rust package, turns each struct into a class and each function into a `NativeSig` (`typechecker/infer/native.rs`), and passes the `Link` on to MIR and the backend, where `link/mod.rs` links it. `cli/pkg.rs` calls `build` when `jade pkg add` adds a Rust package. `pkg::resolved_libraries` lists the packages with `dependencies`.
 
 *Depends on:* `project/` for the manifest, the `object` crate for reading the archive, and cargo, which must be on `PATH` when a program uses a Rust package. Fetching a pinned toolchain instead is the first follow-up in the design.
 

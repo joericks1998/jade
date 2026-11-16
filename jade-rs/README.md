@@ -83,7 +83,7 @@ Anything else stops the package's build with a message listing these. So do a ge
 
 ## Who uses it
 
-*Used by:* every Rust package a Jade program depends on, such as [`examples/ffi/rust_values/values/`](../examples/ffi/rust_values/values/src/lib.rs) and [`examples/ffi/rust_zlib/zlib/`](../examples/ffi/rust_zlib/zlib/src/lib.rs). The compiler never links this crate: it reads the records it produces, in [`compiler/src/rustpkg/`](../compiler/src/rustpkg/README.md), and calls the wrappers from the code [`compiler/src/backend/native.rs`](../compiler/src/backend/native.rs) generates.
+*Used by:* every Rust package a Jade program depends on, such as [`examples/ffi/rust_values/values/`](../examples/ffi/rust_values/values/src/lib.rs) and [`examples/ffi/rust_zlib/zlib/`](../examples/ffi/rust_zlib/zlib/src/lib.rs). The compiler never links this crate: it reads the records it produces, in [`compiler/src/rustpkg/`](../compiler/src/rustpkg/README.md), and calls the wrappers from the code [`compiler/src/codegen/native.rs`](../compiler/src/codegen/native.rs) generates.
 
 *Depends on:* `jade-rs-macros`, and nothing else.
 

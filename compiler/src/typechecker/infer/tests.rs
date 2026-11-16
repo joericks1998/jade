@@ -15,7 +15,7 @@ fn check(src: &str) -> Result<Typed, JadeError> {
     let mut program =
         crate::typechecker::resolve::resolve(program).expect("the per-file pass accepts it");
     // A std package written in Jade is loaded the way a build loads it.
-    program.stmts = crate::aot::imports::namespace_program(program.stmts).expect("imports");
+    program.stmts = crate::mir::imports::namespace_program(program.stmts).expect("imports");
     check_members(&program)?;
     crate::typechecker::resolve::fill_struct_literal_defaults(&mut program).expect("defaults fill");
     check_program(&program)

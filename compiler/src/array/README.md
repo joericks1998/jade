@@ -21,6 +21,6 @@ Each std package is a flat top-level module, so the registry in `src/builtins/` 
 *Used by:*
 
 - [`src/builtins/`](../builtins/README.md) lists `ARRAY_PKG` in the package table, which the per-file pass in `typechecker/resolve.rs` reads to bind the `array` name where a `use` names the package and to refuse a function the package does not have.
-- `typechecker/infer/builtins.rs` gives each call its static type, and `mir/packages.rs` and `mir/ops.rs` lower it to a MIR operation.
-- `src/backend/collections.rs` emits the code, into a program only when that program uses it.
+- `typechecker/infer/builtins.rs` gives each call its static type, and `mir/lower/packages.rs` and `mir/lower/ops.rs` lower it to a MIR operation.
+- `src/codegen/support/collections.rs` emits the code, into a program only when that program uses it.
 - `builtins::primitive_method_tables` lists `ARRAY_METHODS` under `array`, and `builtins::primitive_method_arity` holds each method's argument count.

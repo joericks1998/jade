@@ -4,7 +4,7 @@
 //! that declares its function names. Nothing here runs: the per-file pass in
 //! `typechecker/resolve.rs` binds a package's name where a `use` names it,
 //! `typechecker/infer/builtins.rs` types each call, `mir/` lowers it, and
-//! `src/backend/` emits the code. Since 2.0.8 the table holds only the value
+//! `src/codegen/` emits the code. Since 2.0.8 the table holds only the value
 //! types' own packages, `string`, `array`, `dict` and `bytes`, and the
 //! inference prelude's `__infer`.
 //!

@@ -50,7 +50,7 @@ The whole surface between this module and the rest of the compiler is one functi
 
 *Depends on:* `project/` for `ProjectManifest`, `DependencyEntry`, and `LibraryEntry`, and `rustpkg::dependencies` to list a manifest's Rust packages.
 
-*Used by:* `cli/pkg.rs`, for the commands; `cli/build.rs`, which calls `ensure_ready`; and `aot/imports.rs` and `cli/check.rs`, which resolve imports against `resolved_libraries`.
+*Used by:* `cli/pkg.rs`, for the commands; `cli/build.rs`, which calls `ensure_ready`; and `mir/imports.rs` and `cli/check.rs`, which resolve imports against `resolved_libraries`.
 
 ## Gotchas
 

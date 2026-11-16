@@ -59,7 +59,7 @@ fn run(tag: &str, src: &str) -> String {
     let program = crate::typechecker::resolve::resolve(ast).unwrap();
     let bin = dir.join("main");
     let cache = dir.join("lib");
-    crate::aot::compile(program, Some(&file), &bin, crate::aot::Emit::Binary, Some(&cache))
+    crate::build::compile(program, Some(&file), &bin, crate::build::Emit::Binary, Some(&cache))
         .unwrap();
     let out = Command::new(&bin).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);

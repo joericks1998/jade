@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-The fixtures for `std::fs`: reading and writing files as text and as bytes, the questions `exists`, `is_file`, `is_dir` and `size`, listing, making, copying, renaming and removing, the two standard streams, and what is trusted. Since 2.0.8 the package is written in Jade, `compiler/src/lib/fs.jde`, with each C library call a hook in `compiler/src/backend/sys_fs.rs`, and every fixture here prints what the backend version before it printed.
+The fixtures for `std::fs`: reading and writing files as text and as bytes, the questions `exists`, `is_file`, `is_dir` and `size`, listing, making, copying, renaming and removing, the two standard streams, and what is trusted. Since 2.0.8 the package is written in Jade, `compiler/src/lib/fs.jde`, with each C library call a hook in `compiler/src/codegen/sys/fs.rs`, and every fixture here prints what the backend version before it printed.
 
 ## Why it was built
 

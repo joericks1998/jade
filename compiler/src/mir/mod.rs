@@ -40,10 +40,8 @@
 //! dropped on every path without tracking which paths set it.
 
 mod display;
+pub mod imports;
 pub mod lower;
-mod ops;
-mod packages;
-mod pipe;
 pub mod taskcheck;
 
 #[cfg(test)]
@@ -667,7 +665,7 @@ pub enum SysFn {
     /// positive returns at once.
     Sleep,
     /// `(secs: float) -> future of nil`: a task that only sleeps, from
-    /// `backend/tasks.rs`.
+    /// `codegen/support/tasks.rs`.
     After,
     /// `(tz: str?, ts: int) -> int`: seconds east of UTC at an instant, in a
     /// named zone or the system's. `TZ` is set for the moment it takes, under

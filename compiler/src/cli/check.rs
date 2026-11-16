@@ -8,7 +8,7 @@ use crate::{
 /// Checks that run after the per-file pass, on both the cached and uncached paths.
 ///
 /// Two of them. The import walk confirms every `use` names something that
-/// exists, and `aot::would_build` runs the whole build short of LLVM: the
+/// exists, and `build::would_build` runs the whole build short of LLVM: the
 /// static checker, MIR lowering, and `mir::taskcheck`, which rejects shared
 /// mutation across tasks.
 ///
@@ -19,7 +19,7 @@ use crate::{
 /// reported `ok` and then failed at run time.
 fn post_checks(program: &crate::frontend::ast::Program, path: &str) -> Result<(), String> {
     check_imports(program, path)?;
-    crate::aot::would_build(program, Some(Path::new(path)))
+    crate::build::would_build(program, Some(Path::new(path)))
 }
 
 /// Resolve every import reachable from this file, without loading any of them.

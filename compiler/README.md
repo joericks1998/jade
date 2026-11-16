@@ -1,6 +1,6 @@
 # compiler: the Jade toolchain
 
-This directory is `jade`: the lexer, parser, type checker, LLVM ahead-of-time backend, package manager and CLI, written in Rust. It is one of two crates in the repo's Cargo workspace, with its own `Cargo.toml`, version and releases; the other is [`dovata/`](../dovata/README.md), the process that holds a model's memory. What Jade is, and the rest of the repo, are in the [root README](../README.md).
+This directory is `jade`: the lexer, parser, type checker, MIR, LLVM code generator and linker, package manager and CLI, written in Rust. It is one of two crates in the repo's Cargo workspace, with its own `Cargo.toml`, version and releases; the other is [`dovata/`](../dovata/README.md), the process that holds a model's memory. What Jade is, and the rest of the repo, are in the [root README](../README.md).
 
 The commands below run from the repo root, where the workspace, `target/` and `examples/` are.
 
@@ -12,9 +12,11 @@ Every directory under `src/` has its own `README.md`. Read them in the order the
 
 1. [`src/frontend/`](src/frontend/README.md) turns source text into tokens and then an AST. Start here if you are touching syntax.
 2. [`src/typechecker/`](src/typechecker/README.md) rewrites each file's tree in a per-file pass, and its `infer/` gives every value one static type. Start here if you are touching types.
-3. [`src/mir/`](src/mir/README.md) lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
-4. [`src/backend/`](src/backend/README.md) turns MIR into LLVM IR and links a binary against the C library alone. What v1 called the runtime is support code here, emitted into each program only where it is used.
-5. [`examples/`](../examples/README.md), at the repo root, is the fixture suite. A language change starts here.
+3. [`src/mir/`](src/mir/README.md) merges a program's imports into one tree, then lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
+4. [`src/codegen/`](src/codegen/README.md) turns MIR into LLVM IR, which LLVM compiles into object files. What v1 called the runtime is support code here, emitted into each program only where it is used.
+5. [`src/link/`](src/link/README.md) joins the object files and the C library into a binary, with LLD inside the compiler.
+6. [`src/build/`](src/build/README.md) is the driver that runs those steps in order.
+7. [`examples/`](../examples/README.md), at the repo root, is the fixture suite. A language change starts here.
 
 Three more that come up often:
 
@@ -32,7 +34,7 @@ You need two things installed.
 
 *Rust 1.85 or later.* Install it from [rustup.rs](https://rustup.rs). The crate uses edition 2024, so an older toolchain will not build it.
 
-*LLVM 18.* `jade build` compiles and links in-process rather than shelling out to a separate compiler, so LLVM and its linker, LLD, are build dependencies of the toolchain itself. `build.rs`, beside this README, compiles `src/backend/lld.cpp` against LLD's libraries from the same install. A released `jade` binary needs nothing installed; only building from source does.
+*LLVM 18.* `jade build` compiles and links in-process rather than shelling out to a separate compiler, so LLVM and its linker, LLD, are build dependencies of the toolchain itself. `build.rs`, beside this README, compiles `src/link/lld.cpp` against LLD's libraries from the same install. A released `jade` binary needs nothing installed; only building from source does.
 
 ```sh
 brew install llvm@18                                              # macOS
@@ -83,15 +85,16 @@ source text
   → frontend/lexer.rs         → Vec<Token>
   → frontend/parser.rs        → Program (AST)
   → typechecker/resolve.rs    → Program (AST, rewritten), per file
-  → aot/imports.rs            → one merged Program
+  → mir/imports.rs            → one merged Program
   → typechecker/infer/        → Typed: one static type for every value
-  → mir/                      → MIR, checked by mir/taskcheck.rs
-  → backend/                  → LLVM IR → object → binary, linked by LLD
+  → mir/lower/                → MIR, checked by mir/taskcheck.rs
+  → codegen/                  → LLVM IR, which LLVM compiles into object files
+  → link/                     → binary, linked by LLD
 ```
 
 Jade has one engine, the compiler. `jade build` runs the whole chain, `jade run` and `jade test` build into a scratch directory and run the binary, and `jade check` runs everything short of LLVM. Every example's output is recorded beside it as `<name>.expected`, and `src/scripts/golden.sh` builds each one and compares. Until v1.4.8 there was also a bytecode VM, and until phase 6 of `design/v2-static-values.md` compiled programs linked a shared runtime; both are gone.
 
-`jade build` needs no build daemon and no system linker. `src/backend/` lowers MIR through LLVM 18, and `src/backend/link.rs` links the object with LLD inside the same process. A daemon used to exist because code generation lived in a separate repository. Once it moved here, the daemon's only remaining job was forwarding a request to a function this crate already exported, so it was removed.
+`jade build` needs no build daemon and no system linker. `src/build/` runs the steps: `src/codegen/` lowers MIR through LLVM 18 into object files, and `src/link/` links them with LLD inside the same process. A daemon used to exist because code generation lived in a separate repository. Once it moved here, the daemon's only remaining job was forwarding a request to a function this crate already exported, so it was removed.
 
 ---
 
@@ -110,8 +113,8 @@ Follow the pipeline in order:
 3. Parse rule or rules in `frontend/parser.rs`
 4. Rewriting in `typechecker/resolve.rs`, when it needs to know what a name is
 5. Static types in `typechecker/infer/`
-6. Lowering to MIR in `mir/`
-7. LLVM code in `backend/`
+6. Lowering to MIR in `mir/lower/`
+7. LLVM code in `codegen/`
 8. Error variant in `frontend/error.rs`, if the feature can fail
 
 Not every feature needs all eight steps. Syntax that desugars to an AST node you already have stops at step 3, which costs nothing downstream. Reach for that when you can. The `~>` operator is a good example. It is a parser-level rewrite to a node that already existed, so nothing past the parser ever had to learn about it.
@@ -120,7 +123,7 @@ Operator precedence lives in the parser's call chain, which runs `parse_or` then
 
 ### Adding a built-in
 
-A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs`; give it a static type in `typechecker/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
+A built-in is a name in a central registry plus code codegen emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs`; give it a static type in `typechecker/infer/builtins.rs`; lower it in `mir/lower/packages.rs`; and emit its code from the matching file in `src/codegen/support/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
 
 A whole new package also needs `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`.
 
@@ -130,7 +133,7 @@ Every failure returns a `JadeError`, and every variant carries a `Span`.
 
 *No panics in the compiler.* That includes `unwrap()` on anything derived from user input.
 
-Errors one file can settle without types, such as an undefined name, belong in `typechecker/resolve.rs`; type errors belong in `typechecker/infer/`; neither belongs in MIR or the backend. By the time MIR is lowered, types are already settled.
+Errors one file can settle without types, such as an undefined name, belong in `typechecker/resolve.rs`; type errors belong in `typechecker/infer/`; neither belongs in MIR or codegen. By the time MIR is lowered, types are already settled.
 
 Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be applied to a field, write 'obj.(?p)' or 'obj~>p' instead` over `unexpected token`.
 
@@ -138,7 +141,7 @@ Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be a
 
 Tests live in `#[cfg(test)] mod tests` blocks, either inline or in a sibling `tests.rs` wired up with `mod tests;`. There is no top-level `tests/` directory.
 
-Three sets of helpers cover most cases. `run(src)` in `backend/tests.rs` builds a program, runs it, and returns its output and exit status. `lower(src)` and `text(src)` in `mir/tests.rs` lower a program to MIR. `parse_src(src)` and `parse_src_err(src)` in `frontend/tests.rs` cover the parser alone.
+Three sets of helpers cover most cases. `run(src)` in `codegen/tests.rs` builds a program, runs it, and returns its output and exit status. `lower(src)` and `text(src)` in `mir/tests.rs` lower a program to MIR. `parse_src(src)` and `parse_src_err(src)` in `frontend/tests.rs` cover the parser alone.
 
 *Write the `.jde` fixture in `examples/` first, then make the Rust match it.* That is the established workflow here, and it tends to surface design problems before you have built on top of them.
 

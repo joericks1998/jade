@@ -313,7 +313,7 @@ pub enum JadeError {
     /// with an uncatchable Rust panic (`thread 'main' has overflowed its
     /// stack`) at a depth of roughly 700-750. v1's VM and runtime raised it; a
     /// v2 binary raises a `RuntimeError` with the same words, from the depth
-    /// check `src/backend/func.rs` puts at the top of every function.
+    /// check `src/codegen/func.rs` puts at the top of every function.
     RecursionLimitExceeded { span: Span },
 }
 

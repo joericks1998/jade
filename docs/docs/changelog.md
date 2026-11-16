@@ -4,6 +4,23 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.11
+
+*The compiler's directories follow the build's steps.* Nothing a program can see changes: every example builds and prints what it printed before, and `--emit ir` and `--emit mir` show the same text. This release is for people working on the compiler.
+
+```
+src/frontend/      source text → tokens → AST
+src/typechecker/   names checked per file, then a static type for every value
+src/mir/           imports merged into one program, then lowered into MIR
+src/codegen/       MIR → LLVM IR, which LLVM compiles into object files
+src/link/          object files and the C library → the binary
+src/build/         the driver that runs them in order
+```
+
+- *`src/backend/` is now `src/codegen/`,* since it writes LLVM IR and LLVM does the assembling. Its support code for values moved into `codegen/support/`, its `__sys` hooks into `codegen/sys/`, and the library cache's plan beside the cache, in `codegen/libcache/`. The Linux start-up code, `_start`, moved into `codegen/start.rs`, since codegen writes it into the program.
+- *Linking is `src/link/`,* with LLD's entry point, `lld.cpp`. Codegen no longer calls the linker: it returns the object files, and the driver links them. The driver also makes the one retry the library cache needs, linking once more without cached objects when a link with them fails.
+- *`src/aot/` is gone.* The import pass, the first step toward MIR, is `src/mir/imports.rs`, and the driver is `src/build/mod.rs`. The lowering files are in `src/mir/lower/`, so `src/mir/` holds MIR itself, its text form and the task check.
+
 ## v2.0.10
 
 *A condition goes in parentheses.* The condition of an `if`, an `elif` or a `while` is one parenthesized expression, followed by the block's `{`. This is a breaking change: a program written for 2.0.9 with a bare condition no longer compiles, and `jade fmt` adds the parentheses for it.

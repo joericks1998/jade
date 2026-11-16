@@ -228,7 +228,7 @@ pub(crate) fn try_compile_file(
     // this a fresh clone builds against nothing at all, and an edited local
     // package is silently ignored in favour of whatever `libs/` last held. The
     // project is found from the source file's directory because that is how
-    // `aot/imports.rs` finds it. A manifest that will not parse is reported
+    // `mir/imports.rs` finds it. A manifest that will not parse is reported
     // here rather than skipped, so the error names jade.toml and not a `use`.
     if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from) {
         let manifest = crate::project::load_project(&root).map_err(|e| format!("error: {e}"))?;
@@ -242,7 +242,7 @@ pub(crate) fn try_compile_file(
         std::env::current_dir().map(|d| d.join(out)).unwrap_or_else(|_| out.to_path_buf())
     };
 
-    let lib_cache = crate::backend::default_lib_cache();
+    let lib_cache = crate::codegen::default_lib_cache();
     crate::build::build(&program, &abs_source, &abs_out, emit, Some(&lib_cache))
         .map_err(|e| format!("{path}: build error: {e}"))
 }

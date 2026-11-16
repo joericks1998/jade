@@ -4,7 +4,7 @@
 
 Two things that belong together. The method surface of the `bytes` type, which is `len`, `decode`, and `slice`. And the `std::bytes` package, which is the three ways to *build* a blob: `zeros`, `from_ints`, and `concat`.
 
-The value itself is not here, and neither is any behavior. A blob is a heap object with the string layout, `{ rc, len, trust, bytes…, 0 }`, and `src/backend/bytes.rs` emits every method and package function into the program that uses it. Since v2 this directory only names them; `typechecker/infer/builtins.rs` gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
+The value itself is not here, and neither is any behavior. A blob is a heap object with the string layout, `{ rc, len, trust, bytes…, 0 }`, and `src/codegen/support/bytes.rs` emits every method and package function into the program that uses it. Since v2 this directory only names them; `typechecker/infer/builtins.rs` gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
 
 ## Why `bytes` is not just a string
 
@@ -42,20 +42,20 @@ It also means the write has *two* targets and not one. A local binding is a `Pla
 
 *`slice` clamps instead of raising.* Reading past the end is how you take the tail of a buffer, and every caller would otherwise write the same `min()` call.
 
-*A failed decode raises a `RuntimeError` struct.* `jade.bytes.decode`, emitted by `src/backend/bytes.rs`, raises through `fail_str` in `src/backend/errors.rs`, like every other failure in support code. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
+*A failed decode raises a `RuntimeError` struct.* `jade.bytes.decode`, emitted by `src/codegen/support/bytes.rs`, raises through `fail_str` in `src/codegen/errors.rs`, like every other failure in support code. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
 
 ## Who uses it
 
-`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. `typechecker/infer/builtins.rs` gives each call its static type, `mir/` lowers the methods and package functions to `Op::Bytes*` operations, and `src/backend/bytes.rs` emits the code for each, including `jade.bytes.set` for writing an octet. So a change to behavior lands there, and a new method or function also needs its name added here.
+`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. `typechecker/infer/builtins.rs` gives each call its static type, `mir/` lowers the methods and package functions to `Op::Bytes*` operations, and `src/codegen/support/bytes.rs` emits the code for each, including `jade.bytes.set` for writing an octet. So a change to behavior lands there, and a new method or function also needs its name added here.
 
-The message text for every failure lives once, in `src/backend/bytes.rs`, and matches what v1 printed. A program can catch these, which makes the wording part of the language rather than an implementation detail.
+The message text for every failure lives once, in `src/codegen/support/bytes.rs`, and matches what v1 printed. A program can catch these, which makes the wording part of the language rather than an implementation detail.
 
 The things that produce `bytes` values elsewhere: `read_bytes` and `read_stdin_bytes` in `std::fs`, `get_bytes` and `post_bytes` in `std::http` and `std::uhttp`, `str.encode()`, and a native package handing one back across the FFI.
 
 ## Building and testing
 
 ```sh
-cargo test backend::
+cargo test codegen::
 ./target/debug/jade run examples/bytes/construct/construct.jde
 ./target/debug/jade run examples/bytes/buffer/buffer.jde
 ./compiler/src/scripts/golden.sh

@@ -25,9 +25,7 @@
 //! ## Where it sits
 //!
 //! It runs on the whole program after imports are merged and struct defaults
-//! are filled, the same point `aot::compile_with_mode` already reaches. Until
-//! the static backend replaces the bytecode backend, it is a gate: a program it
-//! rejects does not build, even though the bytecode backend could run it.
+//! are filled, in `build::compile`, and a program it rejects does not build.
 //! See `design/v2-static-values.md` for the rules it enforces and why.
 
 mod builtins;

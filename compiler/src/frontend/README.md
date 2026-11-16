@@ -7,7 +7,7 @@ This is the front half of the Jade compiler. It takes raw `.jde` source text and
 It is the first link in the one-way chain that defines the toolchain:
 
 ```
-source text → frontend → typechecker (per-file pass, then static types) → mir → backend
+source text → frontend → typechecker (per-file pass, then static types) → mir → codegen → link
 ```
 
 No stage reaches backwards, so a change here ripples forward and never the other way.
@@ -43,7 +43,7 @@ In v1.2.0, `|>` became an ordinary pipe node, and the per-file pass lowers it. T
 
 *Depends on:* nothing else in the crate. This is the bottom of the stack.
 
-*Used by:* nearly everything. `typechecker/resolve.rs` rewrites the `Program`, `aot/`, `typechecker/infer/`, `infer/rewrite.rs` and `mir/` read it, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and the backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
+*Used by:* nearly everything. `typechecker/resolve.rs` rewrites the `Program`, `mir/imports.rs`, `typechecker/infer/`, `infer/rewrite.rs` and `mir/` read it, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, MIR, and codegen. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
 
 ## Gotchas
 

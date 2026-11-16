@@ -229,7 +229,7 @@ pub fn build(p: &Places) -> Result<Built, String> {
     })?;
     // rustc's note is a diagnostic, rendered to stderr; a rustc that prints it
     // as `--print` output instead puts it on stdout, so both are read. When it
-    // is in neither, `backend::link` supplies what Rust's standard library
+    // is in neither, `link` supplies what Rust's standard library
     // needs on glibc.
     let mut native_libs = native_libs_from(&stderr);
     if native_libs.is_empty() {

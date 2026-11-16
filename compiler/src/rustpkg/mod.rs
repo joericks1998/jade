@@ -4,7 +4,7 @@
 //! (`jade-rs/`), named in `jade.toml` with `abi = "rust"`. [`build`] writes the
 //! project's generated crate and builds it with cargo (`cargo.rs`), reads the
 //! description records out of the staticlib (`meta.rs`), and hands back each
-//! package's functions and structs with the library to link. `aot::imports` calls it
+//! package's functions and structs with the library to link. `mir::imports` calls it
 //! the first time a program's `use` names a Rust package, so `jade check` builds the
 //! Rust too: the records are the only place a signature comes from.
 //!
