@@ -53,7 +53,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *Every build* makes every cached instance's module, which costs 2 to 4 ms for a program's 8 to 16 instances on a warm cache, hashes it, and links the object when it is there. A miss optimizes the module and writes the object to a name of its own in the same directory, then renames it into place, so two builds at once never read part of one. The modules are independent, so they are built on up to 8 threads, each with its own LLVM context and target machine.
 - *State has one definition.* The thread's error slot, the hooks' error-code slot, the task queue, the random generator, the time-zone lock and `argc` and `argv` are each made by `Cx::state`, which defines the global in the program's module and only declares it in a library module. So are the functions whose code reads the program's classes, `jade.set_err`, `jade.raise_msg`, `jade.release.struct` and `jade.new_error`, through `Cx::shared_fn`. A library module records what it declared, and the program's module defines all of it with external linkage and hidden visibility, even what its own code never uses: `env.args()` in a cached object still needs the C `main` to store the arguments. A thread-local that crosses modules uses the initial-exec model, which LLD turns into local-exec in the executable. A name no library object uses stays internal, so a program built in one module, which is what `--emit ir` shows, compiles to the IR 2.0.8 made.
 - *The cache never fails a build.* A cache directory that cannot be made or written sends the objects to the output's directory, deleted after linking. A failure before linking builds the program in one module. A link failure with an object from the cache makes the driver, `build::binary`, build once more in one module, and when that links, a warning names the directory to remove. A library module that asks for something only the program knows, such as a class's layout, marks itself through `Cx::mark_program_dependent`, and its instance and every cached instance calling it compile with the program; nothing in the std library does, and a test holds it to that.
-- *Nothing prunes the cache.* Objects of older versions stay in their own directories until removed; `rm -rf ~/.jade/lib` clears it. `--emit ir` and `--emit mir` never use it.
+- *Nothing prunes the cache.* Objects of older versions stay in their own directories until removed; `rm -rf ~/.jade/lib` clears it. `--emit ir`, `--emit mir` and `--emit asm` never use it.
 
 *Tasks are jobs on one queue.* A call to an `async fn` packs its arguments into a job, which is also its future, and queues it. Worker threads, made as the queue needs them up to `max_tasks()`, run jobs; one mutex and one condition variable guard the queue and every job's state. Awaiting a job that has not started runs it on the awaiting thread, so a chain of tasks each awaiting the next runs on one thread, and `set_max_tasks(1)` cannot deadlock. A job carries a free function generated for its result type, so the queue can release a future without knowing what it holds. `support/tasks.rs` has the layout.
 
@@ -61,7 +61,7 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 The top level is the core: the module being built and how MIR becomes LLVM. Three subdirectories hold the rest, each with its own README.
 
-- *`mod.rs`* holds `Cx`, the module being built, with `support`, `libc` and string literals. It also builds the program's module, whole or beside library objects, emits the C `main`, makes the target machine, and runs optimization and object output. `ir` returns a program's IR in one module for `--emit ir`, and `objects` writes a program's object files for the linker, its `lib_cache` argument naming the cache's root, `None` building in one module. `Objects::remove` deletes what was written beside the output once it is linked.
+- *`mod.rs`* holds `Cx`, the module being built, with `support`, `libc` and string literals. It also builds the program's module, whole or beside library objects, emits the C `main`, makes the target machine, and runs optimization and object output. `ir` returns a program's IR in one module for `--emit ir`; `asm` builds the same module, optimizes it with the target machine an object gets, and asks LLVM for assembly instead of an object, for `--emit asm`; and `objects` writes a program's object files for the linker, its `lib_cache` argument naming the cache's root, `None` building in one module. `Objects::remove` deletes what was written beside the output once it is linked.
 - *`fb.rs`* is `F`, a function-building layer over inkwell. Its methods return values directly, and `if_`, `if_else`, `while_` and `for_range` take closures. All the support code is written in it.
 - *`layout.rs`* maps types to LLVM types, holds the object offsets, and reads and makes optionals.
 - *`func.rs`* lowers one MIR function: locals as zeroed stack slots, statements with the ownership rules, terminators, every binary operator with its overflow and zero checks, and every support operation. Its `Env` holds each function's LLVM function by id; a library module declares only the ones it calls. A library function, `Func::library`, skips the recursion count, as a built-in always did, so the optimizer inlines a one-instruction one such as `math.sqrt` down to that instruction.
@@ -78,7 +78,7 @@ The top level is the core: the module being built and how MIR becomes LLVM. Thre
 
 ## Who uses it
 
-*Used by:* `build::binary`, which hands the objects to `src/link/`, and `build::compile` for `--emit ir`, reached through `jade build`, `jade run` and `jade test`.
+*Used by:* `build::binary`, which hands the objects to `src/link/`, and `build::compile` for `--emit ir` and `--emit asm`, reached through `jade build`, `jade run` and `jade test`.
 
 *Depends on:* `mir` for its input, `inkwell` for LLVM, `sha2` for the cache's keys and symbols, and `rustpkg::jade_home` for the cache's root. It does not call the linker; the driver in `src/build/` does, after this directory is done.
 
@@ -106,4 +106,5 @@ cargo test codegen::libcache    # the library cache, each test with a cache root
 ./compiler/src/scripts/golden.sh
 HOME=$(mktemp -d) ./compiler/src/scripts/golden.sh   # the same, from a cold cache
 ./target/debug/jade build --emit ir file.jde    # the IR, before optimization, in one module
+./target/debug/jade build --emit asm file.jde   # this machine's assembly, optimized, in one module
 ```

@@ -46,8 +46,8 @@ enum Commands {
         /// Output binary path (default: input filename without extension)
         #[arg(short, long, value_name = "PATH")]
         output: Option<String>,
-        /// Print LLVM IR (`ir`) or the typed middle layer (`mir`) instead of
-        /// compiling a binary
+        /// Print LLVM IR (`ir`), the typed middle layer (`mir`), or this
+        /// machine's assembly (`asm`) instead of compiling a binary
         #[arg(long = "emit", value_name = "FORMAT")]
         emit: Option<String>,
         /// Removed in Jade 2.0: a Jade package is shared as source
