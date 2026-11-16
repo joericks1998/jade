@@ -46,11 +46,12 @@ use inkwell::module::Linkage;
 use inkwell::targets::{FileType, TargetMachine};
 use sha2::{Digest, Sha256};
 
-use super::shared::{Role, Shared};
 use super::{Cx, Objects, func, mir};
 use plan::{Kind, LibPlan};
+use shared::{Role, Shared};
 
 pub(super) mod plan;
+pub(super) mod shared;
 
 /// The most threads a build compiles library modules on.
 pub const THREADS: usize = 8;

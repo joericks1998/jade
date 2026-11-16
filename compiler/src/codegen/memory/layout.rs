@@ -8,7 +8,7 @@
 use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, IntValue};
 
-use super::{Cx, F};
+use crate::codegen::{Cx, F};
 use crate::mir::Ty;
 
 /// Byte offset of an object's length (strings, arrays, dicts).

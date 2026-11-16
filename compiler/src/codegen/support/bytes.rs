@@ -15,7 +15,7 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::layout::{ARR_DATA, LEN};
+use crate::codegen::memory::layout::{ARR_DATA, LEN};
 use crate::codegen::{Cx, F};
 
 /// The longest bytes value, as in v1, whose header held a 32-bit length.
@@ -65,7 +65,7 @@ impl<'ctx> Cx<'ctx> {
                 let m = f.format(
                     &format!(
                         "{}bytes.decode(): not valid UTF-8 at byte %lld",
-                        crate::codegen::errors::IO_ERROR
+                        crate::codegen::func::errors::IO_ERROR
                     ),
                     &[bad],
                 );

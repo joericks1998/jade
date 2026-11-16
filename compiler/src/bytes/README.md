@@ -42,7 +42,7 @@ It also means the write has *two* targets and not one. A local binding is a `Pla
 
 *`slice` clamps instead of raising.* Reading past the end is how you take the tail of a buffer, and every caller would otherwise write the same `min()` call.
 
-*A failed decode raises a `RuntimeError` struct.* `jade.bytes.decode`, emitted by `src/codegen/support/bytes.rs`, raises through `fail_str` in `src/codegen/errors.rs`, like every other failure in support code. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
+*A failed decode raises a `RuntimeError` struct.* `jade.bytes.decode`, emitted by `src/codegen/support/bytes.rs`, raises through `fail_str` in `src/codegen/func/errors.rs`, like every other failure in support code. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
 
 ## Who uses it
 

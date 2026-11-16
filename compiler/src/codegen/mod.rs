@@ -36,39 +36,42 @@
 //!
 //! ## Files
 //!
-//! `fb.rs` is the function-building layer the rest is written in. `layout.rs`
-//! maps types to LLVM types, `func.rs` lowers MIR functions, `rc.rs` emits
-//! retain and release, and `errors.rs` raised errors. `start.rs` is the
-//! start-up code a Linux program begins at. The rest is split by what it
-//! serves:
+//! `mod.rs` holds `Cx`, the module being built, and the entry points: `ir`,
+//! `asm` and `objects`. `start.rs` is the start-up code a Linux program
+//! begins at. Each directory is one job:
 //!
+//! - `func/`: writing an LLVM function. `builder.rs` is `F`, the layer every
+//!   function here is written in; `errors.rs` raises errors; `mod.rs` lowers
+//!   one MIR function.
+//! - `memory/`: how a value sits in memory, `layout.rs`, and when it is
+//!   freed, `rc.rs`.
 //! - `support/`: the support code for values, one file per kind: strings,
-//!   bytes, arrays and dicts, comparison, printing, sized numbers, `toDict`
-//!   and tasks.
+//!   bytes, arrays and dicts, comparison, printing, sized numbers and
+//!   `toDict`.
+//! - `tasks/`: `async fn`, `await`, `join`, `wait`, `cancel` and the worker
+//!   threads.
 //! - `sys/`: the `__sys` hooks the std library written in Jade calls.
-//! - `native.rs`: calls into Rust packages.
-//! - `infer.rs`: the model's tables and Metal kernels, for `?p`.
+//! - `infer/`: `?p`, the model's tables, its memory, Metal and the next token.
+//! - `libcache/`: the std library's object cache.
+//! - `rustpkg.rs`: calls into Rust packages.
 //!
 //! ## The library cache
 //!
 //! A binary build compiles each std library instance whose types are built in
 //! once per machine and keeps its object (`libcache/`); `libcache/plan.rs`
-//! decides which, and `shared.rs` makes the program define, once, the state
+//! decides which, and `libcache/shared.rs` makes the program define, once, the state
 //! and the class-dependent functions those objects use. `--emit ir`, and a
 //! build given no cache root, put everything in one module.
 
-mod errors;
-mod fb;
 mod func;
 mod infer;
-mod layout;
 mod libcache;
-mod native;
-mod rc;
-mod shared;
+mod memory;
+mod rustpkg;
 mod start;
 mod support;
 mod sys;
+mod tasks;
 
 #[cfg(test)]
 mod tests;
@@ -89,7 +92,7 @@ use inkwell::types::{
 use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 
-pub use fb::F;
+pub use func::builder::F;
 pub use libcache::{LibObject, Report, default_root as default_lib_cache};
 
 use crate::mir;
@@ -113,10 +116,10 @@ pub struct Cx<'ctx> {
     pub infer: Option<crate::infer::plan::InferPlan>,
     /// Which kind of module this is: the program's, or a cached library
     /// instance's; see `shared.rs`.
-    role: shared::Role,
+    role: libcache::shared::Role,
     /// In a library module, each shared name it declared, for the program's
     /// module to define.
-    refs: RefCell<BTreeMap<String, shared::Shared>>,
+    refs: RefCell<BTreeMap<String, libcache::shared::Shared>>,
     /// In a library module, whether anything asked for what only the program
     /// knows, such as a class's layout.
     dependent: Cell<bool>,
@@ -132,7 +135,7 @@ impl<'ctx> Cx<'ctx> {
     ///   library objects, with what they need of it.
     ///
     /// Outputs: the module context.
-    fn new(ctx: &'ctx Context, prog: &mir::Program, role: shared::Role) -> Self {
+    fn new(ctx: &'ctx Context, prog: &mir::Program, role: libcache::shared::Role) -> Self {
         let struct_ids =
             prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i as u32)).collect();
         Cx {
@@ -171,7 +174,7 @@ impl<'ctx> Cx<'ctx> {
             lits: RefCell::new(HashMap::new()),
             drops: HashMap::new(),
             infer: None,
-            role: shared::Role::Library,
+            role: libcache::shared::Role::Library,
             refs: RefCell::new(BTreeMap::new()),
             dependent: Cell::new(false),
         }
@@ -400,7 +403,7 @@ impl<'ctx> Cx<'ctx> {
         let p = self.lit(s);
         // The bytes of a literal object start at `STR_DATA` and end with a NUL.
         // SAFETY: a constant offset into a constant global this module owns.
-        let off = self.i64t().const_int(layout::STR_DATA as u64, false);
+        let off = self.i64t().const_int(memory::layout::STR_DATA as u64, false);
         unsafe { p.const_in_bounds_gep(self.i8t(), &[off]) }
     }
 
@@ -446,7 +449,12 @@ fn libc_symbol(name: &str) -> &str {
 ///
 /// Outputs: the verified module, or LLVM's complaint about it.
 pub fn build_module<'ctx>(ctx: &'ctx Context, prog: &mir::Program) -> Result<Module<'ctx>, String> {
-    build_program_module(ctx, prog, &libcache::plan::LibPlan::whole(prog), shared::Role::Whole)
+    build_program_module(
+        ctx,
+        prog,
+        &libcache::plan::LibPlan::whole(prog),
+        libcache::shared::Role::Whole,
+    )
 }
 
 /// Purpose: This function builds the program's module: its own functions,
@@ -465,7 +473,7 @@ fn build_program_module<'ctx>(
     ctx: &'ctx Context,
     prog: &mir::Program,
     plan: &libcache::plan::LibPlan,
-    role: shared::Role,
+    role: libcache::shared::Role,
 ) -> Result<Module<'ctx>, String> {
     let mut cx = Cx::new(ctx, prog, role);
     let globals: Vec<GlobalValue> = prog
@@ -474,7 +482,7 @@ fn build_program_module<'ctx>(
         .map(|g| {
             let t = cx.llty(&g.ty);
             let gv = cx.module.add_global(t, None, &format!("jade.global.{}", g.name));
-            gv.set_initializer(&layout::zero(t));
+            gv.set_initializer(&memory::layout::zero(t));
             gv.set_linkage(Linkage::Internal);
             gv
         })

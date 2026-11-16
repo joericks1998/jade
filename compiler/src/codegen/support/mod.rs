@@ -20,7 +20,6 @@ mod collections;
 mod compare;
 mod format;
 mod sized;
-pub(super) mod tasks;
 mod text;
 mod todict;
 mod unicode;

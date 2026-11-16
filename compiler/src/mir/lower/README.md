@@ -22,7 +22,7 @@ The checker settles every type, but the tree still has nested expressions, impli
 
 ## Who uses it
 
-*Used by:* `build::compile`, through `mir::lower_program_with`, and tests through `mir::lower_program`. `codegen/func.rs` calls `norm` to read a function type the same way.
+*Used by:* `build::compile`, through `mir::lower_program_with`, and tests through `mir::lower_program`. `codegen/func/mod.rs` calls `norm` to read a function type the same way.
 
 *Depends on:* `../mod.rs` for MIR's types, `typechecker::infer` for `Typed`, `Target` and `Ty`, and `frontend::ast` for the tree.
 

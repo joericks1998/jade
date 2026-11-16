@@ -83,7 +83,7 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: the function. Its result is owned.
     pub fn todict_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.todict.{}", crate::codegen::rc::key(t));
+        let name = format!("jade.todict.{}", crate::codegen::memory::rc::key(t));
         let p = self.ptrt();
         let t = t.clone();
         self.support(&name, Some(p.into()), &[p.into()], |f| {
@@ -129,7 +129,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.todict.read.<V>(st, depth) -> V`:
     /// one value of type `V`, starting after any whitespace.
     fn todict_read_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.todict.read.{}", crate::codegen::rc::key(t));
+        let name = format!("jade.todict.read.{}", crate::codegen::memory::rc::key(t));
         let (p, i) = (self.ptrt(), self.i64t());
         let t = t.clone();
         self.support(&name, Some(self.llty(&t)), &[p.into(), i.into()], |f| {
@@ -217,7 +217,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.todict.object.<V>(st, depth) ->
     /// {str: V}`, starting at the `{`. A key written twice keeps its last value.
     fn todict_object_fn(&self, vt: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.todict.object.{}", crate::codegen::rc::key(vt));
+        let name = format!("jade.todict.object.{}", crate::codegen::memory::rc::key(vt));
         let (p, i) = (self.ptrt(), self.i64t());
         let vt = vt.clone();
         let dict_ty = Ty::Map(Box::new(vt.clone()));
@@ -287,7 +287,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.todict.array.<E>(st, depth) ->
     /// [E]`, starting at the `[`.
     fn todict_array_fn(&self, et: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.todict.array.{}", crate::codegen::rc::key(et));
+        let name = format!("jade.todict.array.{}", crate::codegen::memory::rc::key(et));
         let (p, i) = (self.ptrt(), self.i64t());
         let et = et.clone();
         let array_ty = Ty::Array(Box::new(et.clone()));

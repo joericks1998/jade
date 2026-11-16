@@ -11,7 +11,7 @@ use inkwell::types::IntType;
 use inkwell::values::{BasicValueEnum, FloatValue, IntValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
-use crate::codegen::fb::F;
+use crate::codegen::func::builder::F;
 use crate::mir::{ArithOp, BitOp, SizedNum, Ty};
 
 /// Purpose: This enum holds a number read for conversion: an int, the bits of a

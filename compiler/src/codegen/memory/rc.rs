@@ -15,9 +15,11 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use super::layout::{ARR_DATA, DICT_INDEX, DICT_KEYS, DICT_VALS, DROPPED, LEN, TYPE_ID};
-use super::shared::SharedFn;
-use super::{Cx, F};
+use crate::codegen::libcache::shared::SharedFn;
+use crate::codegen::memory::layout::{
+    ARR_DATA, DICT_INDEX, DICT_KEYS, DICT_VALS, DROPPED, LEN, TYPE_ID,
+};
+use crate::codegen::{Cx, F};
 use crate::mir::{Ty, is_heap};
 
 /// Purpose: This function names a type uniquely for a support function's name.
@@ -234,7 +236,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
             Ty::Future(_) => {
                 // A job frees itself through the function it carries, which
                 // knows its result type.
-                let free = self.load_ptr(self.at_c(p, super::support::tasks::FREE));
+                let free = self.load_ptr(self.at_c(p, crate::codegen::tasks::FREE));
                 let ty = self.cx.ctx.void_type().fn_type(&[self.cx.ptrt().into()], false);
                 self.b.build_indirect_call(ty, free, &[p.into()], "").expect("positioned");
             }

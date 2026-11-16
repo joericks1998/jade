@@ -25,7 +25,7 @@ use inkwell::values::{
 };
 use inkwell::{AtomicOrdering, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 
-use super::Cx;
+use crate::codegen::Cx;
 
 /// Purpose: This function unwraps a builder result.
 ///

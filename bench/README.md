@@ -10,7 +10,7 @@ Comparing against CPython is the point. Jade's compiled backend, and until v1.4.
 
 Performance work here has been driven by measurement rather than guesswork. The allocation profiling was the clearest case. In v1, the `alloc-profile` Cargo feature swapped the `jade` binary's global allocator for one that recorded a size-class histogram. The numbers showed that collection churn dominated allocation-heavy code, and that finding produced both the segregated free-list pool in v1's runtime and its escape analysis. `alloc_heavy.jde` is the workload that exercised it.
 
-Phase 6 of `design/v2-static-values.md` removed all of that: the runtime, the pool, the escape analysis, and the profiler. A v2 binary allocates through the C library's `malloc` and frees by reference count, with the retain and release code emitted per program by `src/codegen/rc.rs`. `alloc_heavy.jde` is still a fair test of allocation-heavy code; there is just no profiler built into `jade` to read it with.
+Phase 6 of `design/v2-static-values.md` removed all of that: the runtime, the pool, the escape analysis, and the profiler. A v2 binary allocates through the C library's `malloc` and frees by reference count, with the retain and release code emitted per program by `src/codegen/memory/rc.rs`. `alloc_heavy.jde` is still a fair test of allocation-heavy code; there is just no profiler built into `jade` to read it with.
 
 ## What each file does
 

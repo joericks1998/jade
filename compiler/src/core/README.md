@@ -18,9 +18,9 @@ The async names are the interesting case, and they are here for the same reason 
 
 ## The concurrency limit
 
-`max_tokens()` answers how many tokens a prompt's reply runs to, 256 unless `set_max_tokens(n)` changes it, to at least 1. It lives in the program like the task limit, in `src/codegen/infer.rs`, and setting it runs no model.
+`max_tokens()` answers how many tokens a prompt's reply runs to, 256 unless `set_max_tokens(n)` changes it, to at least 1. It lives in the program like the task limit, in `src/codegen/infer/`, and setting it runs no model.
 
-`max_tasks()` answers how many tasks may run at once, and `set_max_tasks(n)` changes it. The number itself lives in the program, in the task queue `src/codegen/support/tasks.rs` emits, because a compiled binary obeys it through its own worker pool.
+`max_tasks()` answers how many tasks may run at once, and `set_max_tasks(n)` changes it. The number itself lives in the program, in the task queue `src/codegen/tasks/` emits, because a compiled binary obeys it through its own worker pool.
 
 Three details are worth knowing:
 

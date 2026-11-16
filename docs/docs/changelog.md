@@ -4,6 +4,23 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.13
+
+*Codegen is split into one directory per job.* Nothing a program can see changes: every example's IR, MIR and assembly are the same as 2.0.12's. This release is for people working on the compiler.
+
+```
+src/codegen/func/      writing an LLVM function: the builder, raising errors, lowering MIR
+src/codegen/memory/    each type's layout, and reference counting
+src/codegen/support/   strings, collections, printing, sized numbers, toDict
+src/codegen/tasks/     async fn and its futures: the queue, workers, await, join, wait
+src/codegen/sys/       the __sys hooks the std library calls
+src/codegen/infer/     running a model: the tokenizer's tables, its memory, Metal, the next token
+src/codegen/libcache/  the std library's object cache, and the state a program shares with it
+src/codegen/rustpkg.rs calls into Rust packages
+```
+
+`native.rs` became `rustpkg.rs`, since it calls Rust packages and the C FFI the old name came from is gone. `infer.rs` became four files, so the code that talks to Apple's GPU sits in `infer/metal.rs` alone.
+
 ## v2.0.12
 
 *`jade build --emit asm` prints the assembly for your machine.* LLVM optimizes the program the way it does for a binary, for the same processor family, and writes it as text instead of an object file, so you see the code a binary runs: arm64 on an Apple Silicon Mac, x86-64 on an x86-64 Linux machine. Each function's label is its name and argument types, such as `jade.fn1.fib(int)`, so you can search for it. The [CLI page](cli#reading-the-assembly) shows an example.

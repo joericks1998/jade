@@ -35,8 +35,8 @@ use inkwell::types::{BasicTypeEnum, StructType};
 
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 
-use super::layout::{ARR_DATA, LEN, TYPE_ID};
 use super::{Cx, F};
+use crate::codegen::memory::layout::{ARR_DATA, LEN, TYPE_ID};
 use crate::mir::{NativeCall, Ty};
 
 impl<'ctx> Cx<'ctx> {
@@ -117,7 +117,7 @@ impl<'ctx> Cx<'ctx> {
                 slots.push(slot);
             }
             let out = f.alloca(f.cx.c_ty(&c.ret));
-            f.store(out, super::layout::zero(f.cx.c_ty(&c.ret)));
+            f.store(out, crate::codegen::memory::layout::zero(f.cx.c_ty(&c.ret)));
             let err = f.alloca(f.cx.c_vec_ty());
             f.store(err, f.cx.c_vec_ty().const_zero());
             let mut args: Vec<BasicValueEnum<'ctx>> = slots.iter().map(|s| (*s).into()).collect();
@@ -146,7 +146,7 @@ impl<'ctx> Cx<'ctx> {
     /// the C form of a Jade value into `slot`, lending its text and allocating
     /// what an array needs.
     fn c_write_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.rust.to.{}", super::rc::key(t));
+        let name = format!("jade.rust.to.{}", crate::codegen::memory::rc::key(t));
         let t = t.clone();
         let params = [self.llty(&t), self.ptrt().into()];
         self.support(&name, None, &params, |f| {
@@ -177,7 +177,7 @@ impl<'ctx> Cx<'ctx> {
                 }
                 Ty::Opt(inner) => {
                     let st = f.cx.c_ty(&t).into_struct_type();
-                    f.store(slot, super::layout::zero(st.into()));
+                    f.store(slot, crate::codegen::memory::layout::zero(st.into()));
                     f.if_(f.not(f.is_nil(&t, v)), |f| {
                         f.store(f.field(st, slot, 0), f.i8(1));
                         let x = f.unwrap(&t, v);
@@ -203,7 +203,7 @@ impl<'ctx> Cx<'ctx> {
     /// what [`Cx::c_write_fn`] allocated: an array's element buffer, after what its
     /// elements hold. Text is lent and left alone.
     fn c_release_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.rust.release.{}", super::rc::key(t));
+        let name = format!("jade.rust.release.{}", crate::codegen::memory::rc::key(t));
         let t = t.clone();
         self.support(&name, None, &[self.ptrt().into()], |f| {
             let slot = f.param_ptr(0);
@@ -244,7 +244,7 @@ impl<'ctx> Cx<'ctx> {
     /// copies a C form Rust handed over into a new Jade value. Text and chars are
     /// tainted.
     fn c_read_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.rust.from.{}", super::rc::key(t));
+        let name = format!("jade.rust.from.{}", crate::codegen::memory::rc::key(t));
         let t = t.clone();
         self.support(&name, Some(self.llty(&t)), &[self.ptrt().into()], |f| {
             let slot = f.param_ptr(0);
@@ -271,7 +271,7 @@ impl<'ctx> Cx<'ctx> {
                 Ty::Opt(inner) => {
                     let st = f.cx.c_ty(&t).into_struct_type();
                     let none = f.eq(f.load_i8(f.field(st, slot, 0)), f.i8(0));
-                    f.if_(none, |f| f.ret(super::layout::zero(f.cx.llty(&t))));
+                    f.if_(none, |f| f.ret(crate::codegen::memory::layout::zero(f.cx.llty(&t))));
                     let x = f.callv(f.cx.c_read_fn(inner), &[f.field(st, slot, 1).into()]);
                     f.wrap(&t, x)
                 }

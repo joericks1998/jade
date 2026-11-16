@@ -86,7 +86,7 @@ Since 2.0.8 every std package but the value types' own is Jade source, `src/lib/
 
 *A call into a Rust package is `Op::Native`*, carrying the wrapper's symbol and the static types its arguments go as and its result comes back as, which are the package's declared ones (`typechecker::infer::native`). Each argument is coerced to its parameter's type first, so a literal meeting a sized parameter becomes a sized constant. `Program.rust` is the staticlib `src/link/` links when the program calls one.
 
-*A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s codegen implements in `codegen/support/tasks.rs`.
+*A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s codegen implements in `codegen/tasks/`.
 
 *A mistyped native name has to be caught in `imports.rs`.* Before 2.0.5, `gfx.jade_gfx_key_presed` could pass `jade check`, build, ship, and fail the first time that line ran, because nothing linked the name. A Rust package's library lists everything it exports, so `Renamer::ref_native_qual`, the one place `alias.field` becomes `__native$<pkgid>$<field>`, checks the field against that list and suggests the closest name. Its `.jde` sibling `ref_value_qual` checks whether a module exports the name in the same way. A struct's name is left to `ref_type`, which names its class.
 

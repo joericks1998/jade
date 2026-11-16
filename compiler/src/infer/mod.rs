@@ -19,7 +19,7 @@
 //! - `unicode.rs` holds the character classes the tokenizer splits text by.
 //!
 //! The backend half, which maps the memory, drives Metal and runs the
-//! generation loop, is `src/codegen/infer.rs`.
+//! generation loop, is `src/codegen/infer/`.
 
 pub mod plan;
 pub mod rewrite;

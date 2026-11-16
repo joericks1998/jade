@@ -9,7 +9,7 @@
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
-use crate::codegen::layout::{ARR_DATA, DICT_KEYS, DICT_VALS, LEN};
+use crate::codegen::memory::layout::{ARR_DATA, DICT_KEYS, DICT_VALS, LEN};
 use crate::codegen::{Cx, F};
 use crate::mir::Ty;
 
@@ -17,7 +17,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.eq.<type>(a, b) -> bool` for a type
     /// whose equality needs a loop.
     fn eq_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.eq.{}", crate::codegen::rc::key(t));
+        let name = format!("jade.eq.{}", crate::codegen::memory::rc::key(t));
         let lt = self.llty(t);
         let t = t.clone();
         self.support(&name, Some(self.i1t().into()), &[lt, lt], |f| {
@@ -70,7 +70,7 @@ impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns `jade.qcmp.<type>(pa, pb) -> i32`, which
     /// compares two elements in memory, for `qsort`.
     pub fn qsort_cmp_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.qcmp.{}", crate::codegen::rc::key(t));
+        let name = format!("jade.qcmp.{}", crate::codegen::memory::rc::key(t));
         let ptr = self.ptrt();
         let t = t.clone();
         self.support(&name, Some(self.i32t().into()), &[ptr.into(), ptr.into()], |f| {

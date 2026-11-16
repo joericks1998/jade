@@ -17,7 +17,7 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::layout::{ARR_DATA, LEN};
+use crate::codegen::memory::layout::{ARR_DATA, LEN};
 use crate::codegen::{Cx, F};
 use crate::mir::Ty;
 
@@ -102,7 +102,7 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: the function. Its result is owned.
     pub fn tostr_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
-        let name = format!("jade.tostr.{}", crate::codegen::rc::key(t));
+        let name = format!("jade.tostr.{}", crate::codegen::memory::rc::key(t));
         let arg = self.llty(t);
         let t = t.clone();
         self.support(&name, Some(self.ptrt().into()), &[arg], |f| {
