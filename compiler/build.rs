@@ -1,6 +1,6 @@
 //! Builds the linker into the compiler.
 //!
-//! `src/backend/lld.cpp` is a C entry point into LLD, LLVM's own linker, and
+//! `src/link/lld.cpp` is a C entry point into LLD, LLVM's own linker, and
 //! this compiles it and links LLD's static libraries from the same LLVM 18
 //! install `llvm-sys` uses. That is what lets `jade build` link a program
 //! in-process instead of running the system `cc`. See [`link_lld`].
@@ -25,7 +25,7 @@ fn main() {
         );
     }
     link_lld();
-    println!("cargo:rerun-if-changed=src/backend/lld.cpp");
+    println!("cargo:rerun-if-changed=src/link/lld.cpp");
     println!("cargo:rerun-if-changed=build.rs");
 }
 
@@ -89,7 +89,7 @@ fn link_lld() {
     }
 
     let mut build = new_build();
-    build.cpp(true).file("src/backend/lld.cpp").include(&includedir).warnings(false);
+    build.cpp(true).file("src/link/lld.cpp").include(&includedir).warnings(false);
     // LLVM's own flags, so the bridge agrees with how LLVM was built about the
     // language level, RTTI and the standard library.
     for flag in ask("--cxxflags").split_whitespace() {

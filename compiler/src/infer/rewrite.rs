@@ -48,7 +48,7 @@ pub fn inject(mut stmts: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
         return Ok(stmts);
     }
     let mut prelude =
-        crate::aot::imports::namespace_source(PRELUDE, "the inference prelude", PRELUDE_ID)
+        crate::mir::imports::namespace_source(PRELUDE, "the inference prelude", PRELUDE_ID)
             .map_err(|e| format!("internal compiler error in the inference prelude: {e}"))?;
     prelude.extend(stmts);
     Ok(prelude)

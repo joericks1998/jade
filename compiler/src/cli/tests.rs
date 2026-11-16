@@ -716,7 +716,7 @@ fn check_agrees_with_build_about_calls() {
             crate::frontend::parser::parse(crate::frontend::lexer::tokenize(src).unwrap()).unwrap(),
         )
         .unwrap();
-        let err = crate::aot::would_build(&program, Some(&path))
+        let err = crate::build::would_build(&program, Some(&path))
             .expect_err("the backend refuses this, so check must too");
         assert!(err.contains(want), "{name}: expected {want:?}, got {err:?}");
         // And it names where, like every compile error does.
@@ -731,7 +731,7 @@ fn check_agrees_with_build_about_calls() {
         crate::frontend::parser::parse(crate::frontend::lexer::tokenize(ok_src).unwrap()).unwrap(),
     )
     .unwrap();
-    assert!(crate::aot::would_build(&program, Some(&path)).is_ok(), "a good program should pass");
+    assert!(crate::build::would_build(&program, Some(&path)).is_ok(), "a good program should pass");
 }
 
 /// The upgrade working directory must be unguessable, private, and never an

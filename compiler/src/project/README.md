@@ -6,7 +6,7 @@ This holds everything about a Jade *project*, as opposed to a single file: findi
 
 ## Why it exists
 
-Import resolution has to give the same answer every time a `use` is read. The AOT backend resolves imports at compile time, and `jade check` walks them without building anything. So the resolution *rules* live here, in one place, and both `aot/imports.rs` and the import walk call into them. Until v1.4.8 the VM also resolved imports, at run time, through `vm/chunk.rs`. When it and the AOT backend disagreed, a program ran one way and compiled another, and the failure stayed silent until someone tried both.
+Import resolution has to give the same answer every time a `use` is read. The compiler resolves imports at compile time, and `jade check` walks them without building anything. So the resolution *rules* live here, in one place, and both `mir/imports.rs` and the import walk call into them. Until v1.4.8 the VM also resolved imports, at run time, through `vm/chunk.rs`. When it and the compiler disagreed, a program ran one way and compiled another, and the failure stayed silent until someone tried both.
 
 The `[lib]` mechanism is why this module is more than a TOML parser. A `[lib.<name>]` section registers a directory and its modules under a name, anchored at the project root. So `use utils.math` works from anywhere in the tree, rather than only from a sibling directory.
 
@@ -33,7 +33,7 @@ A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resol
   - `ambiguous_bare_import` detects a bare name that could mean two things, so the error can name the ambiguity rather than silently picking one.
   - `find_test_files` finds every `test_*.jde` and `*_test.jde` for `jade test`.
 - *`imports.rs`* gives one answer to "what does this `use` name?", plus the graph walk `check` runs:
-  - `resolve_import` is the single resolver, built on the three primitives above. It returns an `ImportTarget`, which is either a built-in `std::*` package, a Rust package, or a Jade source file. A std package written in Jade, such as `std::path`, counts as built in: it is embedded in the compiler (`src/lib/`), not a file on disk. `walk_imports` and `reachable_jade_modules` both go through it. The AOT backend's `resolve_use` in `aot/imports.rs` is built on the same three primitives rather than on this function. Until v1.4.8 the VM reached it through a thin adapter in `vm/chunk.rs`.
+  - `resolve_import` is the single resolver, built on the three primitives above. It returns an `ImportTarget`, which is either a built-in `std::*` package, a Rust package, or a Jade source file. A std package written in Jade, such as `std::path`, counts as built in: it is embedded in the compiler (`src/lib/`), not a file on disk. `walk_imports` and `reachable_jade_modules` both go through it. The import pass's `resolve_use` in `mir/imports.rs` is built on the same three primitives rather than on this function. Until v1.4.8 the VM reached it through a thin adapter in `vm/chunk.rs`.
   - `walk_imports` resolves every import reachable from a file, following Jade modules through as many levels as they go, and returns the first one it cannot resolve along with its span. It loads nothing. A Rust package is left to the build that types the program, which reports one that does not compile.
   - `reachable_jade_modules` is the same walk, except it keeps the set of modules it visits rather than discarding it. `jade build --lib` checks a `[package]`'s declared `sources` against that set. Asking the frontend rather than the LLVM backend keeps the check off the compile path, which is right: what a package contains is a property of the import graph, not of code generation.
   - `program_import_paths` returns the `use` and `from … use` paths of a parsed program.
@@ -43,7 +43,7 @@ A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resol
 
 *Depends on:* `serde` and `toml`, plus `frontend/` and `builtins/` for the import walk. The walk needs the lexer and parser to find a module's own imports, and the built-in package list to know which names are compiled in. `mod.rs` on its own stays at the bottom of the stack.
 
-*Used by:* `aot/imports.rs` for import resolution at compile time, `cli/check.rs` for the import walk, and `pkg/`, which contributes `LibraryEntry` values. Most of `cli/` uses it too, because `run`, `test`, `build`, `env`, and `pkg` all start by finding the project root.
+*Used by:* `mir/imports.rs` for import resolution at compile time, `cli/check.rs` for the import walk, and `pkg/`, which contributes `LibraryEntry` values. Most of `cli/` uses it too, because `run`, `test`, `build`, `env`, and `pkg` all start by finding the project root.
 
 ## Gotchas
 

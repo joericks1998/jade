@@ -17,7 +17,7 @@ Because a module-level binding and a local inside a function reach the write by 
 
 Until v1.4.8 the parity gate diffed stdout, stderr, and the exit code byte for byte. The VM prefixed a raised message with its source span and a compiled binary has no span at run time, so a fixture that printed `e.message` would have failed the gate on plumbing rather than on behavior. Printing `"refused a negative length"` still proves the raise happened, still proves it was catchable, and proved both engines agreed on *whether* it raises. The `.expected` files were recorded from those runs, so the literal stays.
 
-The wording itself lives in `compiler/src/backend/bytes.rs`, which emits the support code that raises it.
+The wording itself lives in `compiler/src/codegen/support/bytes.rs`, which emits the support code that raises it.
 
 ## Who uses it
 

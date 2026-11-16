@@ -38,7 +38,7 @@ Cancelled outranks a result that arrived anyway. The caller said it had stopped 
 
 ## What each file does
 
-- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`; `typechecker/infer/builtins.rs` gives the checker their types. The behavior lives in `src/backend/tasks.rs` and the `Op::Ready` and `Op::Cancel` arms of `src/backend/func.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
+- *`mod.rs`* holds `FUTURE_METHODS`, which names `ready` and `cancel`; `typechecker/infer/builtins.rs` gives the checker their types. The behavior lives in `src/codegen/support/tasks.rs` and the `Op::Ready` and `Op::Cancel` arms of `src/codegen/func.rs`, and it is pinned by `examples/async/ready/`, which `src/scripts/golden.sh` builds and compares with its recorded output.
 
 ## What `ready` means
 
@@ -50,7 +50,7 @@ Cancelled outranks a result that arrived anyway. The caller said it had stopped 
 
 Nothing about running tasks is a package, and this module is one piece of that. `async fn` and `await` are keywords, `join` is an operation in MIR, `f.ready()` and `f.cancel()` are here, and `cancelled()`, `wait()`, `max_tasks()`, and `set_max_tasks()` are bare globals in `src/core/`. A program never imports anything to use tasks.
 
-`max_tasks` and `set_max_tasks` are the newest of those and the only ones that are not about a single future: they say how many tasks may run at once, defaulting to 32. See `src/core/README.md` for what the number means and `src/backend/tasks.rs` for how a compiled program enforces it.
+`max_tasks` and `set_max_tasks` are the newest of those and the only ones that are not about a single future: they say how many tasks may run at once, defaulting to 32. See `src/core/README.md` for what the number means and `src/codegen/support/tasks.rs` for how a compiled program enforces it.
 
 ## Why there is no package form
 
@@ -60,7 +60,7 @@ Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src
 
 *Depends on:* nothing; it is a list of names.
 
-*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`. The compiled backend does not come through here at all: `mir/ops.rs` lowers `ready` to `Op::Ready`, and `src/backend/func.rs` answers it from the job's state and cancel words under the task queue's lock.
+*Used by:* `builtins::primitive_method_tables`, which lists `FUTURE_METHODS` under `future`. The compiled backend does not come through here at all: `mir/lower/ops.rs` lowers `ready` to `Op::Ready`, and `src/codegen/func.rs` answers it from the job's state and cancel words under the task queue's lock.
 
 ## Gotchas
 

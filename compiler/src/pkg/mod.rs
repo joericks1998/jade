@@ -24,7 +24,7 @@
 //! The integration surface with the rest of the compiler is one function,
 //! [`resolved_libraries`]: dependencies are handed back as synthetic
 //! [`crate::project::LibraryEntry`] values and unioned into the manifest's `[lib]`
-//! map, so the import resolver ([`crate::aot::imports`]) never learns what a
+//! map, so the import resolver ([`crate::mir::imports`]) never learns what a
 //! dependency is.
 //!
 //! Until 2.0.5 a dependency could also be a prebuilt shared library: a Jade-ABI

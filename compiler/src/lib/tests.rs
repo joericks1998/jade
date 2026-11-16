@@ -78,7 +78,7 @@ fn only_library_code_reaches_a_modules_private_functions() {
     let tokens = crate::frontend::lexer::tokenize("use std::uhttp\n").expect("lexes");
     let ast = crate::frontend::parser::parse(tokens).expect("parses");
     let tree = crate::typechecker::resolve::resolve(ast).expect("resolves");
-    let stmts = crate::aot::imports::namespace_program(tree.stmts).expect("namespaces");
+    let stmts = crate::mir::imports::namespace_program(tree.stmts).expect("namespaces");
     let http = by_name("http").expect("http is written in Jade").id();
     let fetch = format!("_fetch${http}");
     assert!(stmts.iter().any(|s| matches!(s, Stmt::FnDef { name, .. } if *name == fetch)));
@@ -113,7 +113,7 @@ fn dedupe_keeps_one_copy_of_each_library_definition() {
     let tokens = crate::frontend::lexer::tokenize("use std::path\n").expect("lexes");
     let ast = crate::frontend::parser::parse(tokens).expect("parses");
     let tree = crate::typechecker::resolve::resolve(ast).expect("resolves");
-    let one = crate::aot::imports::namespace_program(tree.stmts).expect("namespaces");
+    let one = crate::mir::imports::namespace_program(tree.stmts).expect("namespaces");
     assert!(one.iter().any(|s| matches!(s, Stmt::FnDef { name, .. } if is_library_name(name))));
     let mut twice = one.clone();
     twice.extend(one.clone());

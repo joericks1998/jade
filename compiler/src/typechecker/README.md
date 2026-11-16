@@ -11,7 +11,7 @@ merged Program → infer → Typed (types and call targets per instance)
 
 There is one tree. The per-file pass rewrites a few shapes in place and gives no node a type; the whole-program checker keeps each value's type in its own table, keyed by the address of the node, and MIR reads that table. Until 2.0.6 the per-file pass built a second tree, TIR, that gave every node a type, and nothing after it read those types; part 1 of `design/v2-simplify.md` explains its removal.
 
-It ends at the checker's answer. What compiles that answer, [`src/mir/`](../mir/README.md) and [`src/backend/`](../backend/README.md), lives alongside this module rather than inside it. Until phase 6 of `design/v2-static-values.md` this directory also emitted bytecode for v1's backend; that emitter, its escape analysis and its grammar builder went with the bytecode, and the task-safety check moved to `src/mir/taskcheck.rs`.
+It ends at the checker's answer. What compiles that answer, [`src/mir/`](../mir/README.md) and [`src/codegen/`](../codegen/README.md), lives alongside this module rather than inside it. Until phase 6 of `design/v2-static-values.md` this directory also emitted bytecode for v1's backend; that emitter, its escape analysis and its grammar builder went with the bytecode, and the task-safety check moved to `src/mir/taskcheck.rs`.
 
 It was `src/compiler/` until 2.0.1, when the crate itself became `compiler/`. The name also keeps it apart from [`src/infer/`](../infer/README.md), which runs prompts: `typechecker/infer/` infers types, and `infer/` runs a model.
 
@@ -42,7 +42,7 @@ It was `src/compiler/` until 2.0.1, when the crate itself became `compiler/`. Th
 
 *Depends on:* `frontend/` for the tree and errors, and `builtins/` for the std packages and the global names.
 
-*Used by:* `cli/build.rs` and `cli/check.rs`, which call `resolve` on the entry file; `aot/imports.rs`, which calls it on each imported file; `aot/mod.rs`, which runs `fill_struct_literal_defaults` and then `infer` over the merged program; `mir/`, which lowers the checker's answer; and `cache/`, which stores each file's tree after `resolve`.
+*Used by:* `cli/build.rs` and `cli/check.rs`, which call `resolve` on the entry file; `mir/imports.rs`, which calls it on each imported file; `build/mod.rs`, which runs `fill_struct_literal_defaults` and then `infer` over the merged program; `mir/`, which lowers the checker's answer; and `cache/`, which stores each file's tree after `resolve`.
 
 ## Gotchas
 

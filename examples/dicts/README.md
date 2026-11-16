@@ -20,4 +20,4 @@ A dict maps string keys to one kind of value, and v2 settles that kind when the 
 
 ## Who uses it
 
-`compiler/src/scripts/golden.sh` runs every program here, and `compiler/src/cli/check.rs` asserts each one checks and each `*_error.jde` does not. The code they exercise is `compiler/src/typechecker/infer/builtins.rs`, which decides what a `toDict` dict holds, and `compiler/src/backend/todict.rs` and `format.rs`, which read and write it. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.
+`compiler/src/scripts/golden.sh` runs every program here, and `compiler/src/cli/check.rs` asserts each one checks and each `*_error.jde` does not. The code they exercise is `compiler/src/typechecker/infer/builtins.rs`, which decides what a `toDict` dict holds, and `compiler/src/codegen/support/todict.rs` and `format.rs`, which read and write it. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.

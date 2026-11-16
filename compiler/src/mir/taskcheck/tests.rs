@@ -13,7 +13,7 @@ fn compile(src: &str) -> Result<(), String> {
     let program = parser::parse(tokens).map_err(|e| e.to_string())?;
     let mut tp = resolve::resolve(program).map_err(|e| e.to_string())?;
     // A std package written in Jade is loaded the way a build loads it.
-    tp.stmts = crate::aot::imports::namespace_program(tp.stmts).map_err(|e| e.to_string())?;
+    tp.stmts = crate::mir::imports::namespace_program(tp.stmts).map_err(|e| e.to_string())?;
     crate::typechecker::infer::check_members(&tp).map_err(|e| e.to_string())?;
     resolve::fill_struct_literal_defaults(&mut tp).map_err(|e| e.to_string())?;
     let typed = crate::typechecker::infer::check_program(&tp).map_err(|e| e.to_string())?;

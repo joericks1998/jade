@@ -14,4 +14,4 @@ They show the package's whole surface in the shape a program uses it. `basic` an
 
 ## Who uses it
 
-`compiler/src/cli/check.rs` asserts all three check, and `golden.sh` runs `local`. The package is Jade, `compiler/src/lib/uhttp.jde`, over `http.jde`, with starting curl, reading its output and stopping it as hooks in `compiler/src/backend/sys_proc.rs`. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.
+`compiler/src/cli/check.rs` asserts all three check, and `golden.sh` runs `local`. The package is Jade, `compiler/src/lib/uhttp.jde`, over `http.jde`, with starting curl, reading its output and stopping it as hooks in `compiler/src/codegen/sys/process.rs`. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.

@@ -4,7 +4,7 @@
 
 The handful of built-in names a program can use without a `use` line. Every other built-in belongs to a package and arrives through an import, so this directory is the short list of names that are simply *there*: `print`, `len`, `write`, `input`, `wait`, `route`, the task controls `cancelled`, `max_tasks` and `set_max_tasks`, the reply length `max_tokens` and `set_max_tokens`, the type functions `int`, `float`, `str`, `bool` and `char`, which check a value's type and return it unchanged, their converters `toInt`, `toFloat`, `toString`, `toBool` and `toChar`, `toDict`, which reads JSON text into a dict and replaced `std::json` in 2.0.7, the same pair for each sized number type, `byte` and `toByte` through `float32` and `toFloat32`, with `long` and `double` as other names for `int` and `float`, and `Grammar`.
 
-`GLOBAL_NAMES` lists them, and `register_names` binds each in the per-file pass's name table, as a function, `Grammar` as a value, so a call to one is not an undefined name. The two sit side by side so a name cannot be listed without being bound. Nothing here runs: `typechecker/infer/builtins.rs` gives each one its static type, `mir/ops.rs` lowers each call, and the code they run is support code emitted by `src/backend/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
+`GLOBAL_NAMES` lists them, and `register_names` binds each in the per-file pass's name table, as a function, `Grammar` as a value, so a call to one is not an undefined name. The two sit side by side so a name cannot be listed without being bound. Nothing here runs: `typechecker/infer/builtins.rs` gives each one its static type, `mir/lower/ops.rs` lowers each call, and the code they run is support code emitted by `src/codegen/support/`. Until v1.4.8 this file also held each function's implementation for the bytecode VM.
 
 ## Why a name lives here rather than in a package
 
@@ -18,9 +18,9 @@ The async names are the interesting case, and they are here for the same reason 
 
 ## The concurrency limit
 
-`max_tokens()` answers how many tokens a prompt's reply runs to, 256 unless `set_max_tokens(n)` changes it, to at least 1. It lives in the program like the task limit, in `src/backend/infer.rs`, and setting it runs no model.
+`max_tokens()` answers how many tokens a prompt's reply runs to, 256 unless `set_max_tokens(n)` changes it, to at least 1. It lives in the program like the task limit, in `src/codegen/infer.rs`, and setting it runs no model.
 
-`max_tasks()` answers how many tasks may run at once, and `set_max_tasks(n)` changes it. The number itself lives in the program, in the task queue `src/backend/tasks.rs` emits, because a compiled binary obeys it through its own worker pool.
+`max_tasks()` answers how many tasks may run at once, and `set_max_tasks(n)` changes it. The number itself lives in the program, in the task queue `src/codegen/support/tasks.rs` emits, because a compiled binary obeys it through its own worker pool.
 
 Three details are worth knowing:
 
@@ -34,11 +34,11 @@ Three details are worth knowing:
 
 *Depends on:* `typechecker/resolve` for `Names` and `NameKind`.
 
-*Used by:* `builtins::global_names`, which the registry tests read, and `builtins::register_core_names`, which the per-file pass calls for every file. The static checker keeps its own list of the callable names in `is_builtin_value` and types each in `builtin_result`, both in `typechecker/infer/builtins.rs`, and `builtin` in `mir/ops.rs` lowers each one.
+*Used by:* `builtins::global_names`, which the registry tests read, and `builtins::register_core_names`, which the per-file pass calls for every file. The static checker keeps its own list of the callable names in `is_builtin_value` and types each in `builtin_result`, both in `typechecker/infer/builtins.rs`, and `builtin` in `mir/lower/ops.rs` lowers each one.
 
 ## Gotchas
 
-*A global here needs a checker arm and a MIR arm in the same change.* Adding a name and a type teaches v1's type inference only. The name also goes in `is_builtin_value` and `builtin_result` in `typechecker/infer/builtins.rs`, in the `builtin` match in `mir/ops.rs`, and, if it does real work, in support code in `src/backend/`. Before `jade check` ran the backend's lowering, a missing arm meant `check` passed while `build` refused, which a program discovered only when it tried to ship. `jade check` runs MIR lowering now, so it reports the gap.
+*A global here needs a checker arm and a MIR arm in the same change.* Adding a name and a type teaches v1's type inference only. The name also goes in `is_builtin_value` and `builtin_result` in `typechecker/infer/builtins.rs`, in the `builtin` match in `mir/lower/ops.rs`, and, if it does real work, in support code in `src/codegen/support/`. Before `jade check` ran the backend's lowering, a missing arm meant `check` passed while `build` refused, which a program discovered only when it tried to ship. `jade check` runs MIR lowering now, so it reports the gap.
 
 *A compiled integer is a full `i64` now.* v1 tagged its integers, so a lowering that returned one had to `tag_int` it and a lowering that took one had to `untag_int` first. Forgetting halved every value: `max_tasks()` answered 16 for 32, and `set_max_tasks(9999)` answered 256 for 512. The static backend has no tags, so a number passes straight through.
 

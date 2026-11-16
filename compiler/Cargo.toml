@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "2.0.10"
+version = "2.0.11"
 edition = "2024"
 description = "A language for LLMs"
 license = "MIT"
@@ -20,7 +20,7 @@ toml_edit = "0.22"
 bincode = "1"
 sha2 = "0.10"
 libloading = "0.8"
-# LLVM 18, which the static backend (src/backend/) generates code through.
+# LLVM 18, which codegen (src/codegen/) generates code through.
 # `jade build` compiles in-process — there is no build daemon — so this is a hard dependency
 # and LLVM 18 must be present to build the toolchain. Locate it with
 # LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
@@ -37,5 +37,5 @@ dovata = { path = "../dovata", default-features = false }
 object = { version = "0.41", default-features = false, features = ["read_core", "archive", "elf", "macho", "std"] }
 
 [build-dependencies]
-# Compiles src/backend/lld.cpp, the bridge into LLD; see build.rs.
+# Compiles src/link/lld.cpp, the bridge into LLD; see build.rs.
 cc = "1"

@@ -20,17 +20,17 @@ The Rust module is `crate::stdlib`, since a module named `lib` beside `lib.rs` w
 
 ## Why it was built
 
-Until 2.0.8 every std function lived in four places: its name in `src/<pkg>/mod.rs`, its type in `typechecker/infer/builtins.rs`, an MIR operation in `mir/packages.rs`, and its code in `src/backend/<pkg>.rs`, written as Rust calls that build LLVM instructions one at a time. The last was the hard one to read: `math.pow` for ints is a loop, but its source read as instructions for building a loop. Part 3 of `design/v2-simplify.md` moves each package's logic into Jade, so it lives in one place and reads as what it does. The checker types a library function by reading its body, as it types any imported file's, so the name list, the type entry and the MIR entry go away.
+Until 2.0.8 every std function lived in four places: its name in `src/<pkg>/mod.rs`, its type in `typechecker/infer/builtins.rs`, an MIR operation in `mir/lower/packages.rs`, and its code in `src/codegen/<pkg>.rs`, written as Rust calls that build LLVM instructions one at a time. The last was the hard one to read: `math.pow` for ints is a loop, but its source read as instructions for building a loop. Part 3 of `design/v2-simplify.md` moves each package's logic into Jade, so it lives in one place and reads as what it does. The checker types a library function by reading its body, as it types any imported file's, so the name list, the type entry and the MIR entry go away.
 
 ## How a package is compiled into a program
 
 1. *The per-file pass names the package.* `use std::path` binds `path` in `typechecker/resolve.rs` as a std package, through `builtins::std_global_name`, and `path.joinx(…)` is refused there, listing the package's public functions.
-2. *The import pass loads it.* `aot/imports.rs` sees that `stdlib::find` knows the path, and `load_library` parses the source with `typechecker::resolve::resolve_library` and namespaces it under the package's reserved id, once per program: every top-level name becomes `name$<id>`, so `path.join(a, b)` is a call to `join$<id>` and no name here can meet one of the program's. A program's own class named `TimeParts` stays its own. A library module may `use` another; it lands first, and the module that uses it reaches its private functions too, so `uhttp.jde` calls `http._fetch` and returns `http.jde`'s `HttpResponse`, the same class `http.get` returns. A program reaches only the public ones.
+2. *The import pass loads it.* `mir/imports.rs` sees that `stdlib::find` knows the path, and `load_library` parses the source with `typechecker::resolve::resolve_library` and namespaces it under the package's reserved id, once per program: every top-level name becomes `name$<id>`, so `path.join(a, b)` is a call to `join$<id>` and no name here can meet one of the program's. A program's own class named `TimeParts` stays its own. A library module may `use` another; it lands first, and the module that uses it reaches its private functions too, so `uhttp.jde` calls `http._fetch` and returns `http.jde`'s `HttpResponse`, the same class `http.get` returns. A program reaches only the public ones.
 3. *The checker types it per call.* Each library function is checked once per set of argument types, like any function. A function nobody calls is never checked or compiled, so a program pays only for what it uses.
 4. *MIR and the backend compile it* like the program's own code, with two differences. A library function does not count against the recursion limit, as a built-in never did, so the optimizer inlines a one-instruction function such as `math.sqrt` down to that instruction; and what it asks of `__sys` reaches the backend as `Op::Sys`.
-5. *The backend compiles each instance once per machine.* Since 2.0.9 an instance whose types are all built in, such as `path.join(str, str)` or `fs.read(str)`, is compiled in an LLVM module of its own, and its object is kept under `~/.jade/lib/<version>/<triple>/` and linked into every later program that needs it; `src/backend/libplan.rs` decides which, and `src/backend/README.md` describes the cache. An instance that touches a class, such as `time.parts`, which returns a `TimeParts`, or `random.choice` over a program's class, compiles with the program, since a class's type id is its place among the program's classes. A small instance, such as `math.sqrt` or `math.clamp`, is copied into each module that calls it, so it still inlines.
+5. *The backend compiles each instance once per machine.* Since 2.0.9 an instance whose types are all built in, such as `path.join(str, str)` or `fs.read(str)`, is compiled in an LLVM module of its own, and its object is kept under `~/.jade/lib/<version>/<triple>/` and linked into every later program that needs it; `src/codegen/libcache/plan.rs` decides which, and `src/codegen/README.md` describes the cache. An instance that touches a class, such as `time.parts`, which returns a `TimeParts`, or `random.choice` over a program's class, compiles with the program, since a class's type id is its place among the program's classes. A small instance, such as `math.sqrt` or `math.clamp`, is copied into each module that calls it, so it still inlines.
 
-A program with no file, such as a test's, gets its library modules through `aot::imports::namespace_program`.
+A program with no file, such as a test's, gets its library modules through `mir::imports::namespace_program`.
 
 ## Writing a package
 
@@ -80,14 +80,14 @@ A program cannot name `__sys`: its `use std::__sys` is refused as an undefined n
 To add a hook:
 
 1. Add a variant to `SysFn` in `src/mir/mod.rs`, to `SysFn::ALL`, and its name in `SysFn::name`. Give its argument types in `SysFn::params` and its result in `SysFn::result`; the checker and MIR both read them, so nothing else types it. If it refuses tainted text, add it to `SysFn::may_raise`.
-2. Emit it in `Cx::sys_op` in `src/backend/sys.rs`, with its code there or in `sys_fs.rs`, `sys_proc.rs` or `sys_rand.rs`. A fallible one calls `F::os_ok` and `F::os_fail` or `F::os_result` right after its C call. A C library function it calls goes in `Cx::libc`'s table, and in the pinned list in `backend/tests.rs`.
+2. Emit it in `Cx::sys_op` in `src/codegen/sys/mod.rs`, with its code there or in `sys/fs.rs`, `sys/process.rs` or `sys/random.rs`. A fallible one calls `F::os_ok` and `F::os_fail` or `F::os_result` right after its C call. A C library function it calls goes in `Cx::libc`'s table, and in the pinned list in `codegen/tests.rs`.
 3. Call it from the package's `.jde`.
 
 ## Adding a package
 
 1. Write `src/lib/<pkg>.jde`, beginning with `use std::__sys` if it calls a hook.
 2. Add a `Library` entry at the end of `LIBRARIES` in `mod.rs`, with its `include_str!` and any `folds`. A package's index there gives its namespace id, so a new one goes last.
-3. If the package was written in the backend before, delete its `src/<pkg>/` directory and its `PACKAGES` entry in `src/builtins/`, its typing in `typechecker/infer/builtins.rs`, its MIR operations in `mir/` and `mir/packages.rs`, and its backend code, keeping what becomes a hook. A record it returned moves from `builtin_structs` in `typechecker/infer/builtins.rs` into the `.jde` as a class.
+3. If the package was written in the backend before, delete its `src/<pkg>/` directory and its `PACKAGES` entry in `src/builtins/`, its typing in `typechecker/infer/builtins.rs`, its MIR operations in `mir/` and `mir/lower/packages.rs`, and its backend code, keeping what becomes a hook. A record it returned moves from `builtin_structs` in `typechecker/infer/builtins.rs` into the `.jde` as a class.
 4. Run the old and new compilers over the same programs and compare what they print, error messages included. `examples/path/components/`, `examples/time/calendar_edges/` and `examples/numbers/math_edges/` were checked that way, and in phase B `examples/fs/edges/`, `fs/stdio/`, `env/vars/`, `sh/capture/`, `random/seeded/`, `http/local/` and `uhttp/local/`, whose `.expected` files the backend versions recorded.
 
 ## What each file does
@@ -106,7 +106,7 @@ To add a hook:
 
 ## Who uses it
 
-*Used by:* `aot/imports.rs`, which loads each module a program uses; `backend/libplan.rs` and `backend/libcache.rs`, which compile its instances once per machine and cache them; `typechecker/resolve.rs` and `builtins/`, through `builtins::is_std_package`, `std_global_name` and `std_functions`; `project/imports.rs`, whose import walk treats these packages as built in; `typechecker/infer/`, which recognizes library code with `is_library_fn` and names its functions with `display` in messages; and `mir/`, which marks library functions with `Func::library`.
+*Used by:* `mir/imports.rs`, which loads each module a program uses; `codegen/libcache/plan.rs` and `codegen/libcache/mod.rs`, which compile its instances once per machine and cache them; `typechecker/resolve.rs` and `builtins/`, through `builtins::is_std_package`, `std_global_name` and `std_functions`; `project/imports.rs`, whose import walk treats these packages as built in; `typechecker/infer/`, which recognizes library code with `is_library_fn` and names its functions with `display` in messages; and `mir/`, which marks library functions with `Func::library`.
 
 *Depends on:* `frontend/` to parse a module and `typechecker::resolve::resolve_library` for the per-file pass.
 

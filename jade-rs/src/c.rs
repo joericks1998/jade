@@ -2,7 +2,7 @@
 //!
 //! A number, `bool` or `char` crosses as a C scalar of its width. Everything else is
 //! one of the two structs here, nested as the type is nested. The Jade compiler
-//! builds and reads the same structs from the type alone (`compiler/src/backend/
+//! builds and reads the same structs from the type alone (`compiler/src/codegen/
 //! native.rs`), so these layouts are part of the description's format: a change here
 //! is a change to `meta::FORMAT`.
 //!

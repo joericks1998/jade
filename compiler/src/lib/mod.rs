@@ -5,7 +5,7 @@
 //! program that uses it the way `infer/prelude.jde` is. `use std::path` loads
 //! `path.jde` into the program, in a namespace of its own whose id is reserved
 //! for the package, so `path.join(a, b)` calls the module's `join` and no name
-//! in it can meet one of the program's. The import pass in `aot/imports.rs`
+//! in it can meet one of the program's. The import pass in `mir/imports.rs`
 //! does the loading; the checker types the module's functions by reading their
 //! bodies, as it does any imported file's.
 //!
