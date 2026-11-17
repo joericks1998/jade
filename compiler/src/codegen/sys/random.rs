@@ -11,7 +11,7 @@
 
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::shared::{Slot, State};
+use crate::codegen::libcache::shared::{Slot, State};
 use crate::codegen::{Cx, F};
 
 impl<'ctx> Cx<'ctx> {

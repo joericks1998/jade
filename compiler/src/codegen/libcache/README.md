@@ -11,6 +11,7 @@ Part 4 of `design/v2-simplify.md` compiles each library instance once per machin
 ## What each file does
 
 - *`mod.rs`* is the cache: it builds each library instance's module, computes its key, reads a hit or writes a miss atomically, builds the program's module with what the library modules declared, and falls back to one module when anything goes wrong before linking. It returns the objects; `build::binary` links them and retries in one module if a cached object does not link. `default_root` is `~/.jade/lib`.
+- *`shared.rs`* has `Cx::state` and `Cx::shared_fn`, through which every piece of mutable state and every class-dependent support function is made, so the program defines each once and library objects declare it, and `Cx::define_exports`, which defines in the program what the library objects declared. It was `codegen/shared.rs` until 2.0.13; it moved here because it exists for the cache, and in a build with no cache every state stays internal to the one module.
 - *`plan.rs`* decides how each function is compiled: with the program, in a cached object, or copied into each caller, and gives each cacheable instance its symbol.
 - *`tests.rs`* builds programs with a cache root of their own under the system's temp directory, removed when the test ends, so no test reads or writes `~/.jade`. It checks that a second build writes no object and prints the same; that two type instances of one function get two objects; that a class-typed instance, such as `random.choice` over an array of a program's class, or `time.parts`, is not cached; that `math.sqrt` and `math.clamp` are copied into their callers; that a cache root under a file still builds, through the scratch objects; that two builds at once on threads both link; that an object that is not an object is rebuilt, and one that does not link makes the build link without the cache; that no std instance's module asks for anything only the program knows, and that each defines no mutable state; that a module's IR, and so its key, is the same each time it is built; that demoting an instance demotes its callers; and that a program with no library code builds in one module and makes no directory.
 
@@ -18,7 +19,7 @@ Part 4 of `design/v2-simplify.md` compiles each library instance once per machin
 
 *Used by:* `../mod.rs`, whose `objects` calls `objects` here when given a cache root, and which builds the program's module from the plan. `build::binary` reads the `Report` to warn about a damaged cache.
 
-*Depends on:* `../shared.rs` for what a library module declares and the program defines, `../func.rs` to lower each instance, and `sha2` for keys and symbols.
+*Depends on:* `../func/` to lower each instance, and `sha2` for keys and symbols.
 
 ## Building and testing
 

@@ -19,10 +19,10 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::layout::{
+use crate::codegen::memory::layout::{
     ARR_DATA, ARR_SIZE, CAP, DICT_ICAP, DICT_INDEX, DICT_KEYS, DICT_SIZE, DICT_VALS, LEN,
 };
-use crate::codegen::rc::key;
+use crate::codegen::memory::rc::key;
 use crate::codegen::{Cx, F};
 use crate::mir::{Ty, is_heap};
 
@@ -453,7 +453,7 @@ impl<'ctx> Cx<'ctx> {
                     let k = f.param_ptr(1);
                     let at = f.call_int(f.cx.dict_find_fn(), &[d.into(), k.into()]);
                     f.if_(f.slt(at, f.i64(0)), |f| {
-                        f.ret(crate::codegen::layout::zero(f.cx.llty(&opt)))
+                        f.ret(crate::codegen::memory::layout::zero(f.cx.llty(&opt)))
                     });
                     let vals = f.load_ptr(f.at_c(d, DICT_VALS));
                     let v = f.load(et, f.elem(et, vals, at));

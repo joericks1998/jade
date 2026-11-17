@@ -12,7 +12,7 @@
 
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::layout::{ARR_DATA, LEN};
+use crate::codegen::memory::layout::{ARR_DATA, LEN};
 use crate::codegen::{Cx, F};
 use crate::mir::Ty;
 

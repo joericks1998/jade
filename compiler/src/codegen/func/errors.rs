@@ -17,9 +17,9 @@
 
 use inkwell::values::{FunctionValue, GlobalValue, IntValue, PointerValue};
 
-use super::layout::{self, TYPE_ID};
-use super::shared::{SharedFn, Slot, State};
-use super::{Cx, F};
+use crate::codegen::libcache::shared::{SharedFn, Slot, State};
+use crate::codegen::memory::layout::{self, TYPE_ID};
+use crate::codegen::{Cx, F};
 use crate::mir::Ty;
 
 /// The deepest a chain of calls may go before it raises, as in v1.

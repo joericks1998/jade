@@ -30,7 +30,7 @@
 //! text itself, with v1's message, so library code can neither skip a check
 //! nor launder a value.
 //!
-//! `random.rs` shares the spin lock and the wall clock, and `support/tasks.rs`
+//! `random.rs` shares the spin lock and the wall clock, and `tasks/`
 //! the sleep that `time.after`'s task runs.
 
 mod fs;
@@ -39,9 +39,9 @@ mod random;
 
 use inkwell::values::{BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 
-use super::layout::{ARR_DATA, DICT_KEYS, LEN};
-use super::shared::{Slot, State};
 use super::{Cx, F};
+use crate::codegen::libcache::shared::{Slot, State};
+use crate::codegen::memory::layout::{ARR_DATA, DICT_KEYS, LEN};
 use crate::mir::{SysFn, Ty};
 
 /// The bytes a `struct tm` is given: more than any C library's needs.

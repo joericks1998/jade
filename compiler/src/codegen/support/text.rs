@@ -21,7 +21,7 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use crate::codegen::layout::{ARR_DATA, CHAR_TAINT, LEN, STR_DATA, STR_TRUST};
+use crate::codegen::memory::layout::{ARR_DATA, CHAR_TAINT, LEN, STR_DATA, STR_TRUST};
 use crate::codegen::{Cx, F};
 
 impl<'ctx> Cx<'ctx> {

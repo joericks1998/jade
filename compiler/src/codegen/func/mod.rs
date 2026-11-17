@@ -11,13 +11,16 @@
 //! `Move` operand clears its temporary instead of retaining, and the operands
 //! an operation keeps (an element pushed, a field set) are consumed.
 
+pub(super) mod builder;
+pub(super) mod errors;
+
 use inkwell::basic_block::BasicBlock;
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
-use super::layout::{self, ARR_DATA, LEN, TYPE_ID};
-use super::support::tasks;
 use super::{Cx, F};
+use crate::codegen::memory::layout::{self, ARR_DATA, LEN, TYPE_ID};
+use crate::codegen::tasks;
 use crate::mir::{
     ArithOp, BinOp, BitOp, CmpOp, Const, Func, NumTy, Op, Operand, Place, Program, Rvalue, Stmt,
     StrMethod, Term, Ty, UnOp, is_heap,
@@ -102,7 +105,7 @@ pub fn lower<'a, 'ctx>(
     let counts = if func.name == "main" { 0 } else { 1 };
     let depth = f.add(f.load_i64(d), f.i64(counts));
     f.store(d, depth);
-    let too_deep = f.sgt(depth, f.i64(super::errors::RECURSION_LIMIT));
+    let too_deep = f.sgt(depth, f.i64(errors::RECURSION_LIMIT));
     let refuse = f.block();
     f.cond_br(too_deep, refuse, blocks[0]);
     f.position(refuse);

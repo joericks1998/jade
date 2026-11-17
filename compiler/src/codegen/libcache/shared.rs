@@ -41,7 +41,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue};
 use inkwell::{GlobalVisibility, ThreadLocalMode};
 
-use super::{Cx, F};
+use crate::codegen::{Cx, F};
 
 /// Purpose: This enum says which kind of module a [`Cx`] builds.
 #[derive(Debug, Clone, Default)]
@@ -92,7 +92,7 @@ impl Slot {
     fn init<'ctx>(self, cx: &Cx<'ctx>) -> BasicValueEnum<'ctx> {
         match self {
             Slot::Word(v) => cx.i64t().const_int(v as u64, true).into(),
-            other => super::layout::zero(other.ty(cx)),
+            other => crate::codegen::memory::layout::zero(other.ty(cx)),
         }
     }
 }
