@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This directory is the code half of inference: what the prelude, `src/infer/prelude.jde`, asks of `__infer`, written into the program from the model's plan. [`src/infer/`](../../infer/README.md) describes the whole path, from the plan dovata gives at build time to a token.
+This directory is the CPU side of inference at run time: what the prelude, `src/infer/prelude.jde`, asks of `__infer`, written into the program from the model's plan. It opens the model's memory, launches each step, and picks each token. The GPU side, the kernels each step launches, is [`../gpu_kernels/`](../gpu_kernels/README.md), and [`src/infer/`](../../infer/README.md) is what happens at build time and describes the whole path, from the plan dovata gives to a token.
 
 It has four jobs, one file each:
 
@@ -15,7 +15,7 @@ next.rs    one token per call, picked greedily from the step's logits
 
 ## Why it is a directory
 
-It was one file, `infer.rs`, until 2.0.13. Splitting it keeps the part that talks to Apple's GPU in `metal.rs` alone. Apple publishes no instruction set for its GPUs, so Metal compiles the kernels, `src/infer/kernels.metal`, inside the program the first time it runs a prompt, and jade cannot show their assembly. NVIDIA and AMD GPUs can be programmed through LLVM instead, so a CUDA path would be a file beside `metal.rs`, and the tables, the mapping and the token choice would serve both.
+It was one file, `infer.rs`, until 2.0.13. Splitting it keeps the part that talks to Apple's GPU in `metal.rs` alone. Apple publishes no instruction set for its GPUs, so Metal compiles the kernels, `../gpu_kernels/apple/kernels.metal`, inside the program the first time it runs a prompt, and jade cannot show their assembly. NVIDIA's kernels are built through LLVM into PTX by `../gpu_kernels/nvidia/` since 2.0.15, so the CUDA path that launches them will be a file beside `metal.rs`, and the tables, the mapping and the token choice will serve both.
 
 ## What each file does
 
@@ -29,7 +29,7 @@ It was one file, `infer.rs`, until 2.0.13. Splitting it keeps the part that talk
 
 *Used by:* `../func/`, which lowers each `__infer` operation in the prelude to `infer_op`, and `../mod.rs`, whose C `main` calls `init` in a program that runs a model.
 
-*Depends on:* `crate::infer::plan` for the plan, `../libcache/shared.rs` for the model's state, which the program defines once, and `../memory/layout.rs`.
+*Depends on:* `crate::infer::plan` for the plan, `../gpu_kernels/` for the kernels and the size of their argument record, `../libcache/shared.rs` for the model's state, which the program defines once, and `../memory/layout.rs`.
 
 ## Gotchas
 

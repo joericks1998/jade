@@ -1,5 +1,5 @@
 //! Everything that talks to Metal, Apple's GPU API: `setup` builds a device,
-//! compiles `kernels.metal`, makes a pipeline per kernel and a buffer over each
+//! compiles the kernels, makes a pipeline per kernel and a buffer over each
 //! region without copying it; `step` fills the step's inputs, walks the op
 //! table and encodes one dispatch per op into one command buffer, then waits
 //! for it.
@@ -7,24 +7,22 @@
 //! Metal is an Objective-C API, so every call is `objc_msgSend` with the
 //! selector's own signature; on Apple Silicon a struct of more than 16 bytes,
 //! such as `MTLSize`, goes by pointer. Apple publishes no instruction set for
-//! its GPUs, so the kernels go into the program as Metal source, and Metal
-//! compiles them for the GPU the first time the program runs a prompt.
+//! its GPUs, so the kernels go into the program as Metal source,
+//! `codegen/gpu_kernels/apple/kernels.metal`, and Metal compiles them for the
+//! GPU the first time the program runs a prompt.
 
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 
+use crate::codegen::gpu_kernels::ARGS_BYTES;
 use crate::codegen::libcache::shared::Slot;
 use crate::codegen::{Cx, F};
 use crate::infer::plan::{Addr, KERNELS, MUL_MM, OP_WORDS, threads};
 use crate::mir::Ty;
 
 /// The Metal kernels, compiled when the program first runs a prompt.
-const KERNELS_SOURCE: &str = include_str!("../../infer/kernels.metal");
-
-/// The size of the record each kernel takes as buffer 5: five tensors of twelve
-/// words, eight floats and eight ints.
-const ARGS_BYTES: i64 = 5 * 96 + 32 + 64;
+const KERNELS_SOURCE: &str = crate::codegen::gpu_kernels::apple::SOURCE;
 
 impl<'ctx> Cx<'ctx> {
     /// Purpose: This function returns a selector, registered once and kept.

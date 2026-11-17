@@ -193,6 +193,52 @@ fn rope_parameters_ride_in_the_record() {
     assert_eq!(f32::from_bits((rec[61] & 0xffff_ffff) as u32), 10000.0);
     assert_eq!(rec[65], 4);
     assert_eq!(rec[66], 2);
+    // base^(-2 / n_dims), which the NVIDIA kernel raises to each pair's power.
+    assert_eq!(f32::from_bits((rec[62] >> 32) as u32), 0.01);
+    assert_eq!(rec[67], 0, "no frequency factors");
+}
+
+/// Llama 3.1's frequency factors ride in as rope's third input, and the
+/// record says so, since an absent tensor has no slot the kernel could check.
+#[test]
+fn rope_frequency_factors_are_flagged_or_refused() {
+    let rope = json!([{"op": "rope", "inputs": ["inpL", "inp_pos", "rope_freqs.weight"],
+        "outputs": ["inpL"],
+        "params": {"freq_base": 10000.0, "freq_scale": 1.0, "attn_factor": 1.0, "ext_factor": 0.0,
+                   "n_dims": 4, "mode": 0}}]);
+    let factors = |ty: i64, len: i64| {
+        json!({"tensor": "rope_freqs.weight", "role": {"kind": "weight"}, "ggml_type": ty,
+               "dims": [len], "region": 0, "offset": 48})
+    };
+    let r = read_test(&plan(rope.clone(), vec![factors(0, 2)])).unwrap();
+    assert_eq!(r.ops[0][67], 1);
+    assert_eq!(r.ops[0][1 + 2 * 12], 0, "the factors' region");
+    let e = read_test(&plan(rope.clone(), vec![factors(1, 2)])).unwrap_err();
+    assert!(e.contains("frequency factors") && e.contains("rope_freqs.weight"), "{e}");
+    let e = read_test(&plan(rope, vec![factors(0, 1)])).unwrap_err();
+    assert!(e.contains("one f32 per rotated pair"), "{e}");
+}
+
+/// Attention gives each of 32 threads at most eight values of a head, so a
+/// query or key head wider than 256 is refused, not only a value head.
+#[test]
+fn attention_heads_wider_than_256_are_refused() {
+    let tensor = |name: &str, dims: serde_json::Value, offset: i64| {
+        json!({"tensor": name, "role": {"kind": "kv"}, "ggml_type": 1, "dims": dims,
+               "region": 1, "offset": offset})
+    };
+    let entries = vec![
+        tensor("q", json!([512, 8, 2]), 8192),
+        tensor("k", json!([512, 16, 2]), 16384),
+        tensor("v", json!([64, 16, 2]), 24576),
+    ];
+    let p = plan(
+        json!([{"op": "flash_attn_ext", "inputs": ["q", "k", "v", "attn_inp_kq_mask"],
+                "outputs": ["inpL"], "params": {"scale": 0.125}}]),
+        entries,
+    );
+    let e = read_test(&p).unwrap_err();
+    assert!(e.contains("wider than 256"), "{e}");
 }
 
 #[test]

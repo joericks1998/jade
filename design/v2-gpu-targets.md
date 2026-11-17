@@ -1,8 +1,9 @@
 # One folder per GPU
 
-Status: proposed 2026-11-15, for review. Nothing here is built. Joe asked for Apple,
-NVIDIA and AMD GPUs to each get their own folder and their own implementation, and for a
-design first. The product machine has an RTX 2000 Ada, 16 GB, and the demo and test
+Status: proposed 2026-11-15. Steps 2 and 3 are built: dovata holds a model in VRAM in
+jade 2.0.14 and dovata 3.2.3, and the NVIDIA kernels exist in jade 2.0.15. The CPU side,
+step 4, is next. Joe asked for Apple, NVIDIA and AMD GPUs to each get their own folder
+and their own implementation, and for a design first. The product machine has an RTX 2000 Ada, 16 GB, and the demo and test
 machine an RTX 3090, 24 GB, both on Linux; there is no AMD machine yet. The decisions
 below are recommendations until Joe agrees to them, and the questions at the end need
 Joe's answer before code moves.
@@ -45,36 +46,42 @@ ships `libamdhip64.so.6` and `.so.7`, so the library's version follows ROCm's.
 
 ## The layout
 
+On 2026-11-16 Joe asked for the kernels to sit apart from the CPU code, in a folder of
+their own named for what they are, so codegen's two kinds of code are clear: the CPU code
+that opens the model's memory and launches each step, and the GPU code each step runs.
+The layout below replaces the first draft's, which put each GPU's kernels inside its
+folder under `codegen/infer/`. The kernels part was built on branch `2.0.15`.
+
 ```
-compiler/src/codegen/infer/
-  mod.rs          infer_op, the lock, the model's globals; picks the GPU folder
+compiler/src/codegen/gpu_kernels/    the GPU code, built in 2.0.15
+  mod.rs          the argument record's size; every kernel written in KERNELS order
+  builder.rs      K, the builder LLVM kernels are written in; the per-GPU methods:
+                  thread and block ids, warp sums, barriers, shared memory, fast math
+  values.rs       reading each type; decoding f16, bf16, q8_0, q4_0, q4_K, q5_K, q6_K
+  elementwise.rs  get_rows, mul, add, rope, cpy, set_rows, swiglu
+  norm.rs         rms_norm
+  matmul.rs       mul_mat, one warp per output, and mul_mm, 32 by 32 tiles
+  attention.rs    flash_attn
+  apple/          kernels.metal, moved from src/infer/
+  nvidia/         the kernels built through NVPTX into PTX, and the GPU test
+  amd/            later: the same kernels through AMDGPU into a code object
+
+compiler/src/codegen/infer/          the CPU code
+  mod.rs          infer_op, the lock, the model's globals; picks the GPU
   tables.rs       the tokenizer's tables, unchanged
-  next.rs         the generation loop and argmax, over what the GPU folder gives it
+  next.rs         the generation loop and argmax, over what the GPU gives it
   step.rs         the step's inputs: ids, positions, cache cells, the mask
-  apple/
-    mod.rs        setup and the step on Metal, from today's metal.rs
-    objc.rs       objc_msgSend, selectors, NSString and NSError
-    map.rs        today's map.rs: part files and shared memory, macOS's constants
-    kernels.metal moved from src/infer/
-  nvidia/
-    mod.rs        setup and the step on CUDA
-    driver.rs     libcuda.so.1, opened with dlopen; each function looked up once
-    open.rs       each region opened from the handle dovata's record gives
-    kernels/      one file per kernel family, built through NVPTX into PTX
-  amd/
-    mod.rs        setup and the step on HIP
-    driver.rs     libamdhip64.so, opened with dlopen
-    open.rs       each region opened from dovata's handle
-    kernels/      built through AMDGPU into a code object
-  gpu/            what nvidia/ and amd/ share, because both go through LLVM
-    builder.rs    thread and block ids, shared memory, barriers, shuffles
-    quant.rs      decoding f16, bf16, q8_0, q4_0, q4_K, q5_K and q6_K blocks
+  apple/          setup and the step on Metal, from today's metal.rs; objc_msgSend;
+                  today's map.rs, with macOS's constants
+  nvidia/         setup and the step on CUDA: libcuda.so.1 opened with dlopen, each
+                  region opened from the handle dovata's record gives
+  amd/            later: the same through HIP
 ```
 
-`compiler/src/infer/` keeps what is the same on every GPU: `plan.rs`, `rewrite.rs`,
-`prelude.jde` and `unicode.rs`. `kernels.metal` leaves it, since it is Apple's.
-`plan.rs`'s `KERNELS` list stays as the contract between the plan and the folders: an op
-record names kernel number `k`, and every folder has a kernel for every number.
+`compiler/src/infer/` keeps what runs inside the compiler at build time: `plan.rs`,
+`rewrite.rs`, `prelude.jde` and `unicode.rs`. `plan.rs`'s `KERNELS` list stays as the
+contract between the plan and the GPUs: an op record names kernel number `k`, and every
+GPU has a kernel for every number.
 
 ## What every GPU folder answers
 
@@ -339,16 +346,27 @@ Each step is its own patch, on a branch named for its version:
    removed model freed when no live lease is left. Tested on Joe's NVIDIA machine with a checker in the spirit
    of `refback`, which reads every tensor back and compares it with the GGUF file.
    Written on branch `2.0.14` with dovata 3.2.3; the checker is `dovata check <name>`.
-3. *The kernels*, compiler: `gpu/builder.rs`, `gpu/quant.rs`, `nvidia/kernels/`, and
-   `--emit kernels`. Checked on the Mac and in CI: every kernel builds into PTX with a
-   named entry point.
+3. *The kernels*, compiler: `codegen/gpu_kernels/`, with the builder, the value readers
+   and every kernel, built into PTX for `sm_86`. Built on branch `2.0.15`. Checked on the
+   Mac and in CI two ways: every kernel builds into PTX with a named entry point and no
+   outside calls, and every kernel runs on the CPU, one thread per GPU thread, over 47
+   cases compared with f64 math. On an NVIDIA machine the same cases run on the GPU, which
+   is the first test on Joe's machine. Rope's record gained float parameter 3,
+   `freq_base^(-2/n_dims)`, so the kernel need not call a fast pow whose error grows with
+   the position. A review found that both GPUs' rope ignored Llama 3.1's frequency
+   factors, rope's third input; both read them now, flagged by integer parameter 2. `--emit kernels` waits for step 4, since a program cannot be built
+   against a model in VRAM until then.
 4. *The NVIDIA host code*, compiler: `driver.rs`, `open.rs`, setup and the step, and
    the lease and the thread that answers dovata's signal, from `dovata-vram-cache.md`,
    with Linux's open flags. Before it opens a handle, a program writes its lease and
    reads dovata's record again, the way dovata 3.2.3's `map` does; a handle compiled into
    the program does not settle by itself whether dovata still holds the memory. Tested on Joe's
    machine with `infer::tests`, which compare a program's tokens and greedy reply with
-   llama.cpp's on the same GGUF file, against a llama.cpp built for CUDA.
+   llama.cpp's on the same GGUF file, against a llama.cpp built for CUDA. The step skips
+   an op with no threads, as Metal's does, since `cuLaunchKernel` refuses an empty grid.
+   That test is also the first to run the kernels on a real plan's memory: tensors at
+   offsets inside a region, views where dovata placed them, and `set_rows` writing into
+   its own `src0`.
 5. *Tuning NVIDIA*: tensor cores, the token picked on the GPU, f16 tiles.
 6. *AMD*, once there is a machine to test on.
 

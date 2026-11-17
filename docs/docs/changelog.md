@@ -4,6 +4,16 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.15
+
+*jade has GPU kernels for NVIDIA.* Every op a model's step runs, from looking up a token's embedding to attention, now has a kernel for NVIDIA GPUs, built through LLVM into PTX. A program will carry the PTX and NVIDIA's driver compiles it for the card, so running one needs the driver and no CUDA toolkit. The PTX targets `sm_86`, the RTX 3090's generation, and runs on newer cards too. A program that dereferences a prompt still runs on Apple's GPU only: the code that opens dovata's VRAM and launches these kernels comes next.
+
+- *GPU code has its own directory.* `src/codegen/gpu_kernels/` holds every GPU's kernels, apart from the CPU code that launches them: Apple's Metal source, moved from `src/infer/kernels.metal`, and the NVIDIA kernels, written once against a small builder so an AMD GPU can follow.
+- *The kernels are tested without a GPU.* Every kernel runs on the CPU, one CPU thread per GPU thread, over 49 cases of every weight type, compared with plain math. On a Linux machine with an NVIDIA GPU, `cargo test gpu_kernels::` runs the same cases on the GPU.
+- *Rope's records carry one more number*, the frequency base to the power `-2/n_dims`, so the NVIDIA kernel stays accurate at long positions. Metal's kernels ignore it.
+- *Llama 3.1 and 3.2 rotate by their frequency factors, on a Mac too.* Their files hold `rope_freqs.weight`, which divides each pair's rope angle, and the Metal kernel ignored it, so replies drifted as the context grew, with no error. Both GPUs' kernels now read it, and a plan whose factors are not one f32 per pair is refused by name.
+- *Attention checks every head's width.* A model whose query or key heads are wider than 256 values is refused, where only the value heads were checked before.
+
 ## v2.0.14
 
 *jade reads dovata's records of a model held in VRAM.* dovata 3.2.3, its release beside this one, holds a model in an NVIDIA GPU's memory, and its record names each region by an IPC handle rather than a shared memory name. A program that dereferences a prompt still runs on Apple's GPU only, so building one against a model in VRAM stops with a message that says so and suggests adding the model with `--cpu`. Use jade 2.0.14 with dovata 3.2.3; the record's format changed, and each refuses the other's older one.

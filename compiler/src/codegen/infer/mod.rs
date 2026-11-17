@@ -1,5 +1,6 @@
-//! The backend half of inference: what `src/infer/prelude.jde` asks of
-//! `__infer`, written into the program from the model's plan.
+//! The CPU side of inference at run time: what `src/infer/prelude.jde` asks
+//! of `__infer`, written into the program from the model's plan. The kernels
+//! each step launches on the GPU are `codegen/gpu_kernels/`.
 //!
 //! Four files, one job each:
 //!
@@ -7,7 +8,7 @@
 //!   constants, and the Unicode classes its splitter asks about.
 //! - *`map.rs`*: `map` opens each region of the model's memory by the name
 //!   dovata's record gave at build time and maps it.
-//! - *`metal.rs`*: `setup` builds a Metal device, compiles `kernels.metal` and
+//! - *`metal.rs`*: `setup` builds a Metal device, compiles Apple's kernels and
 //!   makes a pipeline per kernel; `step` runs one forward step as one command
 //!   buffer.
 //! - *`next.rs`*: `next` gives one token of a reply per call. The prelude

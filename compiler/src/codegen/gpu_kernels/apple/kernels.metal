@@ -662,11 +662,13 @@ kernel void k_mul_mm(device const uchar * s0 [[buffer(0)]], device const uchar *
     }
 }
 
-// rope(src0, pos) → dst. f[0] freq_base, f[1] freq_scale, f[2] attn_factor;
-// i[0] n_dims, i[1] mode: 0 normal, 2 neox. The position of token i2 is
-// pos[i2]. One thread per pair of rotated values, and one per value past
-// n_dims, which is copied.
+// rope(src0, pos, factors) → dst. f[0] freq_base, f[1] freq_scale, f[2]
+// attn_factor; i[0] n_dims, i[1] mode: 0 normal, 2 neox; i[2] 1 when src2
+// holds Llama 3.1's frequency factors, one per pair, which divide each pair's
+// angle. The position of token i2 is pos[i2]. One thread per pair of rotated
+// values, and one per value past n_dims, which is copied.
 kernel void k_rope(device const uchar * s0 [[buffer(0)]], device const uchar * s1 [[buffer(1)]],
+                   device const uchar * s2 [[buffer(2)]],
                    device uchar * d [[buffer(4)]], constant Args & a [[buffer(5)]],
                    uint gid [[thread_position_in_grid]]) {
     if (long(gid) >= a.i[7]) return;
@@ -695,6 +697,9 @@ kernel void k_rope(device const uchar * s0 [[buffer(0)]], device const uchar * s
     }
     float pos = float(index_at(s1, a.src[1], i2, 0));
     float theta = a.f[1] * pos * pow(a.f[0], -2.0f * float(pair) / float(n_dims));
+    if (a.i[2] != 0) {
+        theta /= load(s2, a.src[2], pair, 0, 0, 0);
+    }
     float c = cos(theta) * a.f[2];
     float s = sin(theta) * a.f[2];
     float x0 = load(s0, a.src[0], first, i1, i2, i3);

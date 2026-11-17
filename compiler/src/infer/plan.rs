@@ -30,7 +30,8 @@ use dovata::memplan::{AddressEntry, Plan, Role};
 /// The words in one op record. See [`InferPlan::ops`].
 pub const OP_WORDS: usize = 80;
 
-/// The kernels in `kernels.metal`, by the number an op record names.
+/// The kernels, by the number an op record names. Every GPU in
+/// `codegen/gpu_kernels/` has a kernel of each name.
 pub const KERNELS: &[&str] = &[
     "k_get_rows",
     "k_rms_norm",
@@ -66,7 +67,8 @@ pub mod threads {
     /// [`TILE_THREADS`] threads each.
     pub const MAT: i64 = 4;
     /// The rows of weights and the tokens in one `k_mul_mm` tile. `TILE` in
-    /// `kernels.metal` is the same number.
+    /// `kernels.metal` and in `codegen/gpu_kernels/matmul.rs` is the same
+    /// number.
     pub const TILE: i64 = 32;
     /// The threads that compute one `k_mul_mm` tile: two SIMD groups, one
     /// threadgroup.
@@ -75,6 +77,24 @@ pub mod threads {
     /// `flash_attn_ext`, which read a whole row for each: one SIMD group. Word
     /// 74 of a record is this or 1.
     pub const GROUP: i64 = 32;
+}
+
+/// Purpose: This function gives rope's step between pairs' frequencies:
+/// `freq_base^(-2 / n_dims)`, float parameter 3 of a rope record.
+///
+/// Inputs:
+/// - `freq_base`: the frequency base, such as 10000 or 1000000.
+/// - `n_dims`: how many dimensions of a head rope rotates.
+///
+/// Outputs: the step, or 0 for no dimensions. Pair `p`'s frequency is the step
+/// to the power `p`. The NVIDIA kernel raises it to `p` by squaring rather
+/// than calling a fast pow, whose error grows with the position; Metal's
+/// kernel calls `pow` and ignores it.
+pub fn rope_theta_scale(freq_base: f64, n_dims: i64) -> f32 {
+    if n_dims <= 0 {
+        return 0.0;
+    }
+    freq_base.powf(-2.0 / n_dims as f64) as f32
 }
 
 /// Purpose: This struct holds where a tensor is: a region and a byte offset.
@@ -462,6 +482,21 @@ pub fn read(held: &HeldModel, plan: &Plan, clients: &Path) -> Result<InferPlan, 
                 f[2] = p("attn_factor") as f32;
                 ints[0] = int(params, "n_dims");
                 ints[1] = int(params, "mode");
+                f[3] = rope_theta_scale(p("freq_base"), ints[0]);
+                // Llama 3.1's frequency factors, `rope_freqs.weight`, divide
+                // each pair's angle: one f32 per pair.
+                if inputs.len() > 2 {
+                    let factors = rec[1 + 2 * 12 + 10];
+                    let len = rec[1 + 2 * 12 + 2];
+                    if factors != 0 || len < ints[0] / 2 {
+                        return Err(fail(format!(
+                            "its rope's frequency factors, {}, are not one f32 per rotated \
+                             pair",
+                            inputs[2]
+                        )));
+                    }
+                    ints[2] = 1;
+                }
                 if ints[1] != 0 && ints[1] != 2 {
                     return Err(fail(format!(
                         "its rope mode {} is not one the kernels run",
@@ -473,7 +508,9 @@ pub fn read(held: &HeldModel, plan: &Plan, clients: &Path) -> Result<InferPlan, 
                 if p("max_bias") != 0.0 || p("logit_softcap") != 0.0 {
                     return Err(fail("its attention uses ALiBi or a soft cap, which the Metal kernels do not run yet".into()));
                 }
-                if rec[1 + 2 * 12 + 2] > 256 {
+                // Q, K and V's heads: each of a warp's 32 threads holds at
+                // most eight values of one.
+                if [0, 1, 2].iter().any(|slot| rec[1 + slot * 12 + 2] > 256) {
                     return Err(fail("its attention heads are wider than 256".into()));
                 }
                 for slot in [1, 2] {

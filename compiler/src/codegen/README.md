@@ -13,6 +13,8 @@ MIR → codegen writes → LLVM IR → LLVM compiles → .o files → src/link/ 
 otool -L unicode        # /usr/lib/libSystem.B.dylib, and nothing else
 ```
 
+Most of this directory writes the program's CPU code. [`gpu_kernels/`](gpu_kernels/README.md) writes the other kind, the kernels a model's step runs on the GPU: Metal source for Apple, and PTX built through LLVM for NVIDIA.
+
 It is the only code generator. It sat behind `--backend=static` while it grew, and became the only one in phase 6 of `design/v2-static-values.md`, when v1's backend and both of its runtimes were deleted. It was `src/backend/` until 2.0.11, which moved linking into `src/link/` and gave this directory the name of the one job it does. 2.0.13 split it the same way inside: each subdirectory is one job, such as writing a function, tasks or inference. `golden.sh` holds every example to the outputs v1.4.8 printed.
 
 ## Why it was built
@@ -70,7 +72,8 @@ The top level holds the module being built and the entry points. Each subdirecto
 - *[`support/`](support/README.md)* has the support code for values: strings, case tables, bytes, arrays and dicts, comparison, printing and conversions, sized numbers and `toDict`.
 - *[`tasks/`](tasks/README.md)* has `async fn` and its futures: the job queue, the worker threads, `await`, `join`, `wait` and `cancel`.
 - *[`sys/`](sys/README.md)* has the `__sys` hooks the std library written in Jade calls: the C library and LLVM operations behind `std::fs`, `std::sh`, `std::http`, `std::random`, `std::time`, `std::math` and `std::env`.
-- *[`infer/`](infer/README.md)* has inference: the tokenizer's tables, mapping the model's memory, Metal, and generating one token per call.
+- *[`infer/`](infer/README.md)* has the CPU side of inference: the tokenizer's tables, mapping the model's memory, launching each step on Metal, and generating one token per call.
+- *[`gpu_kernels/`](gpu_kernels/README.md)* has the GPU side: one kernel per op of a model's step, as Metal source for Apple and built through LLVM's NVPTX backend into PTX for NVIDIA, with a builder for the LLVM kernels, and tests that run every kernel on the CPU and, on an NVIDIA machine, on the GPU.
 - *[`libcache/`](libcache/README.md)* has the std library's object cache: which instances get an object, which are copied into their callers, the state the program and the objects share, and the cache under `~/.jade/lib`.
 
 ## Who uses it
@@ -100,6 +103,7 @@ The top level holds the module being built and the entry points. Each subdirecto
 ```sh
 cargo test codegen::
 cargo test codegen::libcache    # the library cache, each test with a cache root of its own
+cargo test gpu_kernels::        # the GPU kernels: PTX, and every kernel run on the CPU
 ./compiler/src/scripts/golden.sh
 HOME=$(mktemp -d) ./compiler/src/scripts/golden.sh   # the same, from a cold cache
 ./target/debug/jade build --emit ir file.jde    # the IR, before optimization, in one module

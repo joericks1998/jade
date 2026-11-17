@@ -64,6 +64,7 @@
 //! build given no cache root, put everything in one module.
 
 mod func;
+pub(crate) mod gpu_kernels;
 mod infer;
 mod libcache;
 mod memory;

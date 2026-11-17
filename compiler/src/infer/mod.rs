@@ -15,11 +15,12 @@
 //! - `plan.rs` reads the model's record and plan from dovata and builds what
 //!   the backend emits: where each region is, the op table, the tokenizer's
 //!   tables and the inputs each step fills.
-//! - `kernels.metal` holds the Metal kernels, one per op.
 //! - `unicode.rs` holds the character classes the tokenizer splits text by.
 //!
-//! The backend half, which maps the memory, drives Metal and runs the
-//! generation loop, is `src/codegen/infer/`.
+//! All of this runs inside the compiler, at build time. What runs in the
+//! program is codegen's: `src/codegen/infer/` is the CPU side, which maps the
+//! memory, launches each step and runs the generation loop, and
+//! `src/codegen/gpu_kernels/` is the GPU side, the kernels each step runs.
 
 pub mod plan;
 pub mod rewrite;

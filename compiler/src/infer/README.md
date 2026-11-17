@@ -18,6 +18,16 @@ dovata add https://huggingface.co/unsloth/Qwen3-0.6B-GGUF --quant Q4_K_M
 jade run app.jde
 ```
 
+Inference has three parts, in three places. This directory is the first, and runs inside the compiler; the other two are code the compiler writes into the program:
+
+```
+src/infer/                   build time, inside the compiler: asks dovata for the plan,
+                             turns ?p into calls to the Jade tokenizer
+src/codegen/infer/           run time, on the CPU: opens the model's memory, launches
+                             each step, picks the next token
+src/codegen/gpu_kernels/     run time, on the GPU: the kernels each step launches
+```
+
 It runs on Apple Silicon Macs for now. The kernels are simple on purpose, because the real tuning goes to the CUDA and Linux kernels first. The three that read a whole row for each output, matrix multiplication, RMS norm and attention, give each output one SIMD group of 32 threads; every other op runs one thread per value. Reading a prompt multiplies matrices on the GPU's matrix hardware instead. On an M4 with 24 GB, Qwen3 0.6B makes a token in 15 to 21 milliseconds, where llama.cpp takes about 6 on the same machine, and reads a 93-token prompt in about 0.1 seconds, where llama.cpp takes 0.04.
 
 ## How a prompt becomes a reply
@@ -26,7 +36,7 @@ It runs on Apple Silicon Macs for now. The kernels are simple on purpose, becaus
 
 *The prelude* is Jade. It tokenizes text with byte-level BPE, the kind Qwen, Llama 3 and GPT-2 use: it splits the text into words by the model's pre-tokenizer pattern, writes each word's bytes in the byte alphabet, merges pairs by rank, and looks the pieces up. Added tokens such as `<|im_start|>` are matched first. Decoding maps pieces back to bytes. `reply` collects a whole reply and decodes it once; `reply_pieces` decodes each token as it comes and yields the text it finishes, holding back the bytes of a character split across tokens. Its tables come from the plan through `__infer.data`, built once when the program starts, so a task that dereferences a prompt only reads them, and the task check accepts it. The typed forms read the first number, the first yes or no, or the first char out of the reply.
 
-*The code half*, [`src/codegen/infer/`](../codegen/infer/README.md), answers what the prelude asks of `__infer`: the tables, the Unicode classes the splitter needs, mapping the model's memory by the names dovata gave at build time, setting up Metal, and `next`, which gives one token per call: it runs the tokens the model has not seen yet through as many steps as they take, then picks the likeliest token, greedily, or answers -1 at a stop token or a full context. The prelude calls it until then or `max_tokens()`. The model's memory holds one conversation at a time and the lock is not held between tokens, since a pipe runs the program's own code there, so a conversation that another prompt displaced reads its tokens back in at its next call.
+*The CPU side*, [`src/codegen/infer/`](../codegen/infer/README.md), answers what the prelude asks of `__infer`: the tables, the Unicode classes the splitter needs, mapping the model's memory by the names dovata gave at build time, setting up Metal, and `next`, which gives one token per call: it runs the tokens the model has not seen yet through as many steps as they take, then picks the likeliest token, greedily, or answers -1 at a stop token or a full context. The prelude calls it until then or `max_tokens()`. The model's memory holds one conversation at a time and the lock is not held between tokens, since a pipe runs the program's own code there, so a conversation that another prompt displaced reads its tokens back in at its next call. *The GPU side*, [`src/codegen/gpu_kernels/`](../codegen/gpu_kernels/README.md), is the kernels each step launches, one per op.
 
 ## Why it is built this way
 
@@ -54,19 +64,19 @@ It runs on Apple Silicon Macs for now. The kernels are simple on purpose, becaus
 - *`rewrite.rs`* finds every `?p` and turns it into a call into the prelude, which it adds to the program. It walks the parser's tree as the per-file pass left it, a class field's default included, since a copy-with literal can lower one. A dereference into a class or through a grammar is left for MIR to name as not compiled yet, and a `RawPipe`, which the per-file pass never leaves behind, is reported as an internal error.
 - *`prelude.jde`* is the tokenizer, the decoder and the functions dereferences become.
 - *`plan.rs`* asks dovata's library for the model a program runs, the one `jade.toml`'s `[model]` names or the one model the process holds, and reads its record and plan. A model dovata holds in VRAM on an NVIDIA GPU, which it names by IPC handle since dovata 3.2.3, is refused until the NVIDIA kernels exist, with a message to add it with `--cpu`. It checks the plan describes a model the kernels can run and turns it into an `InferPlan`: where each region is, one fixed-size record per op that launches a kernel, the addresses of the inputs each step fills, the logits, the stop tokens and the tokenizer's tables. Views, reshapes and permutes launch nothing, since the plan already placed their tensors. An op, a weight type, an input or a tokenizer it does not know is refused by name.
-- *`kernels.metal`* holds the kernels, one per op: `get_rows`, `rms_norm`, `mul`, `add`, `mul_mat`, `rope`, `cpy`, `set_rows`, `swiglu` and `flash_attn_ext`. They read f32, f16, bf16, q8_0, q4_0, q4_K, q5_K and q6_K weights. `mul_mat` decodes 32 weights at a time, reading their scale once, and multiplies them by f32, f16 or bf16 values; `k_mul_mm`, its form for a step of many tokens, multiplies 32 by 32 tiles on the matrix hardware; the other kernels dequantize each value as they read it.
+- The kernels, one per op, are not here: `get_rows`, `rms_norm`, `mul`, `add`, `mul_mat`, `rope`, `cpy`, `set_rows`, `swiglu` and `flash_attn_ext` are in [`src/codegen/gpu_kernels/`](../codegen/gpu_kernels/README.md), as Metal source for Apple and built through LLVM for NVIDIA. They read f32, f16, bf16, q8_0, q4_0, q4_K, q5_K and q6_K weights. `kernels.metal` sat here until 2.0.15. `plan.rs`'s `KERNELS` names them, and is the contract every GPU's kernels keep.
 - *`unicode.rs`* holds the letter, number and white space classes the pre-tokenizer splits by.
 - *`tests.rs`* compares a program's tokens and its greedy reply with llama.cpp's `llama-tokenize` and `llama-simple` on the same GGUF file. They skip, saying why, without a Mac, a running dovata process holding one model, or llama.cpp installed.
 
 ## Who uses it
 
-*Used by:* `build/mod.rs`, which runs the rewrite after imports are merged and reads the plan when a program that runs a model is built; `codegen/infer/`, which writes the plan into the program; and `link/mod.rs`, which links such a program against the Objective-C runtime and Metal as well as the C library.
+*Used by:* `build/mod.rs`, which runs the rewrite after imports are merged and reads the plan when a program that runs a model is built; `codegen/infer/`, which writes the plan into the program; `codegen/gpu_kernels/`, whose kernels follow `KERNELS` and the op record's layout; and `link/mod.rs`, which links such a program against the Objective-C runtime and Metal as well as the C library.
 
 *Depends on:* dovata's library, a cargo dependency with none of its capabilities turned on, which reads the dovata process's records at build time; and at run time on the memory the dovata process holds, which the program opens by name. The plan carries the tokenizer from dovata 3.2, and the records exist from dovata 3.2.2.
 
 ## What it does not do yet
 
-- *Other machines.* Linux and CUDA come next; a program that dereferences a prompt is refused elsewhere.
+- *Other machines.* A program that dereferences a prompt is refused anywhere but an Apple Silicon Mac. Since 2.0.15 the NVIDIA kernels exist and are tested on their own, on the CPU and on an NVIDIA GPU; the CPU side that opens dovata's VRAM and launches them comes next.
 - *Decoding into a class*, `City(?p)`, and *grammar-constrained* prompts, `g(?p)`. Both stop with an error naming them.
 - *Sampling.* Replies are greedy, so the same prompt gives the same reply.
 - *A quantized KV cache*, which takes Hadamard rotations as step inputs. Add the model to dovata with an f16 cache, the default.
