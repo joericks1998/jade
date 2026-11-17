@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.12
+
+*`jade build --emit asm` prints the assembly for your machine.* LLVM optimizes the program the way it does for a binary, for the same processor family, and writes it as text instead of an object file, so you see the code a binary runs: arm64 on an Apple Silicon Mac, x86-64 on an x86-64 Linux machine. Each function's label is its name and argument types, such as `jade.fn1.fib(int)`, so you can search for it. The [CLI page](cli#reading-the-assembly) shows an example.
+
+The `jade build` section of the CLI page no longer lists `--lib` and `--export`, which 2.0 removed, and now lists `--emit mir`.
+
 ## v2.0.11
 
 *The compiler's directories follow the build's steps.* Nothing a program can see changes: every example builds and prints what it printed before, and `--emit ir` and `--emit mir` show the same text. This release is for people working on the compiler.

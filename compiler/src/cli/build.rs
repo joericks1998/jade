@@ -155,7 +155,7 @@ pub(crate) fn compare_sources(
 /// Inputs:
 /// - `path`: the file to compile.
 /// - `output`: where `-o` says the binary goes, if anywhere.
-/// - `emit`: `ir` or `mir` to print that instead of writing a binary.
+/// - `emit`: `ir`, `mir` or `asm` to print that instead of writing a binary.
 ///
 /// Outputs: none. It exits with a message on failure.
 pub fn run_build(path: Option<&str>, output: Option<&str>, emit: Option<&str>) {
@@ -171,8 +171,9 @@ pub fn run_build(path: Option<&str>, output: Option<&str>, emit: Option<&str>) {
         None => crate::build::Emit::Binary,
         Some("ir") => crate::build::Emit::Ir,
         Some("mir") => crate::build::Emit::Mir,
+        Some("asm") => crate::build::Emit::Asm,
         Some(e) => {
-            eprintln!("error: unknown --emit format '{e}'; use 'ir' or 'mir'");
+            eprintln!("error: unknown --emit format '{e}'; use 'ir', 'mir' or 'asm'");
             process::exit(1);
         }
     };

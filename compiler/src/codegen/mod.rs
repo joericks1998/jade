@@ -648,6 +648,25 @@ pub fn ir(prog: &mir::Program) -> Result<String, String> {
     Ok(module.print_to_string().to_string())
 }
 
+/// Purpose: This function compiles a MIR program into one module and
+/// returns the assembly LLVM writes for it, for `--emit asm`. The module goes
+/// through the same target machine and optimizations as an object file, so
+/// the text is the code a binary runs, for this machine's architecture.
+///
+/// Inputs:
+/// - `prog`: the program.
+///
+/// Outputs: the assembly text, or LLVM's error.
+pub fn asm(prog: &mir::Program) -> Result<String, String> {
+    let ctx = Context::create();
+    let module = build_module(&ctx, prog)?;
+    let machine = target_machine()?;
+    optimize(&module, &machine)?;
+    let text =
+        machine.write_to_memory_buffer(&module, FileType::Assembly).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(text.as_slice()).into_owned())
+}
+
 /// Purpose: This struct holds the object files one build wrote, for the
 /// linker.
 #[derive(Debug)]

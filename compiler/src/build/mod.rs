@@ -15,7 +15,8 @@
 //!    `~/.jade/lib` when the caller names one.
 //! 5. `link` joins the object files and the C library into the binary.
 //!
-//! `would_build` runs steps 1 to 3, for `jade check`.
+//! `would_build` runs steps 1 to 3, for `jade check`. `--emit ir`, `--emit
+//! mir` and `--emit asm` stop before linking and print the text instead.
 //!
 //! All of it runs in-process. This used to be a client for a build daemon on
 //! `$HOME/.jade/build.sock`, when code generation lived in another
@@ -42,13 +43,15 @@ pub enum Emit {
     Ir,
     /// The MIR, as text.
     Mir,
+    /// The assembly LLVM writes for this machine, optimized as a binary is.
+    Asm,
 }
 
 /// What `compile` produces besides the artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompileOutcome {
-    /// The IR or MIR text, when that was asked for.
-    pub ir: Option<String>,
+    /// The IR, MIR or assembly text, when that was asked for.
+    pub text: Option<String>,
 }
 
 /// Purpose: This struct holds a program with its imports merged and its
@@ -143,10 +146,11 @@ pub fn would_build(program: &Program, source_path: Option<&Path>) -> Result<(), 
 /// - `emit`: what to produce.
 /// - `lib_cache`: where compiled std library instances are kept and reused,
 ///   `crate::codegen::default_lib_cache()` for `jade build`; `None` compiles
-///   the library with the program every time. `--emit ir` and `--emit mir`
-///   never use it.
+///   the library with the program every time. `--emit ir`, `--emit mir` and
+///   `--emit asm` never use it.
 ///
-/// Outputs: the IR or MIR text when asked for it, or the first error.
+/// Outputs: the IR, MIR or assembly text when asked for it, or the first
+/// error.
 pub fn compile(
     program: Program,
     source_path: Option<&Path>,
@@ -160,11 +164,12 @@ pub fn compile(
         mir.infer = Some(model_plan(source_path)?);
     }
     match emit {
-        Emit::Mir => Ok(CompileOutcome { ir: Some(mir.to_string()) }),
-        Emit::Ir => Ok(CompileOutcome { ir: Some(crate::codegen::ir(&mir)?) }),
+        Emit::Mir => Ok(CompileOutcome { text: Some(mir.to_string()) }),
+        Emit::Ir => Ok(CompileOutcome { text: Some(crate::codegen::ir(&mir)?) }),
+        Emit::Asm => Ok(CompileOutcome { text: Some(crate::codegen::asm(&mir)?) }),
         Emit::Binary => {
             binary(&mir, output_path, lib_cache)?;
-            Ok(CompileOutcome { ir: None })
+            Ok(CompileOutcome { text: None })
         }
     }
 }
@@ -235,8 +240,8 @@ fn model_plan(source_path: Option<&Path>) -> Result<crate::infer::plan::InferPla
 /// `source_path` anchors import resolution: imports resolve relative to the file
 /// being compiled, not the working directory. `lib_cache` is where compiled std
 /// library instances are kept, `crate::codegen::default_lib_cache()` for the
-/// CLI; tests pass a directory of their own, or `None` for no cache. An IR or
-/// MIR emit is written to stdout.
+/// CLI; tests pass a directory of their own, or `None` for no cache. An IR,
+/// MIR or assembly emit is written to stdout.
 pub fn build(
     program: &Program,
     source_path: &Path,
@@ -245,7 +250,7 @@ pub fn build(
     lib_cache: Option<&Path>,
 ) -> Result<(), String> {
     let outcome = compile(program.clone(), Some(source_path), out, emit, lib_cache)?;
-    if let Some(text) = outcome.ir {
+    if let Some(text) = outcome.text {
         crate::stdio::write_str(&text);
         crate::stdio::flush();
     }

@@ -37,30 +37,57 @@ jade check program.jde
 
 ## `jade build`
 
-Compile a Jade file into a native binary. Every step runs inside the `jade` process: the frontend lexes, parses, infers types, and produces typed IR, then import resolution, LLVM code generation, and linking follow. Unix only.
+Compile a Jade file into a native binary. Every step runs inside the `jade` process: the frontend lexes and parses the file, imports are merged, types are checked, the program is lowered to MIR, LLVM compiles it into object files, and the LLD inside `jade` links them. Unix only.
 
 ```bash
 jade build program.jde
 jade build program.jde --output mybin
 jade build program.jde --emit ir
-jade build --lib                          # build the [package] in jade.toml
+jade build program.jde --emit asm > program.s
 ```
 
-Every module the file `use`s is compiled into the same artifact, so a program or a package can span as many files as you like.
-
-With no file given, `--lib` builds the project's `[package]` section. Its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](packages#jade-source-packages).
+Every module the file `use`s is compiled into the same artifact, so a program can span as many files as you like. A Jade package is shared as source rather than built on its own; see [Packages](packages#jade-source-packages).
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `-o`, `--output <PATH>` | Output binary path. Defaults to the input filename without extension, or the package name for a `[package]` build. |
-| `--emit ir` | Print the generated LLVM IR to stdout instead of producing a binary. |
-| `--lib` | Build a shared library that exports `jade_pkg_init`, which is a package other Jade projects can depend on. |
-| `--export <NAME>` | With `--lib`, bind only the named functions. Repeatable, and the default is all of them. It overrides `[package].exports` when you give both. |
+| `-o`, `--output <PATH>` | Output binary path. Defaults to the input filename without extension. |
+| `--emit ir` | Print the LLVM IR, before optimization, to stdout instead of producing a binary. |
+| `--emit mir` | Print MIR, the typed middle layer the compiler lowers to LLVM, to stdout instead of producing a binary. |
+| `--emit asm` | Print the assembly for the machine `jade` runs on to stdout instead of producing a binary. |
+
+### Reading the assembly
+
+`--emit asm` shows the code a binary runs: LLVM optimizes it the same way, for the same processor family, then writes it as text instead of an object file. So the output depends on the machine. On an Apple Silicon Mac it is arm64 for macOS, and on an x86-64 Linux machine it is x86-64 for Linux.
+
+Each function's label is its name followed by its argument types, so you can search for it:
+
+```jade
+fn fib(n) {
+    if (n < 2) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+print(fib(30))
+```
+
+```bash
+jade build fib.jde --emit asm | grep -A12 'fib(int)":'
+```
+
+```
+"_jade.fn1.fib(int)":
+	stp	x24, x23, [sp, #-64]!
+	stp	x22, x21, [sp, #16]
+	...
+```
+
+A function the optimizer inlined has no label of its own; its code is inside its caller. The output holds the whole program in one module, the standard library included, as `--emit ir` does. A normal build keeps the library's larger functions in their own cached objects, so a library function inlined here can be a call in the binary.
 
 :::note
-Native code generation, the C runtime, and linking are all part of the `jade` binary. So building the toolchain from source needs LLVM 18 installed, found through `LLVM_SYS_180_PREFIX`. Running a released binary needs nothing.
+Code generation and linking are part of the `jade` binary. Building the toolchain from source needs LLVM 18 installed, found through `LLVM_SYS_180_PREFIX`. Running a released binary needs nothing.
 :::
 
 ## `jade new` / `jade init`

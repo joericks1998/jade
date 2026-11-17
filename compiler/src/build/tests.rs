@@ -105,6 +105,22 @@ fn a_task_that_races_does_not_build() {
 fn mir_is_text_and_writes_nothing() {
     let out = std::env::temp_dir().join(format!("jade_build_mir_{}", std::process::id()));
     let r = compile(resolved("print(1)\n"), None, &out, Emit::Mir, None).unwrap();
-    assert!(r.ir.unwrap().contains("fn f0 main"));
+    assert!(r.text.unwrap().contains("fn f0 main"));
+    assert!(!out.exists());
+}
+
+/// `--emit asm` prints this machine's assembly, optimized as a binary is, and
+/// writes nothing. A recursive function is never inlined away, so its label
+/// is there to find; LLVM quotes it because of the parentheses.
+#[test]
+fn asm_is_this_machines_assembly_and_writes_nothing() {
+    let out = std::env::temp_dir().join(format!("jade_build_asm_{}", std::process::id()));
+    let src = "fn fib(n) {\n    if (n < 2) {\n        return n\n    }\n    \
+               return fib(n - 1) + fib(n - 2)\n}\nprint(fib(20))\n";
+    let text = compile(resolved(src), None, &out, Emit::Asm, None).unwrap().text.unwrap();
+    assert!(text.contains("fib(int)\":"), "no label for fib:\n{text}");
+    assert!(!text.contains("define "), "that is LLVM IR, not assembly:\n{text}");
+    let call = if cfg!(target_arch = "x86_64") { "\tcall" } else { "\tbl\t" };
+    assert!(text.contains(call), "no {call:?} instruction:\n{text}");
     assert!(!out.exists());
 }
