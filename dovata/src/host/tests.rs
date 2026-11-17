@@ -15,7 +15,7 @@ use crate::gguf::Value;
 use crate::layout::BindOptions;
 use crate::load::KvType;
 use crate::memplan::{Role, Source};
-use crate::target::RegionKind;
+use crate::target::{RegionKind, Target};
 
 use super::server::serve_in;
 use super::state::{self, Op};
@@ -37,7 +37,9 @@ struct Running {
 }
 
 /// Purpose: This function gives the add options the tests use: a small step, so the
-/// fixture's regions are small.
+/// fixture's regions are small. These tests run the process on a thread of their own
+/// program, and CUDA cannot open VRAM in the process that shares it, so on an NVIDIA
+/// machine they plan for the CPU; `process_test.rs` covers VRAM from another process.
 ///
 /// Inputs:
 /// - `name`: the model's name.
@@ -48,7 +50,8 @@ fn opts(
 ) -> AddOptions
 {
     let step = BindOptions { n_ctx: 64, n_tokens: 8, n_outputs: 1, kv_k: KvType::F16, kv_v: KvType::F16 };
-    AddOptions { name: Some(name.into()), step, ..AddOptions::default() }
+    let cpu = matches!(crate::machine::current().map(|m| m.target(false)), Ok(Target::Cuda { .. }));
+    AddOptions { name: Some(name.into()), step, cpu, ..AddOptions::default() }
 }
 
 /// Purpose: This function starts the dovata process on a thread, with a fixture model
@@ -110,7 +113,7 @@ fn shared_names(
         .iter()
         .filter_map(|r| match &r.open {
             Open::Shared { name } => Some(name.clone()),
-            Open::File { .. } => None,
+            Open::File { .. } | Open::Vram { .. } => None,
         })
         .collect()
 }

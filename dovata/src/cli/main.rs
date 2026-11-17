@@ -1,7 +1,7 @@
 //! Author: Joe Ricks
 //! File: src/cli/main.rs
-//! Description: The `dovata` command line: `dovata start`, `add`, `remove`, `status`
-//! and `kill` run the dovata process and the models in it, `dovata plan` places a
+//! Description: The `dovata` command line: `dovata start`, `add`, `remove`, `status`,
+//! `check` and `kill` run the dovata process and the models in it, `dovata plan` places a
 //! model's tensors in memory, `dovata machine` reports this machine, and `dovata setup`
 //! and `upgrade` install llama.cpp and the newest dovata.
 
@@ -22,6 +22,7 @@ commands:
   add       load a model into the dovata process
   remove    take a model out of the dovata process
   status    show the dovata process and each model's memory, region by region
+  check     read a model's weights back from dovata's memory and compare them with its file
   kill      stop the dovata process
   plan      place a model's tensors in memory for one machine; see `dovata plan --help`
   machine   report this machine's memory and GPUs; see `dovata machine help`
@@ -61,6 +62,7 @@ fn main() -> ExitCode
         Some("add") => host::add(&args[1..]),
         Some("remove") => host::remove(&args[1..]),
         Some("status") => host::status(&args[1..]),
+        Some("check") => host::check(&args[1..]),
         Some("kill") => host::kill(&args[1..]),
         // The process itself, which `dovata start` runs in the background. Not in the
         // help, since people use `dovata start --foreground` instead.

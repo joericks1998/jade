@@ -45,9 +45,10 @@ several windows, each no larger than one Metal buffer, and every tensor lies who
 inside one. On CPU there is one window per file starting at byte 0, so every offset is
 the file offset. How the windows are cut is in [`src/window/`](../window/README.md).
 
-On CUDA everything is copied into VRAM once at startup. A model that does not fit is
-refused. Placing part of it in host memory, including paging MoE experts, is deferred
-until that design is settled with the user. One GPU only.
+On CUDA everything is copied into VRAM once, by the dovata process when the model is
+added, and programs open it by IPC handle; [`src/host/`](../host/README.md) says how. A
+model that does not fit is refused. Placing part of it in host memory, including paging
+MoE experts, waits on `design/dovata-vram-cache.md`. One GPU only.
 
 Nothing moves while the model runs.
 

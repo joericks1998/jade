@@ -24,7 +24,7 @@ use super::{check_name, run_dir, HeldModel, HostError, Process};
 /// The version of the run directory's files. A program refuses files of another
 /// version, so a library and a process of different dovata versions say so instead of
 /// misreading each other.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// How long a program waits for the process's record when the process holds its lock
 /// with no record: it writes the record just after taking the lock, and removes it just

@@ -1,6 +1,6 @@
 [package]
 name = "dovata"
-version = "3.2.2"
+version = "3.2.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

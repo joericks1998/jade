@@ -60,14 +60,14 @@ The runtime has been removed. dovata now has these parts:
 | [`src/moe/`](src/moe/README.md) | MoE expert ranking: which experts each layer uses most |
 | [`src/chat_template/`](src/chat_template/README.md) | `dovata-chat-template`, an optional package for Jade users: builds a model's prompt from the chat template in its GGUF. Chat templates are the programmer's to choose, so it is its own crate; dovata never depends on it, and it uses dovata's vocabulary check. |
 | [`src/machine/`](src/machine/README.md) | the current machine: its memory, page size, GPUs and their limits, and how memory is used right now |
-| [`src/host/`](src/host/README.md) | the dovata process: holds every model added to it, loaded, checks each fits beside the others, reports how much is resident, and keeps a record in its run directory of where each model's memory is, as file paths and named shared memory, for programs to map by themselves; requests reach it by signal. And the library calls that start it, read what it holds, add and remove models, map them and stop it |
-| [`src/cli/`](src/cli/README.md) | `dovata`, the command line: `dovata start`, `add`, `remove`, `status` and `kill` run the dovata process and its models, `dovata machine` reports this machine, and `dovata plan` plans a model, downloading or quantizing it first when asked |
+| [`src/host/`](src/host/README.md) | the dovata process: holds every model added to it, loaded into memory or, on an NVIDIA GPU, into VRAM, checks each fits beside the others, reports how much is resident, and keeps a record in its run directory of where each model's memory is, as file paths, named shared memory and VRAM handles, for programs to open by themselves; requests reach it by signal. And the library calls that start it, read what it holds, add and remove models, map them and stop it |
+| [`src/cli/`](src/cli/README.md) | `dovata`, the command line: `dovata start`, `add`, `remove`, `status`, `check` and `kill` run the dovata process and its models, `dovata machine` reports this machine, and `dovata plan` plans a model, downloading or quantizing it first when asked |
 | [`src/refback/`](src/refback/README.md) | `refback`, the test-only reference backend: sets up a plan's memory for real and checks every tensor against the model file. Its own crate, never published. |
 
-Still to come: CUDA in `refback` and in the dovata process, which need an NVIDIA
-machine to test on; placing
-part of a model in host memory when it does not fit in VRAM, which waits on a design;
-and the hybrid architectures with recurrent state, such as Qwen3.6.
+Still to come: CUDA in `refback`; placing part of a model in host memory when it does
+not fit in VRAM, which `design/dovata-vram-cache.md` proposes; and the hybrid
+architectures with recurrent state, such as Qwen3.6. The dovata process holds a model in
+VRAM since 3.2.3, written on a Mac and still to be tried on an NVIDIA machine.
 
 ## Why each capability sits where it does
 
@@ -119,13 +119,15 @@ invites one question about each directory: why is it here, and not inside a neig
   compiler calls at build time, and `host` is a running process that maps memory and
   passes it between processes. It is not in `refback/` because `refback` checks a plan
   and is never published, and `host` is what ships. It is behind the `host` feature,
-  and its unsafe calls are all in one file.
+  and its unsafe calls are in two files: `memory.rs` for the system's memory calls and
+  `cuda.rs` for NVIDIA's driver, which it opens at run time rather than links, so the
+  released program runs on machines without it.
 - `cli/` is the one place that prints for a person. The library returns values, and the
   `dovata` program formats them.
 - `refback/` is a separate crate because it checks a plan through Metal: it builds
   Metal buffers and runs a shader, which takes Apple's framework and a good deal of
   unsafe code that only a checker needs. `host` maps memory too, but through libc
-  alone, behind its feature, since it is part of what ships.
+  and NVIDIA's driver alone, behind its feature, since it is part of what ships.
 
 Outside `src/`:
 

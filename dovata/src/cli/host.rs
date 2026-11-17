@@ -1,13 +1,16 @@
 //! Author: Joe Ricks
 //! File: src/cli/host.rs
-//! Description: The `dovata start`, `add`, `remove`, `status` and `kill` commands, which
-//! run the dovata process, put models in it and take them out, report on it and stop it,
-//! and `dovata host`, the process itself.
+//! Description: The `dovata start`, `add`, `remove`, `status`, `check` and `kill`
+//! commands, which run the dovata process, put models in it and take them out, report on
+//! it, check what it holds and stop it, and `dovata host`, the process itself.
 
+use std::fs::File;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dovata::host::{self, AddOptions, HostError, Holds, ModelStatus, StartLine, StartOptions, State, Status};
+use dovata::memplan::{Role, Source};
 use dovata::target::RegionKind;
 
 use super::{json, out, plan, size, target_text, Fail};
@@ -60,6 +63,19 @@ Show the dovata process and each model in it: its memory region by region, how m
 it is resident in physical memory right now, and the programs that mapped it. With a
 name, show that model alone.
 ";
+
+/// The help text for `dovata check`.
+pub(crate) const CHECK_HELP: &str = "\
+usage: dovata check <name>
+
+Read every weight of a model back from the memory dovata holds it in, from this
+process, and compare each byte with the model's file. A model in VRAM is opened by its
+IPC handles, the way a program opens it, so a check that passes means a program sees
+the right weights.
+";
+
+/// How many bytes `dovata check` compares at a time.
+const CHECK_CHUNK: usize = 16 << 20;
 
 /// The help text for `dovata kill`.
 pub(crate) const KILL_HELP: &str = "\
@@ -271,6 +287,84 @@ pub(crate) fn status(
     Ok(())
 }
 
+/// Purpose: This function runs `dovata check`.
+///
+/// Inputs:
+/// - `args`: the arguments after `check`.
+///
+/// Outputs: `Ok(())` when every weight matches its file, or a [`Fail`] naming the first
+/// one that does not.
+pub(crate) fn check(
+    args: &[String],
+) -> Result<(), Fail>
+{
+    let name = match args {
+        _ if args.is_empty() || wants_help(args) => {
+            out(CHECK_HELP);
+            return Ok(());
+        }
+        [name] if !name.starts_with("--") => name,
+        _ => return Err(Fail::Usage(format!("give one model's name\n\n{CHECK_HELP}"))),
+    };
+    let p = host::connect().map_err(fail)?;
+    let held = p.model(name).map_err(fail)?;
+    let plan = p.plan(name).map_err(fail)?;
+    // A file changed since dovata loaded it would not match, and that would say nothing
+    // about dovata's memory.
+    let mut files = Vec::new();
+    for f in &held.files {
+        let io = |e: std::io::Error| Fail::Run(format!("{}: {e}", f.path.display()));
+        let file = File::open(&f.path).map_err(io)?;
+        let meta = file.metadata().map_err(io)?;
+        if meta.len() != f.bytes || meta.mtime() != f.modified_sec || meta.mtime_nsec() != f.modified_nsec {
+            return Err(Fail::Run(format!("{} changed on disk after dovata loaded it, so it cannot be checked against it", f.path.display())));
+        }
+        files.push(file);
+    }
+    let start = Instant::now();
+    let mem = p.map(name, &held.table_hash).map_err(fail)?;
+    let (mut tensors, mut bytes) = (0usize, 0u64);
+    let mut kinds: Vec<&'static str> = Vec::new();
+    let mut want = vec![0u8; CHECK_CHUNK];
+    for e in &plan.entries {
+        let (Role::Weight, Source::File { part, file_offset }) = (&e.role, e.source) else { continue };
+        let region = mem.region(e.region).ok_or_else(|| Fail::Run(format!("{} is in region {}, which the model has not", e.tensor, e.region)))?;
+        let file = files.get(usize::from(part)).ok_or_else(|| Fail::Run(format!("{} is in part {}, which the model has not", e.tensor, part + 1)))?;
+        let k = kind(region.kind());
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+        let len = usize::try_from(e.bytes).map_err(|_| Fail::Run(format!("{} is too large for this machine", e.tensor)))?;
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(CHECK_CHUNK);
+            let at = usize::try_from(e.offset).ok().and_then(|o| o.checked_add(done));
+            let got = at.and_then(|at| region.read(at, n)).ok_or_else(|| Fail::Run(format!("{} cannot be read back from dovata's memory", e.tensor)))?;
+            file.read_exact_at(&mut want[..n], file_offset + done as u64).map_err(|err| Fail::Run(format!("{}: {err}", held.files[usize::from(part)].path.display())))?;
+            if let Some(i) = got.iter().zip(&want[..n]).position(|(a, b)| a != b) {
+                return Err(Fail::Run(format!(
+                    "{} differs from the file at byte {} of {}: dovata's memory holds {:#04x}, and the file {:#04x}",
+                    e.tensor,
+                    done + i,
+                    e.bytes,
+                    got[i],
+                    want[i]
+                )));
+            }
+            done += n;
+        }
+        tensors += 1;
+        bytes += e.bytes;
+    }
+    out(&format!(
+        "{name}: every weight matches its file, {tensors} tensors and {}, read back from {} in {:.1} s\n",
+        size(bytes),
+        kinds.join(" and "),
+        start.elapsed().as_secs_f64()
+    ));
+    Ok(())
+}
+
 /// Purpose: This function runs `dovata kill`.
 ///
 /// Inputs:
@@ -464,7 +558,8 @@ pub(crate) fn model_text(
     for r in &m.regions {
         t += &format!("    {:<3} {:<8} {:>10}  {:>10} resident  {}\n", r.id, kind(r.kind), size(r.bytes), size(r.resident_bytes), holds_text(&r.holds));
     }
-    t += &format!("  memory     {} resident of {}, the file once and every allocation\n", size(m.resident_bytes()), size(m.bytes()));
+    let counted = if m.mapped_files().next().is_some() { "the file once and every allocation" } else { "every allocation; the file was copied in" };
+    t += &format!("  memory     {} resident of {}, {counted}\n", size(m.resident_bytes()), size(m.bytes()));
     if let Some(k) = &m.tokenizer {
         let ids: Vec<String> = k.stop.iter().map(u32::to_string).collect();
         t += &format!("  tokenizer  {}, {} tokens, stops on {}\n", k.kind, k.tokens, ids.join(", "));

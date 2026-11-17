@@ -2,8 +2,9 @@
 
 `host` runs dovata as one long-lived process that holds models in memory. The process
 starts empty; each model is added to it, planned for this machine, and loaded, and stays
-until it is removed or the process stops. A compiled Jade program maps a model's memory
-into itself and runs its own kernels on it. dovata still never runs a model's math: the
+until it is removed or the process stops. On a Mac or the CPU the memory is shared memory
+and the model's files; on a machine with an NVIDIA GPU it is VRAM. A compiled Jade
+program maps a model's memory into itself and runs its own kernels on it. dovata still never runs a model's math: the
 process holds memory, keeps a record of it and reports on it, and the program does the
 compute.
 
@@ -24,7 +25,9 @@ let plan = dovata.plan(&model.name)?;
 // Map it: every region of its plan, where the program's compiled offsets expect it. A
 // program whose offsets came from a different plan is refused.
 let mem = dovata.map(&model.name, &plan.table_hash)?;
-let weights = mem.region(0).unwrap().as_ptr();   // bind as a no-copy MTLBuffer, say
+let region = mem.region(0).unwrap();
+let weights = region.as_ptr();       // in this program's memory: bind as a no-copy MTLBuffer, say
+let on_gpu = region.device_ptr();    // or in VRAM: a CUDA device address a kernel binds
 
 // Watch, take the model out, stop.
 let status = dovata.status()?;                   // every model, every region, how much is resident
@@ -79,7 +82,7 @@ is readable by its owner only. It holds:
 | `process` | The process's record: its id, its dovata version, when it started, and the format of these files. |
 | `models/<name>/model` | A model's record, a [`HeldModel`]: its state, its plan's table hash, its part files as the process loaded them, and where each region of its memory is. |
 | `models/<name>/plan` | The model's whole plan, the one `dovata plan --json` prints. |
-| `models/<name>/clients/<pid>` | An empty file for each program that mapped the model. |
+| `models/<name>/clients/<pid>.<n>` | A lease for each mapping a program holds: named by the program's process id and a number, and holding when the program started. A compiled Jade program writes `<pid>` alone. |
 | `requests/` | Requests programs leave for the process, and its answers. |
 
 Records are JSON, written to a temporary file and renamed into place, so a reader sees a
@@ -141,20 +144,21 @@ its tokenizer, its name, its layout and the step to plan for. The process:
 1. checks the tokenizer against the model's vocabulary and plans the model for this
    machine, as `dovata machine target` describes it, with the tokenizer in the plan;
 2. sets up the plan's memory: each part file mapped once, read-only, and each allocated
-   region as a named shared memory object, readable and writable by this user only. On
-   Linux every page of it is taken now, since the objects live on `/dev/shm`, which
-   holds half the machine's memory by default and 64 MiB in a default container; a model
-   that does not fit there is refused, where a write past the limit later would end the
-   process with SIGBUS;
+   region as a named shared memory object, readable and writable by this user only, or
+   on an NVIDIA machine as VRAM, described below. On Linux every page of shared memory
+   is taken now, since the objects live on `/dev/shm`, which holds half the machine's
+   memory by default and 64 MiB in a default container; a model that does not fit there
+   is refused, where a write past the limit later would end the process with SIGBUS;
 3. checks the model fits beside the ones it holds: the files and allocations of every
-   model together must fit the new model's budget, Metal's working set on a Mac. The
-   planner has already checked the model alone;
+   model on the same kind of memory together must fit the new model's budget, Metal's
+   working set on a Mac and VRAM on an NVIDIA GPU. The planner has already checked the
+   model alone;
 4. writes the model's plan and record, and answers;
 5. reads every page of the model file and touches every page of each allocation on a
    thread of its own, so the whole model ends up in physical memory, rewriting the
    record as it goes so status shows the progress. A program may map the allocations
    while they load, so touching a page is an atomic `or` of zero, which changes no byte
-   the program wrote.
+   the program wrote. VRAM is zeroed and the weights copied into it instead.
 
 `add` then waits until the record says the model is ready and returns its status. A
 name is taken once: a second model of the same name is refused until the first is
@@ -164,7 +168,75 @@ never make memory under the same names. Names come from the model, such as
 
 `remove` takes a model out. The process removes the names of its shared memory and its
 record; programs that mapped the model keep their mappings, and the memory goes when the
-last one unmaps it.
+last one unmaps it. VRAM stays until no lease holds it, below.
+
+### VRAM on an NVIDIA GPU
+
+On a machine with an NVIDIA GPU, `dovata machine target` is a CUDA target and the
+planner puts every region in VRAM: the weights in one region, the KV cache and the
+step's scratch in others. `--cpu` holds the model in host memory instead.
+
+VRAM cannot be opened by name the way shared memory can. One process reaches another's
+device memory through the driver's IPC handles, so the process:
+
+1. opens NVIDIA's driver, `libcuda.so.1`, the first time a model goes in VRAM. It is
+   opened at run time rather than linked, so the same `dovata` program runs on a machine
+   without NVIDIA's driver and refuses only VRAM, saying to add the model with `--cpu`;
+2. checks the model's VRAM fits in what the GPU has free right now, as the driver's
+   `cuMemGetInfo` reports it, since other programs use the card too;
+3. allocates each region with `cuMemAlloc`, rounded up to 2 MiB, the size NVIDIA
+   suggests for memory shared between processes;
+4. makes an IPC handle for each with `cuIpcGetMemHandle`, and writes it in the model's
+   record as 128 hex digits, with the GPU's PCI bus id: `Open::Vram`. A PCI bus id names
+   the same GPU in every process, whatever `CUDA_VISIBLE_DEVICES` each one sets;
+5. zeroes each region with `cuMemsetD8`, and copies the weights in from the part files.
+   Neighboring weights are read into a 64 MiB page-locked buffer at their planned
+   offsets and cross to the GPU in one copy, so a model's thousands of small tensors do
+   not each pay for a copy of their own. A memset returns before the GPU has done it, so
+   the model is marked ready only after `cuCtxSynchronize`. A model removed while it
+   loads stops copying.
+
+A driver that cannot be opened is tried again on the next add, so dovata started before
+NVIDIA's driver loaded needs no restart.
+
+A program opens each region with `cuIpcOpenMemHandle` on the same GPU, and gets a device
+address that may differ from the one in dovata's process. CUDA does not let the process
+that made a handle open it, so a program that runs dovata on one of its own threads, as
+`tests.rs` does, cannot map a model in VRAM; `tests.rs` plans for the CPU on an NVIDIA
+machine, and `process_test.rs` checks VRAM from a process of its own.
+
+The rules come from NVIDIA's documentation: the handle's 64 bytes in `cuda.h`, the
+`cuMemAlloc` start and the 2 MiB advice in the
+[IPC chapter](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/inter-process-communication.html),
+and the rest in the driver API's
+[memory functions](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html).
+
+### Leases: freeing no VRAM a program still holds
+
+Freeing VRAM before every process that opened it has closed it is undefined in CUDA, and
+no driver call lets dovata ask who has it open or take it back. So a program says what
+it holds, and dovata waits for it:
+
+- `map` writes a lease before it opens anything: a file in the model's clients
+  directory, named by the program's process id and a number of its own, holding when
+  the program started, from `/proc/<pid>/stat` on Linux. A process id the system gives
+  to a later program does not match the start time, so the lease is not mistaken for
+  it. The lease file goes when the `Mapping` is dropped.
+- `remove` takes the model's record away first, then reads the leases. `map` writes its
+  lease and then reads the record again, refusing if it is gone or changed. Either
+  dovata reads the lease, or the program sees the record gone and opens nothing.
+- A removed model in VRAM is retired: its clients directory stays, and its VRAM is freed
+  once every lease that held it has gone or its program has exited. The process looks
+  every second.
+- A stop request is refused while a running program holds VRAM, and names the programs.
+  It takes the records of models in VRAM away before reading their leases, the same as
+  `remove`, and writes them back when it refuses. SIGTERM and SIGINT still stop the
+  process, and log the programs they leave holding memory.
+- A model of the same name added and removed meanwhile, such as one held with `--cpu`,
+  leaves a retired model's clients directory in place, since its leases are there.
+
+Shared memory needs none of it, since the system keeps an object until its last mapping
+goes; a lease there only lists the program in `status`.
 
 ### Shared memory names
 
@@ -199,9 +271,9 @@ plan`'s output. How the tokenizer works is in [`src/tokenize/`](../tokenize/READ
 
 ### Mapping
 
-`map` names a model and the plan's table hash, reads the model's record, and opens each
-region where the record says it is: a window of a part file by the file's path, and an
-allocation by its shared memory name. Each region is mapped with `MAP_SHARED`: weights
+`map` names a model and the plan's table hash, reads the model's record, takes a lease,
+and opens each region where the record says it is: a window of a part file by the file's
+path, an allocation by its shared memory name, and VRAM by its IPC handle. Each region is mapped with `MAP_SHARED`: weights
 read-only, allocations read-write. A write through one program's mapping is seen by
 every other mapping of that model and by the process. Two models never share an
 allocation. The mappings stay valid after the model is removed or the process stops.
@@ -219,10 +291,11 @@ mapping it, since reading a mapped page past the end of a file crashes with SIGB
 compiled Jade program makes the same checks itself, from the same record, read when it
 was built.
 
-A `MappedRegion` gives its base as a raw pointer, which is what a kernel binds. Its
-`read` and `write` methods copy bytes one at a time as relaxed atomics, which is slow
-but stays defined while another thread or process writes the same bytes; they are for
-inputs, outputs and checks, not for weights in bulk.
+A `MappedRegion` gives its base as a raw pointer, which is what a kernel binds, or for
+VRAM as a CUDA device address. Its `read` and `write` methods copy bytes one at a time as
+relaxed atomics, which is slow but stays defined while another thread or process writes
+the same bytes, or for VRAM through the driver; they are for inputs, outputs and checks,
+not for weights in bulk. `dovata check` reads every weight back through them.
 
 On a Mac the program wraps each mapped region in a no-copy `MTLBuffer`, the way
 [`src/refback/`](../refback/README.md) does. Every base is page-aligned, which Metal
@@ -237,7 +310,9 @@ the pages the process and programs read in. Mapped weights can be dropped by the
 under memory pressure and read back later, so a falling resident count shows memory
 pressure on the model. It also lists every program that mapped each model, once each by
 process id, and whether each is still running. `dovata machine usage` and `watch` show the
-process and one line per model beside the machine's own readings.
+process and one line per model beside the machine's own readings. VRAM counts as
+resident from the moment it is allocated, and a model in VRAM counts its regions alone:
+its files were read once, to copy the weights in.
 
 ## Files
 
@@ -247,18 +322,33 @@ process and one line per model beside the machine's own readings.
 | `state.rs` | The run directory's files, also built everywhere: their paths, writing them whole, reading them, finding the running process by its lock, the shared memory names, and leaving, taking and answering requests. |
 | `server.rs` | `serve`, the process: the lock and the cleanup after a killed process, the table of models, planning, setting up and loading each model's memory, writing each model's record, and taking requests. |
 | `signal.rs` | The signal handlers: SIGUSR1 wakes the process to take requests, SIGTERM and SIGINT stop it, each by writing a byte to a pipe it waits on; and `notify`, which sends SIGUSR1. |
-| `client.rs` | `start`, and the calls a `Process` makes: add, remove and kill as requests, status read from the records, map opening each region by name, and the tokenizer. |
-| `memory.rs` | Every unsafe memory call: `Map`, a mapping unmapped on drop; reading pages in; `mincore`; named shared memory objects, made, opened and removed; a file's size; and whether a process is alive. |
+| `client.rs` | `start`, and the calls a `Process` makes: add, remove and kill as requests, status read from the records, map opening each region by name or IPC handle under a lease, and the tokenizer. |
+| `memory.rs` | Every unsafe memory call: `Map`, a mapping unmapped on drop; reading pages in; `mincore`; named shared memory objects, made, opened and removed; a file's size; whether a process is alive, and when it started. |
+| `cuda.rs` | Every unsafe CUDA call: NVIDIA's driver opened with `dlopen`; a GPU and its primary context; VRAM allocated, zeroed, written and shared by IPC handle; page-locked buffers; and VRAM another process shared, opened, read and written. |
 | `fixture.rs` | A tiny llama GGUF with f32 weights, for the tests. |
 | `tests.rs` | Runs the process on a thread: it starts empty; every weight read through a mapping matches the file; the plan read back is the one the process made, every float exactly; a write shows in a second mapping of the same model and not in another model; several models share the process and each name is taken once; a removed model's mapping stays and its names go; a second process is refused; a killed process's names are removed by the next start; a request dovata cannot read is refused; a stop request stops its own process only, with two in one program; an abandoned start stops itself; a model that cannot be planned leaves the process running; and a model changed on disk is not handed out. |
-| `process_test.rs` | An integration test against the real `dovata` program: start from code, add a model, map it, the command line's `start`, `add`, `status`, `remove` and `machine usage` against the same process, kill from code, start, add and kill from the command line, and SIGTERM stopping it and removing its names. |
+| `process_test.rs` | An integration test against the real `dovata` program: start from code, add a model, map it, the command line's `start`, `add`, `status`, `check`, `remove` and `machine usage` against the same process, kill from code, start, add and kill from the command line, and SIGTERM stopping it and removing its names. On an NVIDIA machine it also holds the model in VRAM: every region opened by its handle, every weight read back and checked, a stop refused while the test holds VRAM, and a removed model's VRAM kept until the test lets go. |
 
 ## What it does not cover yet
 
-- *CUDA.* An NVIDIA plan puts everything in VRAM, which takes a CUDA context in the
-  process and `cuIpcGetMemHandle` handles in place of shared memory names. A CUDA plan is
-  refused for now; `--cpu` holds the model in host memory instead.
-- *More than one GPU,* as for the planner.
+- *A model larger than VRAM.* The planner refuses one. `design/dovata-vram-cache.md`
+  proposes running VRAM as a cache over RAM.
+- *What happens to a program holding VRAM when dovata exits,* by SIGTERM or a crash, is
+  not in NVIDIA's documentation. A stop request waits for such programs; a test on an
+  NVIDIA machine should find out what the driver does.
+- *Leases from compiled Jade programs.* A program the compiler builds writes `<pid>`
+  with no start time, and only on a Mac so far; its NVIDIA support code is to write a
+  lease and read the record again the way `map` does.
+- *The program's own CUDA context.* Each program that opens VRAM makes a context on the
+  GPU, which takes VRAM of its own; dovata leaves nothing aside for it yet. `map` makes
+  the GPU's primary context current on the calling thread and leaves it so, and a
+  region's device address is good in that context.
+- *Programs in another pid namespace,* such as a container. A lease is checked by
+  process id and start time, which such a program does not share, so dovata would take
+  it for exited. A lock each mapping holds on its lease file would cover it.
+- *More than one GPU,* as for the planner. dovata uses CUDA's device 0, which on a
+  machine with mixed GPUs may not be the GPU `nvidia-smi` lists first and the plan was
+  made for.
 - *Sharing between models.* Two models added from the same file map it twice; the page
   cache holds the file once, but the budget check counts it twice.
 - *Moving memory while a model runs,* such as paging MoE experts. Nothing moves.
@@ -282,10 +372,11 @@ process and one line per model beside the machine's own readings.
 
 ## Who uses it
 
-`src/cli/host.rs` builds `dovata start`, `add`, `remove`, `status`, `kill` and the hidden
-`dovata host` on it, and `src/cli/machine.rs` adds the process and its models to `usage`
+`src/cli/host.rs` builds `dovata start`, `add`, `remove`, `status`, `check`, `kill` and
+the hidden `dovata host` on it, and `src/cli/machine.rs` adds the process and its models to `usage`
 and `watch`. The Jade compiler takes this crate as a cargo dependency with no
 capabilities turned on, and calls `connect`, `models`, `model`, `plan` and `clients_dir`
 when it builds a program that dereferences a prompt; the program it builds opens the
 memory by the names the record gave. `host` depends on `load`, `layout`, `memplan`,
-`target`, `tokenize`, `hf_hub` and `machine`, and on libc for the system calls.
+`target`, `tokenize`, `hf_hub` and `machine`, on libc for the system calls, and at run
+time on NVIDIA's driver library when a model goes in VRAM.

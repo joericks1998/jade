@@ -4,6 +4,20 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v2.0.14
+
+*jade reads dovata's records of a model held in VRAM.* dovata 3.2.3, its release beside this one, holds a model in an NVIDIA GPU's memory, and its record names each region by an IPC handle rather than a shared memory name. A program that dereferences a prompt still runs on Apple's GPU only, so building one against a model in VRAM stops with a message that says so and suggests adding the model with `--cpu`. Use jade 2.0.14 with dovata 3.2.3; the record's format changed, and each refuses the other's older one.
+
+## dovata v3.2.3
+
+*dovata holds a model in VRAM on a machine with an NVIDIA GPU.* It used to refuse a CUDA plan. This release was written on a Mac and is still to be tried on an NVIDIA machine.
+
+- *Each region goes in VRAM.* dovata opens NVIDIA's driver, `libcuda.so.1`, when the first model goes in VRAM, checks the model fits in the VRAM free now, allocates each region, zeroes it and copies the weights in from the model's file. The same `dovata` program still runs on a machine without the driver, and refuses only VRAM. `--cpu` holds a model in host memory as before.
+- *Programs open it by IPC handle.* The model's record names each VRAM region by its 64-byte IPC handle and the GPU's PCI bus id, and `Process::map` opens it with `cuIpcOpenMemHandle`. A mapped region gives its CUDA device address with `device_ptr`, and its `as_ptr` is now `None` for VRAM.
+- *dovata frees no VRAM a program still holds.* Freeing VRAM another process has open is undefined in CUDA, so every mapping writes a lease in the model's clients directory, holding when its program started. A removed model's VRAM stays until every lease that held it has gone or its program has exited, and `dovata kill` is refused while a running program holds VRAM, naming it. SIGTERM still stops dovata.
+- *`dovata check <name>`* reads every weight of a model back from dovata's memory, from its own process the way a program does, and compares each byte with the model's file.
+- *A model's memory counts against its own kind of memory.* A model in VRAM no longer counts against host memory beside one held with `--cpu`, and `status` counts its regions alone, since its file was read once to copy it in.
+
 ## v2.0.13
 
 *Codegen is split into one directory per job.* Nothing a program can see changes: every example's IR, MIR and assembly are the same as 2.0.12's. This release is for people working on the compiler.
