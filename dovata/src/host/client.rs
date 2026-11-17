@@ -2,25 +2,28 @@
 //! File: src/host/client.rs
 //! Description: Starts the dovata process from another program, leaves it requests and
 //! signals it to take them, reads its status from its run directory, and maps a model's
-//! memory by opening each file and shared memory object by the name its record gives.
+//! memory by opening each file and shared memory object by the name its record gives, and
+//! each VRAM region by its IPC handle, under a lease in the model's clients directory.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write as _};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::hf_hub::{self, ModelSource};
 
+use super::cuda;
 use super::memory::{self, Map};
 use super::signal;
 use super::state::{self, Op, FORMAT};
 use super::{
-    log_path, run_dir, spec, AddOptions, Client, FileUse, HeldModel, HostError, MappedRegion, Mapping, ModelStatus, Open, Process, RegionUse, StartLine,
-    StartOptions, State, Status,
+    log_path, run_dir, spec, AddOptions, Client, FileUse, HeldModel, HostError, MappedRegion, Mapping, Memory, ModelStatus, Open, Process, RegionUse,
+    StartLine, StartOptions, State, Status,
 };
 
 /// How long [`Process::kill`] waits for a stopped process to exit.
@@ -38,6 +41,111 @@ const ANSWER_POLL: Duration = Duration::from_millis(10);
 
 /// How often [`Process::add`] reads whether the model it added is in memory yet.
 const LOAD_POLL: Duration = Duration::from_millis(50);
+
+/// A number for each lease this program takes, so each mapping has a file of its own.
+static NEXT_LEASE: AtomicU64 = AtomicU64::new(0);
+
+/// Purpose: This struct holds one mapping's lease on a model: a file in the model's
+/// clients directory, named by the program's process id and a number of its own and
+/// holding when the program started, which tells dovata the program may hold the model's
+/// memory. It is removed when the mapping is dropped.
+#[derive(Debug)]
+pub(crate) struct Lease {
+    /// The lease file.
+    path: PathBuf,
+}
+
+impl Lease {
+    /// Purpose: This function takes a lease on a model for one mapping.
+    ///
+    /// Inputs:
+    /// - `dir`: the run directory.
+    /// - `name`: the model's name.
+    ///
+    /// Outputs: the lease, or the system's error, such as the model's directory being
+    /// gone.
+    fn take(
+        dir: &Path,
+        name: &str,
+    ) -> io::Result<Lease>
+    {
+        let pid = std::process::id();
+        let n = NEXT_LEASE.fetch_add(1, Ordering::Relaxed);
+        let path = state::clients_dir(dir, name).join(format!("{pid}.{n}"));
+        // The directory is never made here: one that is gone belongs to a model dovata
+        // no longer holds. A file already there was left by an earlier program with this
+        // process id, which has exited, so it is taken over.
+        let mut f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&path)?;
+        let lease = Lease { path };
+        if let Some(t) = memory::started(pid) {
+            write!(f, "{t}")?;
+        }
+        Ok(lease)
+    }
+}
+
+impl Drop for Lease {
+    /// Purpose: This function gives back the lease by removing its file.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: none.
+    fn drop(&mut self)
+    {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Purpose: This struct holds one lease file as dovata reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeaseFile {
+    /// The file.
+    pub(crate) path: PathBuf,
+    /// The process id of the program that wrote it.
+    pub(crate) pid: u32,
+    /// When that program started, if the lease says.
+    pub(crate) started: Option<u64>,
+    /// When the lease was written, in seconds since 1970.
+    pub(crate) written: u64,
+}
+
+impl LeaseFile {
+    /// Purpose: This function says whether the lease still holds: its file is there and
+    /// the program that wrote it still runs.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: `true` while the lease holds.
+    pub(crate) fn holds(&self) -> bool
+    {
+        self.path.exists() && memory::holder_alive(self.pid, self.started)
+    }
+}
+
+/// Purpose: This function reads the leases in a clients directory. A Jade program writes
+/// one named by its process id alone; a mapping this library makes adds a number after a
+/// dot.
+///
+/// Inputs:
+/// - `clients`: the directory.
+///
+/// Outputs: every lease in it.
+pub(crate) fn leases(
+    clients: &Path,
+) -> Vec<LeaseFile>
+{
+    let Ok(entries) = std::fs::read_dir(clients) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let pid = name.to_str()?.split('.').next()?.parse::<u32>().ok()?;
+            let written = e.metadata().ok()?.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let started = std::fs::read_to_string(e.path()).ok().and_then(|t| t.trim().parse::<u64>().ok());
+            Some(LeaseFile { path: e.path(), pid, started, written })
+        })
+        .collect()
+}
 
 /// Purpose: This function starts the dovata process, with no models in it.
 ///
@@ -208,6 +316,8 @@ fn model_status(
             let resident = match &r.open {
                 Open::File { part } => file_maps.get(*part).and_then(Option::as_ref).and_then(|x| x.resident(r.offset as usize, len).ok()),
                 Open::Shared { name } => memory::open_shared(name, false).ok().and_then(|fd| map_object(fd.as_fd(), len)).and_then(|x| x.resident(0, len).ok()),
+                // VRAM is in the GPU's memory from the moment it is allocated.
+                Open::Vram { .. } => Some(r.bytes),
             };
             RegionUse { id: r.id, kind: r.kind, holds: r.holds.clone(), bytes: r.bytes, resident_bytes: resident.unwrap_or(0) }
         })
@@ -258,7 +368,8 @@ fn map_object(
     (len > 0).then(|| Map::new(fd, 0, len, false).ok()).flatten()
 }
 
-/// Purpose: This function lists the programs that mapped a model.
+/// Purpose: This function lists the programs that hold a mapping of a model, by their
+/// leases.
 ///
 /// Inputs:
 /// - `dir`: the run directory.
@@ -270,15 +381,18 @@ fn clients(
     name: &str,
 ) -> Vec<Client>
 {
-    let Ok(entries) = std::fs::read_dir(state::clients_dir(dir, name)) else { return Vec::new() };
-    let mut out: Vec<Client> = entries
-        .flatten()
-        .filter_map(|e| {
-            let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
-            let mapped = e.metadata().ok()?.modified().ok()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            Some(Client { pid, mapped_unix: mapped, alive: memory::alive(pid) })
-        })
-        .collect();
+    // A program holding several mappings of the model is listed once, from its first.
+    let mut out: Vec<Client> = Vec::new();
+    for l in leases(&state::clients_dir(dir, name)) {
+        let alive = memory::holder_alive(l.pid, l.started);
+        match out.iter_mut().find(|c| c.pid == l.pid) {
+            Some(c) => {
+                c.mapped_unix = c.mapped_unix.min(l.written);
+                c.alive |= alive;
+            }
+            None => out.push(Client { pid: l.pid, mapped_unix: l.written, alive }),
+        }
+    }
     out.sort_by_key(|c| (c.mapped_unix, c.pid));
     out
 }
@@ -395,8 +509,8 @@ pub(crate) fn tokenizer(
 }
 
 /// Purpose: This function maps one model's memory into this program, opening each part
-/// file and shared memory object by the name the model's record gives, and registers
-/// this program as one that mapped it.
+/// file and shared memory object by the name the model's record gives and each VRAM
+/// region by its IPC handle, under a lease that tells dovata this program holds them.
 ///
 /// Inputs:
 /// - `p`: the process.
@@ -420,25 +534,61 @@ pub(crate) fn map(
     if let State::Loading { loaded_bytes, total_bytes } = m.state {
         return Err(HostError::Refused(format!("{name} is still loading: {loaded_bytes} of {total_bytes} bytes")));
     }
+    // The lease comes first, so dovata cannot free VRAM between this program reading the
+    // record and opening a handle. dovata removes a model's record before it reads the
+    // leases, so reading the record again after writing the lease settles it: either
+    // dovata sees the lease, or this program sees the record gone and opens nothing.
+    // Shared memory and files outlive the process anyway, so a program that cannot write
+    // its lease still maps them.
+    let vram = m.regions.iter().any(|r| matches!(r.open, Open::Vram { .. }));
+    let removed = || HostError::Refused(format!("dovata removed {name} while this program opened it; add it again"));
+    let lease = match Lease::take(&p.dir, name) {
+        Ok(l) => Some(l),
+        Err(_) if vram => return Err(removed()),
+        Err(_) => None,
+    };
+    if vram && !state::model(&p.dir, name).is_ok_and(|again| again.added_unix == m.added_unix && again.regions == m.regions) {
+        return Err(removed());
+    }
     // A file changed in place changes the bytes under every mapping, and a shorter one
-    // makes a program that reads past its new end crash with SIGBUS.
+    // makes a program that reads past its new end crash with SIGBUS. A model in VRAM maps
+    // no file; its weights were copied in when it was added.
     let mut files = Vec::new();
-    for f in &m.files {
-        let io = |e: io::Error| HostError::Io(format!("{}: {e}", f.path.display()));
-        let file = File::open(&f.path).map_err(io)?;
-        let meta = file.metadata().map_err(io)?;
-        if meta.len() != f.bytes || meta.mtime() != f.modified_sec || meta.mtime_nsec() != f.modified_nsec {
-            return Err(HostError::Refused(format!(
-                "{} changed on disk after dovata loaded it; remove the model with `dovata remove {name}` and add it again",
-                f.path.display()
-            )));
+    if m.regions.iter().any(|r| matches!(r.open, Open::File { .. })) {
+        for f in &m.files {
+            let io = |e: io::Error| HostError::Io(format!("{}: {e}", f.path.display()));
+            let file = File::open(&f.path).map_err(io)?;
+            let meta = file.metadata().map_err(io)?;
+            if meta.len() != f.bytes || meta.mtime() != f.modified_sec || meta.mtime_nsec() != f.modified_nsec {
+                return Err(HostError::Refused(format!(
+                    "{} changed on disk after dovata loaded it; remove the model with `dovata remove {name}` and add it again",
+                    f.path.display()
+                )));
+            }
+            files.push(file);
         }
-        files.push(file);
     }
     let mut regions = Vec::new();
     for r in &m.regions {
+        let len = usize::try_from(r.bytes).map_err(|_| HostError::Io(format!("region {}: {} bytes do not fit in memory", r.id, r.bytes)))?;
         let shared: OwnedFd;
         let fd = match &r.open {
+            Open::Vram { device, handle } => {
+                let h = cuda::handle_from_hex(handle).ok_or_else(|| HostError::Record(format!("region {} of {name} has no IPC handle dovata wrote", r.id)))?;
+                let gpu = cuda::Gpu::at(device)
+                    .map_err(|e| HostError::Unsupported(format!("{name}'s region {} is VRAM on the GPU at {device}, which this program cannot open: {e}", r.id)))?;
+                let mem = gpu.import(&h).map_err(|e| {
+                    HostError::Refused(format!(
+                        "the VRAM of {name}'s region {} cannot be opened ({e}); the process that shares VRAM cannot open it itself, and a model dovata no longer holds must be added again",
+                        r.id
+                    ))
+                })?;
+                if r.align > 1 && !mem.device_ptr().is_multiple_of(r.align) {
+                    return Err(HostError::Io(format!("region {} was opened at {:#x}, which is not aligned to {}", r.id, mem.device_ptr(), r.align)));
+                }
+                regions.push(MappedRegion { id: r.id, kind: r.kind, len, writable: r.writable, memory: Memory::Device(mem) });
+                continue;
+            }
             Open::File { part } => files.get(*part).ok_or_else(|| HostError::Record(format!("region {} names part {part}, of {}", r.id, files.len())))?.as_fd(),
             Open::Shared { name: object } => {
                 shared = memory::open_shared(object, r.writable).map_err(|e| {
@@ -459,7 +609,6 @@ pub(crate) fn map(
                 shared.as_fd()
             }
         };
-        let len = usize::try_from(r.bytes).map_err(|_| HostError::Io(format!("region {}: {} bytes do not fit in memory", r.id, r.bytes)))?;
         let size = memory::object_size(fd).map_err(|e| HostError::Io(format!("region {}: {e}", r.id)))?;
         if r.offset.checked_add(r.bytes).is_none_or(|end| end > size) {
             return Err(HostError::Refused(format!("region {} runs past the end of its {size}-byte file; the model changed on disk", r.id)));
@@ -471,12 +620,9 @@ pub(crate) fn map(
         if r.align > 1 && !(base.as_ptr() as usize as u64).is_multiple_of(r.align) {
             return Err(HostError::Io(format!("region {} was mapped at {:p}, which is not aligned to {}", r.id, base.as_ptr(), r.align)));
         }
-        regions.push(MappedRegion { id: r.id, kind: r.kind, base, len, writable: r.writable, _map: map });
+        regions.push(MappedRegion { id: r.id, kind: r.kind, len, writable: r.writable, memory: Memory::Host { base, _map: map } });
     }
-    // Status lists the programs that mapped a model, by the time each first did. A
-    // program that cannot register still has its memory.
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open(state::clients_dir(&p.dir, name).join(std::process::id().to_string()));
-    Ok(Mapping { table_hash: m.table_hash, regions })
+    Ok(Mapping { table_hash: m.table_hash, regions, _lease: lease })
 }
 
 /// Purpose: This function stops the process and waits until it has gone.

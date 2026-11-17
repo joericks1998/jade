@@ -393,3 +393,84 @@ pub(crate) fn alive(
     let rc = unsafe { libc::kill(pid, 0) };
     rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
+
+/// Purpose: This function reads when a process started, which tells a process apart from
+/// a later one the system gives the same id.
+///
+/// Inputs:
+/// - `pid`: the process id.
+///
+/// Outputs: the start time in clock ticks since the machine booted, field 22 of
+/// `/proc/<pid>/stat`, or `None` when the process is gone or the system has no `/proc`.
+pub(crate) fn started(
+    pid: u32,
+) -> Option<u64>
+{
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_started(&stat)
+}
+
+/// Purpose: This function finds a process's start time in the text of its
+/// `/proc/<pid>/stat`.
+///
+/// Inputs:
+/// - `stat`: the file's text.
+///
+/// Outputs: the start time, or `None` for text not in that form.
+fn parse_started(
+    stat: &str,
+) -> Option<u64>
+{
+    // The second field is the program's name in parentheses, which may itself hold
+    // spaces and parentheses, so the fields are counted from the last `)`. The field
+    // after it is the third, so the 22nd is the 20th after it.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Purpose: This function says whether the process a lease names still runs.
+///
+/// Inputs:
+/// - `pid`: the process id.
+/// - `started`: when the process started, as its lease gives it, or `None` when the lease
+///   does not say.
+///
+/// Outputs: `true` when a process with that id runs and, when the lease gives a start
+/// time this system can check, started at that time.
+pub(crate) fn holder_alive(
+    pid: u32,
+    started: Option<u64>,
+) -> bool
+{
+    if !alive(pid) {
+        return false;
+    }
+    match (started, self::started(pid)) {
+        (Some(leased), Some(now)) => leased == now,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_time_is_read_past_a_name_with_spaces()
+    {
+        let stat = "4242 (a (weird) name) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 12345678 300";
+        assert_eq!(parse_started(stat), Some(987654));
+        assert_eq!(parse_started("4242 (short) S 1"), None);
+    }
+
+    #[test]
+    fn this_process_is_alive_under_its_own_start_time()
+    {
+        let me = std::process::id();
+        let t = started(me);
+        assert!(holder_alive(me, t));
+        if let Some(t) = t {
+            assert!(!holder_alive(me, Some(t + 1)), "another start time is another process");
+        }
+    }
+}

@@ -22,6 +22,8 @@ use crate::target::{RegionKind, Target};
 #[cfg(all(feature = "host", unix))]
 mod client;
 #[cfg(all(feature = "host", unix))]
+mod cuda;
+#[cfg(all(feature = "host", unix))]
 mod memory;
 #[cfg(all(feature = "host", unix))]
 mod server;
@@ -364,6 +366,15 @@ pub enum Open {
         /// The object's name, such as `/dovata.1f2e3d4c5b6a7980.2`.
         name: String,
     },
+    /// VRAM the process allocated with `cuMemAlloc` and shares by IPC handle, opened
+    /// with `cuIpcOpenMemHandle` on the same GPU.
+    Vram {
+        /// The GPU's PCI bus id, such as `0000:01:00.0`, which names the same GPU in
+        /// every process; `cuDeviceGetByPCIBusId` finds it.
+        device: String,
+        /// The 64-byte IPC handle, as 128 lowercase hex digits.
+        handle: String,
+    },
 }
 
 impl HeldModel {
@@ -372,7 +383,7 @@ impl HeldModel {
     /// Inputs:
     /// - `region`: the region.
     ///
-    /// Outputs: the file, or `None` for a region in shared memory.
+    /// Outputs: the file, or `None` for a region in shared memory or VRAM.
     pub fn file_of(
         &self,
         region: &HeldRegion,
@@ -380,7 +391,7 @@ impl HeldModel {
     {
         match region.open {
             Open::File { part } => self.files.get(part),
-            Open::Shared { .. } => None,
+            Open::Shared { .. } | Open::Vram { .. } => None,
         }
     }
 }
@@ -423,15 +434,15 @@ impl Status {
 }
 
 impl ModelStatus {
-    /// Purpose: This function adds up the memory the model holds: every part file once,
-    /// and every allocated region.
+    /// Purpose: This function adds up the memory the model holds: every part file it
+    /// maps once, and every allocated region.
     ///
     /// Inputs: none.
     ///
     /// Outputs: the total in bytes.
     pub fn bytes(&self) -> u64
     {
-        self.files.iter().map(|f| f.bytes).sum::<u64>() + self.allocated().map(|r| r.bytes).sum::<u64>()
+        self.mapped_files().map(|f| f.bytes).sum::<u64>() + self.allocated().map(|r| r.bytes).sum::<u64>()
     }
 
     /// Purpose: This function adds up the memory the model holds that is in physical
@@ -442,7 +453,19 @@ impl ModelStatus {
     /// Outputs: the total in bytes.
     pub fn resident_bytes(&self) -> u64
     {
-        self.files.iter().map(|f| f.resident_bytes).sum::<u64>() + self.allocated().map(|r| r.resident_bytes).sum::<u64>()
+        self.mapped_files().map(|f| f.resident_bytes).sum::<u64>() + self.allocated().map(|r| r.resident_bytes).sum::<u64>()
+    }
+
+    /// Purpose: This function lists the part files the model's memory maps. A model held
+    /// in VRAM maps none: its weights were copied out of them.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the files, or none when no region is a window of a file.
+    pub fn mapped_files(&self) -> impl Iterator<Item = &FileUse>
+    {
+        let mapped = self.regions.iter().any(|r| r.kind == RegionKind::Mmap);
+        self.files.iter().filter(move |_| mapped)
     }
 
     /// Purpose: This function lists the regions the process allocated for the model,
@@ -459,14 +482,19 @@ impl ModelStatus {
 
 /// Purpose: This struct holds a hosted model's memory, mapped into this program. Each
 /// region is mapped where the plan's offsets expect it, and stays mapped until the
-/// [`Mapping`] is dropped, even if the dovata process stops.
+/// [`Mapping`] is dropped. Shared memory and files stay mapped even if the dovata process
+/// stops; VRAM stays only while the process runs.
 #[cfg(all(feature = "host", unix))]
 #[derive(Debug)]
 pub struct Mapping {
     /// The plan's table hash, checked against the one the program asked for.
     table_hash: String,
-    /// One per region, in id order.
+    /// One per region, in id order. Declared before `_lease` so every region is closed
+    /// before the lease that tells dovata this program holds them goes.
     regions: Vec<MappedRegion>,
+    /// This mapping's lease on the model, in its clients directory, removed when the
+    /// mapping is dropped.
+    _lease: Option<client::Lease>,
 }
 
 /// Purpose: This struct holds one region of a hosted model, mapped into this program.
@@ -477,19 +505,33 @@ pub struct MappedRegion {
     id: u16,
     /// The kind of memory.
     kind: RegionKind,
-    /// The region's base: where offset 0 of the plan's entries for it is.
-    base: NonNull<u8>,
     /// Its size in bytes, as the plan gives it.
     len: usize,
     /// Whether this program may write it: allocated regions yes, weights never.
     writable: bool,
-    /// The mapping the base points into, unmapped when this is dropped.
-    _map: memory::Map,
+    /// The memory, closed when this is dropped.
+    memory: Memory,
+}
+
+/// Purpose: This enum lists the ways a region can be open in this program.
+#[cfg(all(feature = "host", unix))]
+#[derive(Debug)]
+enum Memory {
+    /// A file or shared memory object, mapped into this program.
+    Host {
+        /// The region's base: where offset 0 of the plan's entries for it is.
+        base: NonNull<u8>,
+        /// The mapping the base points into, unmapped when this is dropped.
+        _map: memory::Map,
+    },
+    /// VRAM the dovata process shares, opened by its IPC handle.
+    Device(cuda::Imported),
 }
 
 // SAFETY: a `MappedRegion` owns its mapping and hands out only raw pointers into it, so
 // moving it to another thread, or reading its fields from several, cannot by itself
-// cause a data race. What a program does through the pointers is its own to order.
+// cause a data race. What a program does through the pointers is its own to order. VRAM
+// is reached only through driver calls, which any thread may make.
 #[cfg(all(feature = "host", unix))]
 unsafe impl Send for MappedRegion {}
 // SAFETY: as for `Send` above.
@@ -585,24 +627,47 @@ impl MappedRegion {
         self.writable
     }
 
-    /// Purpose: This function gives the region's base address, for reading.
+    /// Purpose: This function gives the region's base address in this program's memory,
+    /// for reading.
     ///
     /// Inputs: none.
     ///
-    /// Outputs: the base. An entry's bytes start at the base plus its offset.
-    pub fn as_ptr(&self) -> *const u8
+    /// Outputs: the base, or `None` for VRAM, whose address is [`MappedRegion::device_ptr`].
+    /// An entry's bytes start at the base plus its offset.
+    pub fn as_ptr(&self) -> Option<*const u8>
     {
-        self.base.as_ptr()
+        match &self.memory {
+            Memory::Host { base, .. } => Some(base.as_ptr().cast_const()),
+            Memory::Device(_) => None,
+        }
     }
 
-    /// Purpose: This function gives the region's base address, for writing.
+    /// Purpose: This function gives the region's base address in this program's memory,
+    /// for writing.
     ///
     /// Inputs: none.
     ///
-    /// Outputs: the base, or `None` for weights, which are mapped read-only.
+    /// Outputs: the base, or `None` for weights, which are mapped read-only, and for VRAM.
     pub fn as_mut_ptr(&self) -> Option<*mut u8>
     {
-        self.writable.then_some(self.base.as_ptr())
+        match &self.memory {
+            Memory::Host { base, .. } if self.writable => Some(base.as_ptr()),
+            _ => None,
+        }
+    }
+
+    /// Purpose: This function gives the region's base as a CUDA device address in this
+    /// program, which a kernel binds.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the address, or `None` for a region in this program's own memory.
+    pub fn device_ptr(&self) -> Option<u64>
+    {
+        match &self.memory {
+            Memory::Device(d) => Some(d.device_ptr()),
+            Memory::Host { .. } => None,
+        }
     }
 
     /// Purpose: This function copies bytes out of the region.
@@ -611,7 +676,8 @@ impl MappedRegion {
     /// - `offset`: where to start, in bytes from the base.
     /// - `len`: how many bytes.
     ///
-    /// Outputs: the bytes, or `None` when the range runs past the region's end.
+    /// Outputs: the bytes, or `None` when the range runs past the region's end or the
+    /// GPU's driver refuses the copy.
     pub fn read(
         &self,
         offset: usize,
@@ -619,17 +685,28 @@ impl MappedRegion {
     ) -> Option<Vec<u8>>
     {
         let end = offset.checked_add(len).filter(|e| *e <= self.len)?;
-        // Byte by byte, as relaxed atomics: another thread or process may write an
-        // allocated region at the same time, and a plain copy racing a write is undefined
-        // behavior. A relaxed byte load also works on read-only memory such as weights.
-        let out = (offset..end)
-            .map(|i| {
-                // SAFETY: `i` lies inside the region, checked above, and the region stays
-                // mapped while `self` lives. Every access these methods make is atomic.
-                unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(i)) }.load(Ordering::Relaxed)
-            })
-            .collect();
-        Some(out)
+        match &self.memory {
+            Memory::Host { base, .. } => {
+                // Byte by byte, as relaxed atomics: another thread or process may write an
+                // allocated region at the same time, and a plain copy racing a write is
+                // undefined behavior. A relaxed byte load also works on read-only memory
+                // such as weights.
+                let out = (offset..end)
+                    .map(|i| {
+                        // SAFETY: `i` lies inside the region, checked above, and the region
+                        // stays mapped while `self` lives. Every access these methods make
+                        // is atomic.
+                        unsafe { AtomicU8::from_ptr(base.as_ptr().add(i)) }.load(Ordering::Relaxed)
+                    })
+                    .collect();
+                Some(out)
+            }
+            Memory::Device(d) => {
+                let mut out = vec![0u8; len];
+                d.read(offset as u64, &mut out).ok()?;
+                Some(out)
+            }
+        }
     }
 
     /// Purpose: This function copies bytes into the region.
@@ -638,8 +715,8 @@ impl MappedRegion {
     /// - `offset`: where to start, in bytes from the base.
     /// - `bytes`: the bytes to write.
     ///
-    /// Outputs: `true` when written; `false` for a read-only region or a range that
-    /// runs past the region's end.
+    /// Outputs: `true` when written; `false` for a read-only region, a range that runs
+    /// past the region's end, or a copy the GPU's driver refuses.
     pub fn write(
         &self,
         offset: usize,
@@ -650,13 +727,18 @@ impl MappedRegion {
         if !self.writable || !fits {
             return false;
         }
-        for (i, b) in bytes.iter().enumerate() {
-            // SAFETY: the byte lies inside the region, checked above, and the region is a
-            // shared read-write mapping that stays mapped while `self` lives. As in
-            // `read`, every access is a relaxed atomic.
-            unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(offset + i)) }.store(*b, Ordering::Relaxed);
+        match &self.memory {
+            Memory::Host { base, .. } => {
+                for (i, b) in bytes.iter().enumerate() {
+                    // SAFETY: the byte lies inside the region, checked above, and the
+                    // region is a shared read-write mapping that stays mapped while `self`
+                    // lives. As in `read`, every access is a relaxed atomic.
+                    unsafe { AtomicU8::from_ptr(base.as_ptr().add(offset + i)) }.store(*b, Ordering::Relaxed);
+                }
+                true
+            }
+            Memory::Device(d) => d.write(offset as u64, bytes).is_ok(),
         }
-        true
     }
 }
 
@@ -675,7 +757,8 @@ pub enum HostError {
     AlreadyRunning(u32),
     /// The model cannot be fetched, opened, laid out or planned.
     Model(String),
-    /// The plan needs memory dovata cannot hold yet, such as CUDA's VRAM.
+    /// The plan needs memory dovata cannot hold, such as VRAM on a machine without
+    /// NVIDIA's driver.
     Unsupported(String),
     /// The dovata program could not be started.
     Start(String),
@@ -887,7 +970,7 @@ impl Process {
 
     /// Purpose: This function maps one model's memory into this program, every region
     /// where the plan's offsets expect it, opening each file and shared memory object by
-    /// the name the model's record gives.
+    /// the name the model's record gives, and each VRAM region by its IPC handle.
     ///
     /// Inputs:
     /// - `name`: the model's name in the process.
@@ -895,7 +978,9 @@ impl Process {
     ///   different one is refused, since the offsets would then be wrong.
     ///
     /// Outputs: the [`Mapping`], or a [`HostError`] such as a different table hash, a
-    /// model that is still loading, or a model file changed on disk.
+    /// model that is still loading, or a model file changed on disk. VRAM cannot be
+    /// opened by the dovata process itself, so a program running the process on one of
+    /// its own threads cannot map a model held in VRAM.
     #[cfg(all(feature = "host", unix))]
     pub fn map(
         &self,

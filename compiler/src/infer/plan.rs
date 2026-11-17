@@ -314,6 +314,16 @@ fn regions(held: &HeldModel, plan: &Plan) -> Result<Vec<RegionOpen>, String> {
                 modified_sec: 0,
                 modified_nsec: 0,
             },
+            // dovata holds the model on an NVIDIA GPU, and the kernels for one come
+            // later, per design/v2-gpu-targets.md.
+            Open::Vram { .. } => {
+                return Err(format!(
+                    "dovata holds {} in VRAM on an NVIDIA GPU, and jade runs models on Apple's \
+                     GPU only so far; add the model to dovata with --cpu to hold it in host \
+                     memory",
+                    held.name
+                ));
+            }
         };
         out.push(open);
     }

@@ -1,7 +1,7 @@
 # cli: the `dovata` command line
 
 `dovata` is the package's command-line program. It has four groups of commands:
-`dovata start`, `add`, `remove`, `status` and `kill` run the dovata process and the
+`dovata start`, `add`, `remove`, `status`, `check` and `kill` run the dovata process and the
 models in it through [`src/host/`](../host/README.md), `dovata machine` reports the current machine's memory
 and GPUs through [`src/machine/`](../machine/README.md), `dovata plan` places a
 model's tensors in memory through [`src/memplan/`](../memplan/README.md), and
@@ -12,13 +12,14 @@ against the tag it builds. `gguf-inspect` can join it later as
 `dovata inspect`, so dovata has one program with subcommands instead of one program per
 job.
 
-## `dovata start`, `add`, `remove`, `status` and `kill`
+## `dovata start`, `add`, `remove`, `status`, `check` and `kill`
 
 ```text
 dovata start [--foreground]
 dovata add <model> [--name NAME] [--cpu] [--json] [model and step options]
 dovata remove <name>
 dovata status [NAME] [--json]
+dovata check <name>
 dovata kill
 ```
 
@@ -60,10 +61,28 @@ holds models on this machine. A model that does not fit beside the ones already 
 refused, and `dovata remove` makes room. `dovata add` with no process running stops
 before downloading anything and says to run `dovata start`.
 
+On a machine with an NVIDIA GPU, a model goes in VRAM unless `--cpu` is given, and its
+regions show as `vram`. Its memory line counts the regions alone, since the file was
+read once to copy the weights in.
+
 `dovata status` shows the process and every model in it, each with its regions' resident
 bytes read again; with a name, that model alone. `--json` prints the same as JSON, the
 form a program reads. `dovata remove` takes one model out; programs that mapped it keep
-their mappings. `dovata kill` stops the process with every model in it.
+their mappings, and a model in VRAM keeps its memory until they let go. `dovata kill`
+stops the process with every model in it, and refuses while a running program holds
+VRAM, naming the programs; SIGTERM stops it anyway.
+
+`dovata check` maps a model from its own process, the way a program does, reads every
+weight back and compares each byte with the model's file. For a model in VRAM it opens
+each region by its IPC handle, so a check that passes means a program sees the right
+weights. On a Mac, where the weights are the mapped file, a debug build prints:
+
+```text
+$ dovata check qwen3-0.6b
+qwen3-0.6b: every weight matches its file, 310 tensors and 372.7 MiB, read back from mmap in 7.7 s
+```
+
+On an NVIDIA machine the line says `read back from vram`.
 
 `dovata start --foreground` runs the process in the terminal instead, with its log on
 standard error, until Ctrl-C or `dovata kill` stops it. `dovata host` is the process
@@ -272,8 +291,8 @@ read, exits with 1.
 - `plan.rs` is `dovata plan`: argument parsing, getting and quantizing the model,
   finding its tokenizer, building the target, and the plan's summary. `dovata add`
   reuses its parsing, its model download and its tokenizer search.
-- `host.rs` is `dovata start`, `add`, `remove`, `status`, `kill` and `host`: their
-  parsing, the status text, and the lines `machine usage` and `watch` show for the
+- `host.rs` is `dovata start`, `add`, `remove`, `status`, `check`, `kill` and `host`:
+  their parsing, the status text, the weight comparison `check` makes, and the lines `machine usage` and `watch` show for the
   process.
 - `install.rs` is `dovata setup` and `upgrade`: finding the newest release and its
   checksum, replacing the programs, with sudo when it must, and asking the new program
